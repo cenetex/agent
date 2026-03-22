@@ -262,7 +262,7 @@ async function startReviewTask(
       awsvpcConfiguration: {
         subnets: SUBNETS.split(","),
         securityGroups: [SECURITY_GROUP],
-        assignPublicIp: "DISABLED",
+        assignPublicIp: "ENABLED",
       },
     },
     overrides: {

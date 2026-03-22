@@ -37,20 +37,15 @@ export class GitHubAgentStack extends cdk.Stack {
     );
 
     // -------------------------------------------------------
-    // VPC — private subnets with NAT gateway for isolation
+    // VPC — public subnets for cost efficiency
     // -------------------------------------------------------
     const vpc = new ec2.Vpc(this, "AgentVpc", {
       maxAzs: 2,
-      natGateways: 1, // Single NAT gateway for cost efficiency
+      natGateways: 0, // No NAT gateway — use public subnets instead
       subnetConfiguration: [
         {
           name: "Public",
           subnetType: ec2.SubnetType.PUBLIC,
-          cidrMask: 24,
-        },
-        {
-          name: "Private",
-          subnetType: ec2.SubnetType.PRIVATE_WITH_EGRESS,
           cidrMask: 24,
         },
       ],
@@ -59,29 +54,15 @@ export class GitHubAgentStack extends cdk.Stack {
     const taskSecurityGroup = new ec2.SecurityGroup(this, "TaskSG", {
       vpc,
       description: "Security group for GitHub agent Fargate tasks",
+      allowAllInbound: false,
       allowAllOutbound: false,
     });
 
-    // Explicit outbound rules for HTTPS, HTTP, and DNS
+    // Explicit outbound rules — 443 only for HTTPS
     taskSecurityGroup.addEgressRule(
       ec2.Peer.anyIpv4(),
       ec2.Port.tcp(443),
       "HTTPS outbound for GitHub API, model inference, and AWS APIs"
-    );
-    taskSecurityGroup.addEgressRule(
-      ec2.Peer.anyIpv4(),
-      ec2.Port.tcp(80),
-      "HTTP outbound for package installations and redirects"
-    );
-    taskSecurityGroup.addEgressRule(
-      ec2.Peer.anyIpv4(),
-      ec2.Port.udp(53),
-      "DNS resolution"
-    );
-    taskSecurityGroup.addEgressRule(
-      ec2.Peer.anyIpv4(),
-      ec2.Port.tcp(53),
-      "DNS over TCP"
     );
 
     // -------------------------------------------------------
@@ -91,33 +72,8 @@ export class GitHubAgentStack extends cdk.Stack {
     vpc.addGatewayEndpoint("S3GatewayEndpoint", {
       service: ec2.GatewayVpcEndpointAwsService.S3,
       subnets: [
-        { subnetType: ec2.SubnetType.PRIVATE_WITH_EGRESS },
+        { subnetType: ec2.SubnetType.PUBLIC },
       ],
-    });
-
-    // Interface endpoints for ECS/ECR services
-    vpc.addInterfaceEndpoint("EcrApiEndpoint", {
-      service: ec2.InterfaceVpcEndpointAwsService.ECR,
-      subnets: { subnetType: ec2.SubnetType.PRIVATE_WITH_EGRESS },
-      securityGroups: [taskSecurityGroup],
-    });
-
-    vpc.addInterfaceEndpoint("EcrDockerEndpoint", {
-      service: ec2.InterfaceVpcEndpointAwsService.ECR_DOCKER,
-      subnets: { subnetType: ec2.SubnetType.PRIVATE_WITH_EGRESS },
-      securityGroups: [taskSecurityGroup],
-    });
-
-    vpc.addInterfaceEndpoint("CloudWatchLogsEndpoint", {
-      service: ec2.InterfaceVpcEndpointAwsService.CLOUDWATCH_LOGS,
-      subnets: { subnetType: ec2.SubnetType.PRIVATE_WITH_EGRESS },
-      securityGroups: [taskSecurityGroup],
-    });
-
-    vpc.addInterfaceEndpoint("SsmEndpoint", {
-      service: ec2.InterfaceVpcEndpointAwsService.SSM,
-      subnets: { subnetType: ec2.SubnetType.PRIVATE_WITH_EGRESS },
-      securityGroups: [taskSecurityGroup],
     });
 
     // -------------------------------------------------------
@@ -260,7 +216,7 @@ export class GitHubAgentStack extends cdk.Stack {
         CLUSTER_ARN: cluster.clusterArn,
         TASK_DEFINITION_ARN: taskDefinition.taskDefinitionArn,
         CONTAINER_NAME: containerName,
-        SUBNETS: vpc.privateSubnets.map((s) => s.subnetId).join(","),
+        SUBNETS: vpc.publicSubnets.map((s) => s.subnetId).join(","),
         SECURITY_GROUP: taskSecurityGroup.securityGroupId,
         WEBHOOK_SECRET_PARAM: PARAM_WEBHOOK_SECRET,
         GITHUB_APP_ID_PARAM: PARAM_GITHUB_APP_ID,
@@ -317,7 +273,7 @@ export class GitHubAgentStack extends cdk.Stack {
         CLUSTER_ARN: cluster.clusterArn,
         REVIEW_TASK_DEFINITION_ARN: reviewTaskDefinition.taskDefinitionArn,
         REVIEW_CONTAINER_NAME: reviewContainerName,
-        SUBNETS: vpc.privateSubnets.map((s) => s.subnetId).join(","),
+        SUBNETS: vpc.publicSubnets.map((s) => s.subnetId).join(","),
         SECURITY_GROUP: taskSecurityGroup.securityGroupId,
         GITHUB_APP_ID_PARAM: PARAM_GITHUB_APP_ID,
         GITHUB_APP_PRIVATE_KEY_PARAM: PARAM_GITHUB_APP_PRIVATE_KEY,
