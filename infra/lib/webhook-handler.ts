@@ -181,6 +181,22 @@ async function addIssueComment(
   );
 }
 
+async function getIssueLabels(
+  repoOwner: string,
+  repoName: string,
+  issueNumber: number,
+  token: string
+): Promise<string[]> {
+  const response = await githubRequest(
+    `/repos/${repoOwner}/${repoName}/issues/${issueNumber}`,
+    token,
+    { method: "GET" },
+    [200]
+  );
+  const issueData = await response.json() as any;
+  return issueData.labels.map((label: any) => label.name);
+}
+
 async function getRepoModelConfig(
   repoOwner: string,
   repoName: string,
@@ -581,6 +597,13 @@ export async function handler(event: {
   } catch (error) {
     console.error(`Failed to get installation token for ${repoOwner}/${repoName}:`, error);
     throw new Error(`Failed to mint GitHub App installation token: ${error instanceof Error ? error.message : 'Unknown error'}`);
+  }
+
+  // --- Check for concurrency guard ---
+  const issueLabels = await getIssueLabels(repoOwner, repoName, issueNumber, githubToken);
+  if (issueLabels.includes(SIGNAL_LABEL_RUNNING)) {
+    console.log(`Issue #${issueNumber} already has agent:running, skipping`);
+    return { statusCode: 200, body: "Already running" };
   }
 
   await ensureSignalLabels(repoOwner, repoName, githubToken);
