@@ -956,6 +956,20 @@ export async function handler(event: {
     isPR = false;
     requestedRef = payload.repository.default_branch || "main";
     issueData = payload.issue;
+  } else if (ghEvent === "issues" && payload.action === "assigned") {
+    // Check if the assignee is the agent bot
+    const assignee = payload.assignee?.login;
+    if (assignee !== "cenetex-coding-agent[bot]" && assignee !== "github-agent[bot]") {
+      console.log(`Ignoring assignment to non-agent user: ${assignee}`);
+      return { statusCode: 200, body: "Ignored: not assigned to agent bot" };
+    }
+
+    repoOwner = payload.repository.owner.login;
+    repoName = payload.repository.name;
+    issueNumber = payload.issue.number;
+    isPR = false;
+    requestedRef = payload.repository.default_branch || "main";
+    issueData = payload.issue;
   } else if (ghEvent === "pull_request" && payload.action === "closed" && payload.pull_request.merged) {
     // Handle merged PR: create follow-up issue
     const repoOwner = payload.repository.owner.login;
