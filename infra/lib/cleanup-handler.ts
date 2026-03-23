@@ -21,6 +21,10 @@ import {
   createGitHubAppJWT,
   getInstallationId,
   createInstallationToken,
+  CreditTransaction,
+  createCreditBalancePath,
+  createCreditLedgerPath,
+  getModelCost,
 } from "./types";
 
 const ecs = new ECSClient({});
@@ -385,6 +389,80 @@ export async function handler(): Promise<CleanupStats> {
 
         await updateTaskMetadata(metadata);
         stats.metadataUpdated++;
+
+        // Refund credits for timed-out tasks (no charge for incomplete work)
+        try {
+          const model = (metadata as any).model || "default";
+          const cost = getModelCost(model);
+          const balancePath = createCreditBalancePath(metadata.repo_slug);
+
+          // Read and update credit balance
+          let balance;
+          try {
+            const balanceResult = await s3.send(new GetObjectCommand({
+              Bucket: ARTIFACTS_BUCKET,
+              Key: balancePath,
+            }));
+            if (balanceResult.Body) {
+              balance = JSON.parse(await balanceResult.Body.transformToString());
+            }
+          } catch (error: any) {
+            if (error.name !== "NoSuchKey") throw error;
+          }
+
+          if (balance) {
+            balance.current_balance += cost;
+            balance.total_spent = Math.max(0, balance.total_spent - cost);
+            balance.last_updated = new Date().toISOString();
+            balance.version += 1;
+            await s3.send(new PutObjectCommand({
+              Bucket: ARTIFACTS_BUCKET,
+              Key: balancePath,
+              Body: JSON.stringify(balance, null, 2),
+              ContentType: "application/json",
+            }));
+          }
+
+          // Record refund transaction in ledger
+          const ledgerPath = createCreditLedgerPath(metadata.repo_slug);
+          const transaction: CreditTransaction = {
+            timestamp: new Date().toISOString(),
+            type: "refund",
+            amount: cost,
+            reason: `Task ${metadata.task_id} timed out`,
+            task_id: metadata.task_id,
+            model,
+          };
+          const transactionLine = JSON.stringify(transaction) + "\n";
+          try {
+            const existing = await s3.send(new GetObjectCommand({
+              Bucket: ARTIFACTS_BUCKET,
+              Key: ledgerPath,
+            }));
+            const existingContent = existing.Body ? await existing.Body.transformToString() : "";
+            await s3.send(new PutObjectCommand({
+              Bucket: ARTIFACTS_BUCKET,
+              Key: ledgerPath,
+              Body: existingContent + transactionLine,
+              ContentType: "application/json",
+            }));
+          } catch (error: any) {
+            if (error.name === "NoSuchKey") {
+              await s3.send(new PutObjectCommand({
+                Bucket: ARTIFACTS_BUCKET,
+                Key: ledgerPath,
+                Body: transactionLine,
+                ContentType: "application/json",
+              }));
+            } else {
+              throw error;
+            }
+          }
+          console.log(`Refunded ${cost} credits to ${metadata.repo_slug} for timed-out task: ${metadata.task_id}`);
+        } catch (creditError) {
+          console.error(`Failed to issue credit refund: ${creditError}`);
+          // Don't fail cleanup if credit accounting fails
+        }
 
         // Update GitHub labels and post comment
         try {

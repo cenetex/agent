@@ -13,6 +13,9 @@ import {
   createGitHubAppJWT,
   getInstallationId,
   createInstallationToken,
+  type CreditBalance,
+  createCreditBalancePath,
+  getModelCost,
 } from "./types";
 
 const s3 = new S3Client({});
@@ -27,6 +30,9 @@ interface DigestStats {
   failed: number;
   timed_out: number;
   mergedPRs: Array<{ title: string; number: number; repo: string }>;
+  creditsSpent: number;
+  repoCredits: Array<{ repo: string; balance: number; spent_today: number }>;
+  lowBalanceRepos: Array<{ repo: string; balance: number }>;
   errors: string[];
 }
 
@@ -175,6 +181,9 @@ async function collectTaskMetadata(since: Date): Promise<DigestStats> {
     failed: 0,
     timed_out: 0,
     mergedPRs: [],
+    creditsSpent: 0,
+    repoCredits: [],
+    lowBalanceRepos: [],
     errors: [],
   };
 
@@ -229,6 +238,76 @@ async function collectTaskMetadata(since: Date): Promise<DigestStats> {
   return stats;
 }
 
+async function collectCreditStats(): Promise<{
+  repoCredits: Array<{ repo: string; balance: number; spent_today: number }>;
+  lowBalanceRepos: Array<{ repo: string; balance: number }>;
+  totalSpent: number;
+}> {
+  const result = {
+    repoCredits: [] as Array<{ repo: string; balance: number; spent_today: number }>,
+    lowBalanceRepos: [] as Array<{ repo: string; balance: number }>,
+    totalSpent: 0,
+  };
+
+  try {
+    let continuationToken: string | undefined;
+
+    // Find all credit balance files
+    do {
+      const listResult = await s3.send(new ListObjectsV2Command({
+        Bucket: ARTIFACTS_BUCKET,
+        Prefix: "credits/",
+        ContinuationToken: continuationToken,
+        MaxKeys: 1000,
+      }));
+
+      if (listResult.Contents) {
+        const balanceKeys = listResult.Contents
+          .filter((obj: any) => obj.Key?.endsWith('/balance.json'))
+          .map((obj: any) => obj.Key!);
+
+        for (const balanceKey of balanceKeys) {
+          try {
+            const result_ = await s3.send(new GetObjectCommand({
+              Bucket: ARTIFACTS_BUCKET,
+              Key: balanceKey,
+            }));
+
+            if (!result_.Body) continue;
+
+            const content = await result_.Body.transformToString();
+            const balance = JSON.parse(content) as CreditBalance;
+
+            result.repoCredits.push({
+              repo: balance.repo_slug,
+              balance: balance.current_balance,
+              spent_today: 0, // Would require querying recent ledger entries for accuracy
+            });
+
+            result.totalSpent += balance.total_spent;
+
+            // Track low balance repos (< 10 credits remaining)
+            if (balance.current_balance < 10) {
+              result.lowBalanceRepos.push({
+                repo: balance.repo_slug,
+                balance: balance.current_balance,
+              });
+            }
+          } catch (error) {
+            console.error(`Failed to read credit balance ${balanceKey}:`, error);
+          }
+        }
+      }
+
+      continuationToken = listResult.NextContinuationToken;
+    } while (continuationToken);
+  } catch (error) {
+    console.error(`Failed to collect credit stats: ${error}`);
+  }
+
+  return result;
+}
+
 async function createDigestIssue(
   repoOwner: string,
   repoName: string,
@@ -250,6 +329,13 @@ async function createDigestIssue(
     prSection = "\n**Merged PRs**\nNone\n";
   }
 
+  // Build credit section
+  let creditSection = "\n**Credit Usage**\n";
+  creditSection += `- Total Spent (All Time): ${stats.creditsSpent} credits\n`;
+  if (stats.lowBalanceRepos.length > 0) {
+    creditSection += `- ⚠️ Low Balance Repos: ${stats.lowBalanceRepos.map(r => `${r.repo} (${r.balance}cr)`).join(", ")}\n`;
+  }
+
   const body = `## Agent Activity Summary: ${digestDate}
 
 **Task Outcomes**
@@ -259,6 +345,7 @@ async function createDigestIssue(
 - **Total: ${total}**
 ${total > 0 ? `- **Success Rate: ${successRate}%**` : ""}
 ${prSection}
+${creditSection}
 **Artifact Bucket**
 - Artifacts available at: \`s3://${ARTIFACTS_BUCKET}/\`
 
@@ -303,6 +390,16 @@ export async function handler(): Promise<DigestStats> {
 
     // Collect task metadata from past 24 hours
     const stats = await collectTaskMetadata(since);
+
+    // Collect credit statistics
+    try {
+      const creditStats = await collectCreditStats();
+      stats.creditsSpent = creditStats.totalSpent;
+      stats.repoCredits = creditStats.repoCredits;
+      stats.lowBalanceRepos = creditStats.lowBalanceRepos;
+    } catch (error) {
+      console.error("Failed to collect credit stats:", error);
+    }
 
     // Get merged PRs from all repos
     try {
