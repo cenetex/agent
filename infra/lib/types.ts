@@ -220,6 +220,51 @@ export interface TaskArtifacts {
   created_at: string;
 }
 
+/**
+ * Feedback example for few-shot learning
+ */
+export interface FeedbackExample {
+  /** Unique identifier for this example */
+  example_id: string;
+  /** Repository in owner/name format */
+  repo_slug: string;
+  /** Task type: issue or pull_request */
+  task_type: "issue" | "pull_request";
+  /** Outcome: merged (success) or closed (human rejection) */
+  outcome: "merged" | "closed";
+  /** The task that created this example */
+  task_id: string;
+  /** Original task payload */
+  task_payload: TaskPayload;
+  /** PR diff (truncated to ~5KB for context) */
+  pr_diff?: string;
+  /** Human comments on closed PR (if applicable) */
+  human_comments?: string;
+  /** When the task was created */
+  created_at: string;
+  /** When the outcome occurred (PR merge/close timestamp) */
+  outcome_at: string;
+}
+
+/**
+ * Rolling index of feedback examples for a repository and task type
+ */
+export interface FeedbackExampleIndex {
+  /** Repository in owner/name format */
+  repo_slug: string;
+  /** Task type filter */
+  task_type: "issue" | "pull_request" | "all";
+  /** List of recorded examples with basic metadata */
+  examples: Array<{
+    example_id: string;
+    outcome: "merged" | "closed";
+    created_at: string;
+    outcome_at: string;
+  }>;
+  /** Last updated timestamp */
+  updated_at: string;
+}
+
 export interface TaskResult {
   /** Unique task identifier */
   task_id: string;
@@ -301,6 +346,37 @@ export function createArtifactKeys(artifactPrefix: string) {
     summary: `${artifactPrefix}/summary.md`,
     manifest: `${artifactPrefix}/manifest.json`,
   };
+}
+
+/**
+ * Generates a unique example ID using timestamp and random string
+ */
+export function generateExampleId(): string {
+  const timestamp = Date.now().toString(36);
+  const random = Math.random().toString(36).substring(2, 6);
+  return `ex_${timestamp}_${random}`;
+}
+
+/**
+ * Creates the S3 path for a feedback example
+ */
+export function createFeedbackExamplePath(
+  repoSlug: string,
+  outcome: "merged" | "closed",
+  exampleId: string
+): string {
+  const date = new Date().toISOString().split("T")[0]; // YYYY-MM-DD
+  return `feedback-examples/${repoSlug}/${outcome}/${date}/${exampleId}.json`;
+}
+
+/**
+ * Creates the S3 path for the feedback index
+ */
+export function createFeedbackIndexPath(
+  repoSlug: string,
+  taskType: "issue" | "pull_request"
+): string {
+  return `feedback-examples/${repoSlug}/${taskType}/index.json`;
 }
 
 /**

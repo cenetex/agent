@@ -9,12 +9,13 @@ import {
   GetObjectCommand,
   PutObjectCommand,
   ListObjectsV2Command,
+  DeleteObjectCommand,
 } from "@aws-sdk/client-s3";
 import {
   SSMClient,
   GetParameterCommand,
 } from "@aws-sdk/client-ssm";
-import type { TaskMetadata } from "./types";
+import type { TaskMetadata, FeedbackExampleIndex } from "./types";
 import {
   parseRepoSlug,
   createGitHubAppJWT,
@@ -43,6 +44,7 @@ interface CleanupStats {
   metadataUpdated: number;
   labelsUpdated: number;
   commentsPosted: number;
+  feedbackExamplesArchived: number;
   errors: string[];
 }
 
@@ -250,6 +252,89 @@ async function stopTask(taskArn: string): Promise<boolean> {
   }
 }
 
+async function archiveFeedbackExamples(): Promise<{ archived: number; errors: string[] }> {
+  const result = { archived: 0, errors: [] as string[] };
+
+  try {
+    console.log("Starting feedback example archival process");
+
+    // List all feedback index files in S3
+    const thirtyDaysAgo = new Date();
+    thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
+    const cutoffDate = thirtyDaysAgo.toISOString().split("T")[0]; // YYYY-MM-DD
+
+    let continuationToken: string | undefined;
+
+    do {
+      const listResult = await s3.send(new ListObjectsV2Command({
+        Bucket: ARTIFACTS_BUCKET,
+        Prefix: "feedback-examples/",
+        Delimiter: "/",
+        ContinuationToken: continuationToken,
+        MaxKeys: 1000,
+      }));
+
+      // Process directory entries to find old feedback examples
+      if (listResult.CommonPrefixes) {
+        for (const prefix of listResult.CommonPrefixes) {
+          if (!prefix.Prefix) continue;
+
+          // Example structure: feedback-examples/{repoSlug}/{outcome}/{date}/
+          const parts = prefix.Prefix.split("/").filter(p => p);
+
+          // Skip if it's not the right structure
+          if (parts.length < 3) continue;
+
+          const date = parts[parts.length - 1];
+
+          // Check if this is an old date
+          if (date < cutoffDate) {
+            console.log(`Archiving old feedback examples at ${prefix.Prefix}`);
+
+            // List and delete all objects under this prefix
+            let exContinuation: string | undefined;
+            do {
+              const exResult = await s3.send(new ListObjectsV2Command({
+                Bucket: ARTIFACTS_BUCKET,
+                Prefix: prefix.Prefix,
+                ContinuationToken: exContinuation,
+                MaxKeys: 1000,
+              }));
+
+              if (exResult.Contents) {
+                for (const obj of exResult.Contents) {
+                  try {
+                    await s3.send(new DeleteObjectCommand({
+                      Bucket: ARTIFACTS_BUCKET,
+                      Key: obj.Key,
+                    }));
+                    result.archived++;
+                  } catch (error) {
+                    const errorMsg = `Failed to delete ${obj.Key}: ${error}`;
+                    console.error(errorMsg);
+                    result.errors.push(errorMsg);
+                  }
+                }
+              }
+              exContinuation = exResult.NextContinuationToken;
+            } while (exContinuation);
+          }
+        }
+      }
+
+      continuationToken = listResult.NextContinuationToken;
+    } while (continuationToken);
+
+    console.log(`Feedback example archival completed. Archived ${result.archived} objects`);
+  } catch (error) {
+    const errorMsg = `Feedback archival process failed: ${error}`;
+    console.error(errorMsg);
+    result.errors.push(errorMsg);
+  }
+
+  return result;
+}
+
 export async function handler(): Promise<CleanupStats> {
   console.log("Starting cleanup process for stale agent tasks");
 
@@ -260,6 +345,7 @@ export async function handler(): Promise<CleanupStats> {
     metadataUpdated: 0,
     labelsUpdated: 0,
     commentsPosted: 0,
+    feedbackExamplesArchived: 0,
     errors: [],
   };
 
@@ -349,6 +435,14 @@ The task has been automatically terminated and marked as failed.`;
         console.error(errorMsg);
         stats.errors.push(errorMsg);
       }
+    }
+
+    // Archive old feedback examples (30+ days old)
+    console.log("Running feedback example archival...");
+    const archivalResult = await archiveFeedbackExamples();
+    stats.feedbackExamplesArchived = archivalResult.archived;
+    if (archivalResult.errors.length > 0) {
+      stats.errors.push(...archivalResult.errors);
     }
 
     console.log(`Cleanup completed. Stats:`, JSON.stringify(stats, null, 2));
