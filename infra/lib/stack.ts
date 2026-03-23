@@ -323,6 +323,8 @@ export class GitHubAgentStack extends cdk.Stack {
         CLUSTER_ARN: cluster.clusterArn,
         TASK_DEFINITION_ARN: taskDefinition.taskDefinitionArn,
         ARTIFACTS_BUCKET: artifactsBucket.bucketName,
+        GITHUB_APP_ID_PARAM: PARAM_GITHUB_APP_ID,
+        GITHUB_APP_PRIVATE_KEY_PARAM: PARAM_GITHUB_APP_PRIVATE_KEY,
       },
     });
 
@@ -335,6 +337,13 @@ export class GitHubAgentStack extends cdk.Stack {
           "ecs:ListTasks"
         ],
         resources: ["*"], // ECS tasks don't have predictable ARNs
+      })
+    );
+
+    cleanupFunction.addToRolePolicy(
+      new iam.PolicyStatement({
+        actions: ["ssm:GetParameter"],
+        resources: ssmParamArns,
       })
     );
 
