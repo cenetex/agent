@@ -11,6 +11,8 @@ import {
 import {
   S3Client,
   PutObjectCommand,
+  GetObjectCommand,
+  ListObjectsV2Command,
 } from "@aws-sdk/client-s3";
 import {
   TaskPayload,
@@ -357,6 +359,118 @@ To prevent auto-merge, remove the \`${REVIEW_APPROVED_LABEL}\` label or add the 
   console.log(`Auto-merge scheduled for PR ${prNumber} at ${mergeTime.toISOString()}`);
 }
 
+async function lookupTaskMetadataForPR(
+  repoSlug: string,
+  prNumber: number
+): Promise<TaskMetadata | null> {
+  try {
+    // Search for task metadata that references this PR
+    // Path pattern: tasks/{repoSlug}/**/metadata.json
+    const prefix = `tasks/${repoSlug}/`;
+    const listResult = await s3.send(new ListObjectsV2Command({
+      Bucket: ARTIFACTS_BUCKET,
+      Prefix: prefix,
+      MaxKeys: 1000,
+    }));
+
+    if (!listResult.Contents) {
+      return null;
+    }
+
+    // Search through metadata files for one that matches this PR
+    const metadataKeys = listResult.Contents
+      .filter((obj: any) => obj.Key?.endsWith('/metadata.json'))
+      .map((obj: any) => obj.Key!);
+
+    for (const metadataKey of metadataKeys) {
+      const result = await s3.send(new GetObjectCommand({
+        Bucket: ARTIFACTS_BUCKET,
+        Key: metadataKey,
+      }));
+
+      if (!result.Body) continue;
+
+      try {
+        const content = await result.Body.transformToString() as string;
+        const metadata = JSON.parse(content) as TaskMetadata;
+
+        // Check if this task created the PR we're looking at
+        if (metadata.task_mode === "pull_request" &&
+            metadata.issue_number === prNumber &&
+            metadata.status === "succeeded") {
+          return metadata;
+        }
+      } catch {
+        // Skip malformed metadata files
+        continue;
+      }
+    }
+
+    return null;
+  } catch (error) {
+    console.error(`Failed to lookup task metadata for PR #${prNumber}:`, error);
+    return null;
+  }
+}
+
+async function createFollowUpIssue(
+  repoOwner: string,
+  repoName: string,
+  prNumber: number,
+  prTitle: string,
+  prUrl: string,
+  token: string
+): Promise<string | null> {
+  try {
+    // Determine follow-up issue type based on PR title
+    let followUpTitle: string;
+    let followUpType: "tests" | "documentation" | "review";
+
+    const lowerTitle = prTitle.toLowerCase();
+    if (lowerTitle.includes("test") || lowerTitle.includes("spec")) {
+      followUpType = "documentation";
+      followUpTitle = `Document: ${prTitle}`;
+    } else if (lowerTitle.includes("doc") || lowerTitle.includes("readme")) {
+      followUpType = "review";
+      followUpTitle = `Review implementation: ${prTitle}`;
+    } else {
+      followUpType = "tests";
+      followUpTitle = `Write tests for: ${prTitle}`;
+    }
+
+    const followUpBody = `## Context
+This follow-up issue was automatically created after PR #${prNumber} was merged.
+
+**Original PR:** ${prUrl}
+
+## Task
+Add ${followUpType} for the changes introduced in the merged PR above.
+
+---
+*This issue was auto-created by the agent task chaining system. Add the \`agent\` label if you'd like the agent to handle this follow-up work.*`;
+
+    const response = await githubRequest(
+      `/repos/${repoOwner}/${repoName}/issues`,
+      token,
+      {
+        method: "POST",
+        body: JSON.stringify({
+          title: followUpTitle,
+          body: followUpBody,
+        }),
+      },
+      [201]
+    );
+
+    const issue = await response.json() as any;
+    console.log(`Created follow-up issue #${issue.number} for merged PR #${prNumber}`);
+    return issue.html_url;
+  } catch (error) {
+    console.error(`Failed to create follow-up issue for PR #${prNumber}:`, error);
+    return null;
+  }
+}
+
 async function storeTaskMetadata(
   taskMetadata: TaskMetadata
 ): Promise<void> {
@@ -515,6 +629,73 @@ export async function handler(event: {
     isPR = false;
     requestedRef = payload.repository.default_branch || "main";
     issueData = payload.issue;
+  } else if (ghEvent === "pull_request" && payload.action === "closed" && payload.pull_request.merged) {
+    // Handle merged PR: create follow-up issue
+    const repoOwner = payload.repository.owner.login;
+    const repoName = payload.repository.name;
+    const prNumber = payload.pull_request.number;
+    const prTitle = payload.pull_request.title;
+    const prUrl = payload.pull_request.html_url;
+    const repoSlug = createRepoSlug(repoOwner, repoName);
+
+    console.log(`Handling merged PR #${prNumber}: ${prTitle}`);
+
+    try {
+      // Get GitHub App credentials and mint installation token
+      const [appId, privateKey] = await Promise.all([
+        getParameter(GITHUB_APP_ID_PARAM),
+        getParameter(GITHUB_APP_PRIVATE_KEY_PARAM),
+      ]);
+
+      const appConfig: GitHubAppConfig = { appId, privateKey };
+      const githubToken = await getInstallationToken(repoOwner, repoName, appConfig);
+
+      // Look up if this PR was created by an agent task
+      const taskMetadata = await lookupTaskMetadataForPR(repoSlug, prNumber);
+
+      if (taskMetadata) {
+        console.log(`PR #${prNumber} was created by agent task ${taskMetadata.task_id}, creating follow-up issue`);
+
+        // Create follow-up issue
+        const followUpUrl = await createFollowUpIssue(
+          repoOwner,
+          repoName,
+          prNumber,
+          prTitle,
+          prUrl,
+          githubToken
+        );
+
+        if (followUpUrl) {
+          return {
+            statusCode: 200,
+            body: JSON.stringify({
+              message: "Follow-up issue created",
+              prNumber,
+              followUpUrl
+            }),
+          };
+        }
+      } else {
+        console.log(`PR #${prNumber} was not created by an agent task, skipping follow-up`);
+      }
+
+      return {
+        statusCode: 200,
+        body: JSON.stringify({
+          message: "PR merged (no follow-up needed)",
+          prNumber
+        }),
+      };
+    } catch (error) {
+      console.error(`Failed to handle merged PR #${prNumber}:`, error);
+      return {
+        statusCode: 500,
+        body: JSON.stringify({
+          error: "Failed to handle merged PR"
+        }),
+      };
+    }
   } else if (ghEvent === "pull_request" && payload.action === "labeled") {
     const labelName = payload.label?.name;
 
