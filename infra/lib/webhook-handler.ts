@@ -30,6 +30,11 @@ import {
   type TaskMetadata,
   type FeedbackExample,
   type FeedbackExampleIndex,
+  type CreditBalance,
+  type CreditTransaction,
+  createCreditBalancePath,
+  createCreditLedgerPath,
+  getModelCost,
 } from "./types";
 
 const ecs = new ECSClient({});
@@ -633,6 +638,200 @@ function formatLaunchFailure(error: unknown): string {
   return "Unknown launch error";
 }
 
+/**
+ * Initializes credit balance for a repository if it doesn't exist
+ * Default: 100 free credits for new repos
+ */
+async function initializeCreditBalance(repoSlug: string): Promise<CreditBalance> {
+  const balance: CreditBalance = {
+    repo_slug: repoSlug,
+    current_balance: 100, // 100 free credits on signup
+    total_purchased: 0,
+    total_spent: 0,
+    last_updated: new Date().toISOString(),
+    version: 0,
+  };
+
+  const balancePath = createCreditBalancePath(repoSlug);
+  await s3.send(
+    new PutObjectCommand({
+      Bucket: ARTIFACTS_BUCKET,
+      Key: balancePath,
+      Body: JSON.stringify(balance, null, 2),
+      ContentType: "application/json",
+    })
+  );
+
+  console.log(`Initialized credit balance for ${repoSlug}: 100 credits`);
+  return balance;
+}
+
+/**
+ * Fetches the current credit balance for a repository
+ * Returns null if balance file doesn't exist
+ */
+async function getCreditBalance(repoSlug: string): Promise<CreditBalance | null> {
+  try {
+    const balancePath = createCreditBalancePath(repoSlug);
+    const result = await s3.send(
+      new GetObjectCommand({
+        Bucket: ARTIFACTS_BUCKET,
+        Key: balancePath,
+      })
+    );
+
+    if (!result.Body) return null;
+
+    const content = await result.Body.transformToString();
+    return JSON.parse(content) as CreditBalance;
+  } catch (error: any) {
+    if (error.name === "NoSuchKey") {
+      return null;
+    }
+    throw error;
+  }
+}
+
+/**
+ * Records a credit transaction in the ledger
+ */
+async function recordTransaction(
+  repoSlug: string,
+  transaction: CreditTransaction
+): Promise<void> {
+  const ledgerPath = createCreditLedgerPath(repoSlug);
+  const transactionLine = JSON.stringify(transaction) + "\n";
+
+  try {
+    // Try to append if ledger exists
+    const existing = await s3.send(
+      new GetObjectCommand({
+        Bucket: ARTIFACTS_BUCKET,
+        Key: ledgerPath,
+      })
+    );
+
+    let existingContent = "";
+    if (existing.Body) {
+      existingContent = await existing.Body.transformToString();
+    }
+
+    const newContent = existingContent + transactionLine;
+    await s3.send(
+      new PutObjectCommand({
+        Bucket: ARTIFACTS_BUCKET,
+        Key: ledgerPath,
+        Body: newContent,
+        ContentType: "application/json",
+      })
+    );
+  } catch (error: any) {
+    if (error.name === "NoSuchKey") {
+      // Ledger doesn't exist, create new one
+      await s3.send(
+        new PutObjectCommand({
+          Bucket: ARTIFACTS_BUCKET,
+          Key: ledgerPath,
+          Body: transactionLine,
+          ContentType: "application/json",
+        })
+      );
+    } else {
+      throw error;
+    }
+  }
+
+  console.log(
+    `Recorded credit transaction: ${transaction.type} ${transaction.amount} credits (${transaction.reason})`
+  );
+}
+
+/**
+ * Deducts credits from a repository balance after task completion
+ */
+async function deductCredits(
+  repoSlug: string,
+  taskId: string,
+  model: string,
+  status: "succeeded" | "failed" | "timed_out"
+): Promise<number> {
+  // Don't charge for failed/timed-out tasks
+  if (status !== "succeeded") {
+    const refundTransaction: CreditTransaction = {
+      timestamp: new Date().toISOString(),
+      type: "refund",
+      amount: 0,
+      reason: `Task ${taskId} did not complete successfully (status: ${status})`,
+      task_id: taskId,
+      model,
+    };
+    await recordTransaction(repoSlug, refundTransaction);
+    return 0;
+  }
+
+  const cost = getModelCost(model);
+  let balance = await getCreditBalance(repoSlug);
+
+  if (!balance) {
+    console.log(`Credit balance not found for ${repoSlug}, creating new balance`);
+    balance = await initializeCreditBalance(repoSlug);
+  }
+
+  balance.current_balance -= cost;
+  balance.total_spent += cost;
+  balance.last_updated = new Date().toISOString();
+  balance.version += 1;
+
+  // Save updated balance
+  const balancePath = createCreditBalancePath(repoSlug);
+  await s3.send(
+    new PutObjectCommand({
+      Bucket: ARTIFACTS_BUCKET,
+      Key: balancePath,
+      Body: JSON.stringify(balance, null, 2),
+      ContentType: "application/json",
+    })
+  );
+
+  // Record transaction
+  const transaction: CreditTransaction = {
+    timestamp: new Date().toISOString(),
+    type: "debit",
+    amount: cost,
+    reason: `Task ${taskId} completed`,
+    task_id: taskId,
+    model,
+  };
+  await recordTransaction(repoSlug, transaction);
+
+  console.log(
+    `Deducted ${cost} credits from ${repoSlug} for ${model}. New balance: ${balance.current_balance}`
+  );
+  return balance.current_balance;
+}
+
+/**
+ * Checks if a repository has sufficient credits for a task
+ * Initializes balance if it doesn't exist
+ */
+async function checkCreditsAvailable(repoSlug: string, model: string): Promise<boolean> {
+  let balance = await getCreditBalance(repoSlug);
+
+  if (!balance) {
+    console.log(`No credit balance for ${repoSlug}, initializing with free credits`);
+    balance = await initializeCreditBalance(repoSlug);
+  }
+
+  const cost = getModelCost(model);
+  const available = balance.current_balance >= cost;
+
+  console.log(
+    `Credit check for ${repoSlug} (${model}): balance=${balance.current_balance}, required=${cost}, available=${available}`
+  );
+
+  return available;
+}
+
 function verifySignature(
   payload: string,
   signature: string,
@@ -1061,6 +1260,47 @@ export async function handler(event: {
 
   console.log(`Created task ${taskId} with resolved SHA ${resolvedCommitSha}`);
   console.log(`Task payload:`, JSON.stringify(taskPayload, null, 2));
+
+  // --- Check credit balance ---
+  const hasCredits = await checkCreditsAvailable(repoSlug, selectedModel);
+  if (!hasCredits) {
+    const balance = await getCreditBalance(repoSlug);
+    const cost = getModelCost(selectedModel);
+    console.log(`Insufficient credits for task: required=${cost}, available=${balance?.current_balance ?? 0}`);
+
+    // Update GitHub issue with credit error
+    await setSignalLabel(
+      repoOwner,
+      repoName,
+      issueNumber,
+      githubToken,
+      SIGNAL_LABEL_FAILED
+    );
+    await addIssueComment(
+      repoOwner,
+      repoName,
+      issueNumber,
+      githubToken,
+      `❌ **Insufficient credits**
+
+This task requires ${cost} credits to run (model: \`${selectedModel}\`), but your account only has ${balance?.current_balance ?? 0} credits available.
+
+**Current balance:** ${balance?.current_balance ?? 0} credits
+**Cost for this task:** ${cost} credits
+
+To run this task, please purchase more credits. See documentation for details.`
+    );
+
+    return {
+      statusCode: 200,
+      body: JSON.stringify({
+        message: "Task rejected: insufficient credits",
+        taskId,
+        requiredCredits: cost,
+        availableCredits: balance?.current_balance ?? 0,
+      }),
+    };
+  }
 
   try {
     // --- Run Fargate task ---

@@ -21,6 +21,10 @@ import {
   createGitHubAppJWT,
   getInstallationId,
   createInstallationToken,
+  CreditTransaction,
+  createCreditBalancePath,
+  createCreditLedgerPath,
+  getModelCost,
 } from "./types";
 
 const ecs = new ECSClient({});
@@ -385,6 +389,54 @@ export async function handler(): Promise<CleanupStats> {
 
         await updateTaskMetadata(metadata);
         stats.metadataUpdated++;
+
+        // Record a refund transaction for timed-out tasks (no charge for incomplete work)
+        try {
+          const model = (metadata as any).model || "default";
+          const ledgerPath = createCreditLedgerPath(metadata.repo_slug);
+          const transaction: CreditTransaction = {
+            timestamp: new Date().toISOString(),
+            type: "refund",
+            amount: 0,
+            reason: `Task ${metadata.task_id} timed out - no charge applied`,
+            task_id: metadata.task_id,
+            model,
+          };
+          const transactionLine = JSON.stringify(transaction) + "\n";
+
+          try {
+            const existing = await s3.send(new GetObjectCommand({
+              Bucket: ARTIFACTS_BUCKET,
+              Key: ledgerPath,
+            }));
+            let existingContent = "";
+            if (existing.Body) {
+              existingContent = await existing.Body.transformToString();
+            }
+            const newContent = existingContent + transactionLine;
+            await s3.send(new PutObjectCommand({
+              Bucket: ARTIFACTS_BUCKET,
+              Key: ledgerPath,
+              Body: newContent,
+              ContentType: "application/json",
+            }));
+          } catch (error: any) {
+            if (error.name === "NoSuchKey") {
+              await s3.send(new PutObjectCommand({
+                Bucket: ARTIFACTS_BUCKET,
+                Key: ledgerPath,
+                Body: transactionLine,
+                ContentType: "application/json",
+              }));
+            } else {
+              throw error;
+            }
+          }
+          console.log(`Recorded refund transaction for timed-out task: ${metadata.task_id}`);
+        } catch (creditError) {
+          console.error(`Failed to record refund transaction: ${creditError}`);
+          // Don't fail cleanup if credit transaction fails
+        }
 
         // Update GitHub labels and post comment
         try {

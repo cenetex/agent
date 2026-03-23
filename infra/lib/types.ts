@@ -514,3 +514,66 @@ export interface ReviewEnvironment {
   /** Review criteria configuration */
   REVIEW_CRITERIA: string;
 }
+
+/**
+ * Credit system types for billing and revenue
+ */
+
+export interface CreditBalance {
+  /** Repository in owner/name format */
+  repo_slug: string;
+  /** Current available credits (can be negative for debt tracking) */
+  current_balance: number;
+  /** Total credits purchased (cumulative) */
+  total_purchased: number;
+  /** Total credits spent on completed tasks */
+  total_spent: number;
+  /** Last update timestamp */
+  last_updated: string;
+  /** Version for optimistic locking / concurrency control */
+  version: number;
+}
+
+export interface CreditTransaction {
+  /** Transaction timestamp */
+  timestamp: string;
+  /** Transaction type: credit (purchase), debit (task charge), refund (failed task) */
+  type: "credit" | "debit" | "refund";
+  /** Amount of credits (positive for credit/refund, positive for debit amount) */
+  amount: number;
+  /** Human-readable reason */
+  reason: string;
+  /** Task ID if this is a debit/refund transaction */
+  task_id: string | null;
+  /** Model used for task (if applicable) */
+  model?: string;
+}
+
+/**
+ * Cost function: maps model to credit debit amount
+ * Based on observed LLM costs: Haiku ~$0.40, Sonnet ~$1.20, Opus ~$2.00+
+ * Pricing: 1 credit = $0.10, so costs are 10x the dollar amount
+ */
+export function getModelCost(model: string): number {
+  if (model.includes("haiku")) return 4;      // $0.40
+  if (model.includes("sonnet")) return 12;    // $1.20
+  if (model.includes("opus")) return 20;      // $2.00
+  return 12; // Default to sonnet price
+}
+
+/**
+ * Creates the S3 path for a credit balance file
+ */
+export function createCreditBalancePath(repoSlug: string): string {
+  return `credits/${repoSlug}/balance.json`;
+}
+
+/**
+ * Creates the S3 path for a credit transaction ledger
+ * Uses date-based partitioning for easy querying
+ */
+export function createCreditLedgerPath(repoSlug: string, date: Date = new Date()): string {
+  const yyyy = date.getFullYear();
+  const mm = String(date.getMonth() + 1).padStart(2, "0");
+  return `credits/${repoSlug}/ledger/${yyyy}/${mm}/transactions.jsonl`;
+}

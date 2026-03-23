@@ -82,9 +82,42 @@ The API returns 500 errors when users try to delete non-existent resources.
 Fix the delete bug
 ```
 
+## Credit System
+
+The agent uses a credit-based billing system to fund operations:
+
+### Credit Model
+
+Each task deducts credits based on the model used:
+
+| Model | Credits | USD Value |
+|-------|---------|-----------|
+| claude-haiku-4-5 | 4 | $0.40 |
+| claude-sonnet-4-6 | 12 | $1.20 |
+| claude-opus-4-6 | 20 | $2.00 |
+
+### Initial Credits
+
+New repositories receive **100 free credits** to get started (~25 Haiku tasks).
+
+### Tracking Credits
+
+Each repository has a credit balance stored in S3:
+- **Balance file**: `s3://{bucket}/credits/{owner}/{repo}/balance.json`
+- **Transaction ledger**: `s3://{bucket}/credits/{owner}/{repo}/ledger/{YYYY}/{MM}/transactions.jsonl`
+
+### Low Balance Notifications
+
+The daily digest includes warnings when reposit ories fall below 10 credits. Users can purchase additional credits through the payment system (coming soon).
+
+### Failed Tasks
+
+Tasks that fail or time out are not charged. Failed tasks receive a refund transaction in the ledger.
+
 ## Troubleshooting
 
 - **Agent Not Triggering**: Ensure the `agent` label exists in your repository
 - **Webhook Issues**: Check AWS CloudWatch logs for the webhook handler Lambda
 - **Task Failures**: Look at the `agent:failed` status comment for error details
 - **Long Running Tasks**: Agent has a 30-minute timeout for safety
+- **Insufficient Credits**: The `agent:failed` comment will show your current balance and required credits
