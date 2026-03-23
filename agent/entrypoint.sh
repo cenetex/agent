@@ -631,12 +631,24 @@ while [ -z "${RUN_STATUS}" ] && [ "${ATTEMPT}" -lt "${MAX_ATTEMPTS}" ]; do
   MODEL=$(echo "$TASK_PAYLOAD" | jq -r '.model // "anthropic/claude-haiku-4-5"')
   echo "Using model: ${MODEL}"
 
-  claude --dangerously-skip-permissions \
+  # Add 45-minute (2700 second) hard timeout to prevent token expiration race condition
+  # GitHub App tokens expire after 1 hour; this ensures we fail gracefully before that window
+  TIMEOUT_SECONDS=2700
+  timeout ${TIMEOUT_SECONDS} claude --dangerously-skip-permissions \
     --model "${MODEL}" \
     --print \
-    "${MISSION}" 2>&1 | tee "${AGENT_LOG}" || true
+    "${MISSION}" 2>&1 | tee "${AGENT_LOG}" || CLAUDE_EXIT_CODE=$?
 
-  echo "--- Claude Code exit status: ${PIPESTATUS[0]} ---" | tee -a "${AGENT_LOG}"
+  CLAUDE_EXIT_CODE=${CLAUDE_EXIT_CODE:-${PIPESTATUS[0]}}
+
+  # Check if timeout occurred (exit code 124 is the timeout command's exit code)
+  if [ "${CLAUDE_EXIT_CODE}" -eq 124 ]; then
+    echo "ERROR: Claude Code execution exceeded 45-minute timeout" | tee -a "${AGENT_LOG}"
+    echo "This prevents token expiration failures where the final git push/PR creation would fail." | tee -a "${AGENT_LOG}"
+    exit 1
+  fi
+
+  echo "--- Claude Code exit status: ${CLAUDE_EXIT_CODE} ---" | tee -a "${AGENT_LOG}"
 
   # --- Verify outputs ---
   CURRENT_STAGE="verify outputs"
