@@ -522,6 +522,7 @@ Your mission:
 - Post a comment on the PR summarizing what you did using: gh issue comment ${ISSUE_NUMBER} --body '<your comment>'
 - If you need clarification from the author, post a comment asking for it and stop
 - Be concise. Make minimal, focused changes.
+- IMPORTANT: Do not ask for confirmation or approval. Execute immediately.
 
 Note: You are working on commit SHA ${RESOLVED_COMMIT_SHA} which was the head of the PR when this task was created."
 elif [ "${TASK_MODE}" = "planning" ]; then
@@ -542,6 +543,7 @@ Your mission:
 - Post your results as comments on this issue
 - When done with all deliverables, close this issue using: gh issue close ${ISSUE_NUMBER}
 - Be thorough in your analysis and clear in your communications.
+- IMPORTANT: Do not ask for confirmation or approval. Execute immediately.
 
 When you close the issue, the system will detect this and mark your work as complete."
 else
@@ -563,7 +565,9 @@ Your mission:
 - Create a PR that references this issue using: gh pr create --title '<title>' --body 'Fixes #${ISSUE_NUMBER}\n\n<description>'
 - If your task does NOT require code changes (e.g., creating issues, analysis, planning), post your results as a comment and close this issue when done using: gh issue close ${ISSUE_NUMBER}
 - If you need more information to proceed, post a comment asking for clarification using: gh issue comment ${ISSUE_NUMBER} --body '<your question>'
-- Be concise. Make minimal, focused changes. Don't refactor unrelated code."
+- Be concise. Make minimal, focused changes. Don't refactor unrelated code.
+
+IMPORTANT: Do not ask for confirmation or approval. Do not say 'Ready to implement?' or 'Shall I proceed?'. Execute immediately. Create the branch, commit, push, and open the PR."
 fi
 
 # =============================================================
@@ -671,6 +675,7 @@ while [ -z "${RUN_STATUS}" ] && [ "${ATTEMPT}" -lt "${MAX_ATTEMPTS}" ]; do
   TIMEOUT_SECONDS=2700
   timeout ${TIMEOUT_SECONDS} claude --dangerously-skip-permissions \
     --model "${MODEL}" \
+    --effort max \
     --print \
     "${MISSION}" 2>&1 | tee "${AGENT_LOG}" || CLAUDE_EXIT_CODE=$?
 
