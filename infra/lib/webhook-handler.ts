@@ -18,13 +18,18 @@ import {
   TaskPayload,
   IssueMetadata,
   generateTaskId,
+  generateExampleId,
   createRepoSlug,
+  createFeedbackExamplePath,
+  createFeedbackIndexPath,
   getInstallationToken,
   createInitialTaskMetadata,
   createArtifactKeys,
   type TaskEnvironment,
   type GitHubAppConfig,
   type TaskMetadata,
+  type FeedbackExample,
+  type FeedbackExampleIndex,
 } from "./types";
 
 const ecs = new ECSClient({});
@@ -471,6 +476,129 @@ Add ${followUpType} for the changes introduced in the merged PR above.
   }
 }
 
+async function recordFeedbackExample(
+  repoOwner: string,
+  repoName: string,
+  prNumber: number,
+  taskMetadata: TaskMetadata,
+  outcome: "merged" | "closed",
+  token: string
+): Promise<void> {
+  try {
+    const repoSlug = createRepoSlug(repoOwner, repoName);
+    const exampleId = generateExampleId();
+    const now = new Date().toISOString();
+
+    // Fetch PR diff (truncate to 5KB for context)
+    let prDiff: string | undefined;
+    try {
+      const diffResponse = await githubRequest(
+        `/repos/${repoOwner}/${repoName}/pulls/${prNumber}`,
+        token,
+        { headers: { Accept: "application/vnd.github.v3.diff" } },
+        [200]
+      );
+      const diffContent = await diffResponse.text();
+      prDiff = diffContent.substring(0, 5000); // Truncate to 5KB
+      console.log(`Fetched PR diff (${prDiff.length} bytes)`);
+    } catch (error) {
+      console.warn(`Failed to fetch PR diff: ${error}`);
+    }
+
+    // Create feedback example record
+    const feedbackExample: FeedbackExample = {
+      example_id: exampleId,
+      repo_slug: repoSlug,
+      task_type: taskMetadata.task_mode as "issue" | "pull_request",
+      outcome,
+      task_id: taskMetadata.task_id,
+      task_payload: {
+        task_id: taskMetadata.task_id,
+        repo_slug: taskMetadata.repo_slug,
+        requested_ref: taskMetadata.requested_ref,
+        resolved_commit_sha: taskMetadata.resolved_commit_sha,
+        issue_metadata: taskMetadata.issue_metadata,
+        task_mode: taskMetadata.task_mode as "issue" | "pull_request" | "planning",
+        created_at: taskMetadata.created_at,
+      },
+      pr_diff: prDiff,
+      created_at: taskMetadata.created_at,
+      outcome_at: now,
+    };
+
+    // Store feedback example to S3
+    const exampleKey = createFeedbackExamplePath(repoSlug, outcome, exampleId);
+    await s3.send(
+      new PutObjectCommand({
+        Bucket: ARTIFACTS_BUCKET,
+        Key: exampleKey,
+        Body: JSON.stringify(feedbackExample, null, 2),
+        ContentType: "application/json",
+      })
+    );
+    console.log(`Stored feedback example at ${exampleKey}`);
+
+    // Update rolling index
+    const indexKey = createFeedbackIndexPath(
+      repoSlug,
+      taskMetadata.task_mode as "issue" | "pull_request"
+    );
+
+    let index: FeedbackExampleIndex = {
+      repo_slug: repoSlug,
+      task_type: taskMetadata.task_mode as "issue" | "pull_request",
+      examples: [],
+      updated_at: now,
+    };
+
+    // Fetch existing index if it exists
+    try {
+      const indexResult = await s3.send(
+        new GetObjectCommand({
+          Bucket: ARTIFACTS_BUCKET,
+          Key: indexKey,
+        })
+      );
+      if (indexResult.Body) {
+        const indexContent = await indexResult.Body.transformToString();
+        index = JSON.parse(indexContent) as FeedbackExampleIndex;
+      }
+    } catch {
+      // Index doesn't exist yet, use default
+      console.log(`Creating new index at ${indexKey}`);
+    }
+
+    // Add new example to index
+    index.examples.push({
+      example_id: exampleId,
+      outcome,
+      created_at: taskMetadata.created_at,
+      outcome_at: now,
+    });
+
+    // Keep only last 100 examples in index
+    if (index.examples.length > 100) {
+      index.examples = index.examples.slice(-100);
+    }
+
+    index.updated_at = now;
+
+    // Store updated index
+    await s3.send(
+      new PutObjectCommand({
+        Bucket: ARTIFACTS_BUCKET,
+        Key: indexKey,
+        Body: JSON.stringify(index, null, 2),
+        ContentType: "application/json",
+      })
+    );
+    console.log(`Updated feedback index at ${indexKey}`);
+  } catch (error) {
+    console.error(`Failed to record feedback example: ${error}`);
+    // Don't fail the entire handler if feedback recording fails
+  }
+}
+
 async function storeTaskMetadata(
   taskMetadata: TaskMetadata
 ): Promise<void> {
@@ -654,7 +782,17 @@ export async function handler(event: {
       const taskMetadata = await lookupTaskMetadataForPR(repoSlug, prNumber);
 
       if (taskMetadata) {
-        console.log(`PR #${prNumber} was created by agent task ${taskMetadata.task_id}, creating follow-up issue`);
+        console.log(`PR #${prNumber} was created by agent task ${taskMetadata.task_id}, recording feedback and creating follow-up issue`);
+
+        // Record feedback example for this merged PR
+        await recordFeedbackExample(
+          repoOwner,
+          repoName,
+          prNumber,
+          taskMetadata,
+          "merged",
+          githubToken
+        );
 
         // Create follow-up issue
         const followUpUrl = await createFollowUpIssue(
@@ -670,7 +808,7 @@ export async function handler(event: {
           return {
             statusCode: 200,
             body: JSON.stringify({
-              message: "Follow-up issue created",
+              message: "Follow-up issue created and feedback recorded",
               prNumber,
               followUpUrl
             }),
@@ -693,6 +831,69 @@ export async function handler(event: {
         statusCode: 500,
         body: JSON.stringify({
           error: "Failed to handle merged PR"
+        }),
+      };
+    }
+  } else if (ghEvent === "pull_request" && payload.action === "closed" && !payload.pull_request.merged) {
+    // Handle closed PR (not merged): record as feedback example with human comments
+    const repoOwner = payload.repository.owner.login;
+    const repoName = payload.repository.name;
+    const prNumber = payload.pull_request.number;
+    const prTitle = payload.pull_request.title;
+    const repoSlug = createRepoSlug(repoOwner, repoName);
+
+    console.log(`Handling closed PR #${prNumber} (not merged): ${prTitle}`);
+
+    try {
+      // Get GitHub App credentials and mint installation token
+      const [appId, privateKey] = await Promise.all([
+        getParameter(GITHUB_APP_ID_PARAM),
+        getParameter(GITHUB_APP_PRIVATE_KEY_PARAM),
+      ]);
+
+      const appConfig: GitHubAppConfig = { appId, privateKey };
+      const githubToken = await getInstallationToken(repoOwner, repoName, appConfig);
+
+      // Look up if this PR was created by an agent task
+      const taskMetadata = await lookupTaskMetadataForPR(repoSlug, prNumber);
+
+      if (taskMetadata) {
+        console.log(`PR #${prNumber} was created by agent task ${taskMetadata.task_id}, recording as failed example`);
+
+        // Record feedback example with outcome: "closed"
+        await recordFeedbackExample(
+          repoOwner,
+          repoName,
+          prNumber,
+          taskMetadata,
+          "closed",
+          githubToken
+        );
+
+        return {
+          statusCode: 200,
+          body: JSON.stringify({
+            message: "Closed PR feedback recorded",
+            prNumber
+          }),
+        };
+      } else {
+        console.log(`PR #${prNumber} was not created by an agent task, skipping feedback`);
+      }
+
+      return {
+        statusCode: 200,
+        body: JSON.stringify({
+          message: "PR closed (no feedback needed)",
+          prNumber
+        }),
+      };
+    } catch (error) {
+      console.error(`Failed to handle closed PR #${prNumber}:`, error);
+      return {
+        statusCode: 500,
+        body: JSON.stringify({
+          error: "Failed to handle closed PR"
         }),
       };
     }
