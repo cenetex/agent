@@ -10,23 +10,39 @@ import {
   PutObjectCommand,
   ListObjectsV2Command,
 } from "@aws-sdk/client-s3";
+import {
+  SSMClient,
+  GetParameterCommand,
+} from "@aws-sdk/client-ssm";
 import type { TaskMetadata } from "./types";
+import {
+  parseRepoSlug,
+  createGitHubAppJWT,
+  getInstallationId,
+  createInstallationToken,
+} from "./types";
 
 const ecs = new ECSClient({});
 const s3 = new S3Client({});
+const ssm = new SSMClient({});
 
 const CLUSTER_ARN = process.env.CLUSTER_ARN!;
 const TASK_DEFINITION_ARN = process.env.TASK_DEFINITION_ARN!;
 const ARTIFACTS_BUCKET = process.env.ARTIFACTS_BUCKET!;
+const GITHUB_APP_ID_PARAM = process.env.GITHUB_APP_ID_PARAM!;
+const GITHUB_APP_PRIVATE_KEY_PARAM = process.env.GITHUB_APP_PRIVATE_KEY_PARAM!;
 
 // Tasks older than this are considered stale
 const STALE_TASK_THRESHOLD_MINUTES = 60; // 1 hour
+const SIGNAL_LABEL_FAILED = "agent:failed";
 
 interface CleanupStats {
   tasksChecked: number;
   staleTasks: number;
   stoppedTasks: number;
   metadataUpdated: number;
+  labelsUpdated: number;
+  commentsPosted: number;
   errors: string[];
 }
 
@@ -62,6 +78,98 @@ async function updateTaskMetadata(metadata: TaskMetadata): Promise<void> {
       status: metadata.status,
     },
   }));
+}
+
+async function getParameter(name: string): Promise<string> {
+  const resp = await ssm.send(
+    new GetParameterCommand({ Name: name, WithDecryption: true })
+  );
+  return resp.Parameter?.Value ?? "";
+}
+
+async function githubRequest(
+  path: string,
+  token: string,
+  init: RequestInit,
+  expectedStatuses: number[]
+): Promise<Response> {
+  const response = await fetch(`https://api.github.com${path}`, {
+    ...init,
+    headers: {
+      Accept: "application/vnd.github+json",
+      Authorization: `Bearer ${token}`,
+      "User-Agent": "github-agent-cleanup",
+      ...(init.body ? { "Content-Type": "application/json" } : {}),
+      ...(init.headers ?? {}),
+    },
+  });
+
+  if (!expectedStatuses.includes(response.status)) {
+    const responseBody = await response.text();
+    throw new Error(
+      `GitHub API ${init.method ?? "GET"} ${path} failed with ${response.status}: ${responseBody}`
+    );
+  }
+
+  return response;
+}
+
+async function deleteLabelIfPresent(
+  repoOwner: string,
+  repoName: string,
+  issueNumber: number,
+  token: string,
+  label: string
+): Promise<void> {
+  try {
+    await githubRequest(
+      `/repos/${repoOwner}/${repoName}/issues/${issueNumber}/labels/${encodeURIComponent(label)}`,
+      token,
+      { method: "DELETE" },
+      [200, 204, 404]
+    );
+  } catch (error) {
+    console.error(`Failed to delete label ${label}:`, error);
+  }
+}
+
+async function setSignalLabel(
+  repoOwner: string,
+  repoName: string,
+  issueNumber: number,
+  token: string,
+  label: string
+): Promise<void> {
+  // Remove agent:running if present
+  await deleteLabelIfPresent(repoOwner, repoName, issueNumber, token, "agent:running");
+
+  await githubRequest(
+    `/repos/${repoOwner}/${repoName}/issues/${issueNumber}/labels`,
+    token,
+    {
+      method: "POST",
+      body: JSON.stringify({ labels: [label] }),
+    },
+    [200]
+  );
+}
+
+async function addIssueComment(
+  repoOwner: string,
+  repoName: string,
+  issueNumber: number,
+  token: string,
+  body: string
+): Promise<void> {
+  await githubRequest(
+    `/repos/${repoOwner}/${repoName}/issues/${issueNumber}/comments`,
+    token,
+    {
+      method: "POST",
+      body: JSON.stringify({ body }),
+    },
+    [201]
+  );
 }
 
 async function findStaleTaskMetadata(): Promise<TaskMetadata[]> {
@@ -150,10 +258,18 @@ export async function handler(): Promise<CleanupStats> {
     staleTasks: 0,
     stoppedTasks: 0,
     metadataUpdated: 0,
+    labelsUpdated: 0,
+    commentsPosted: 0,
     errors: [],
   };
 
   try {
+    // Fetch GitHub credentials
+    const [appId, privateKey] = await Promise.all([
+      getParameter(GITHUB_APP_ID_PARAM),
+      getParameter(GITHUB_APP_PRIVATE_KEY_PARAM),
+    ]);
+
     // Find stale task metadata
     const staleMetadata = await findStaleTaskMetadata();
     stats.tasksChecked = staleMetadata.length;
@@ -183,6 +299,48 @@ export async function handler(): Promise<CleanupStats> {
 
         await updateTaskMetadata(metadata);
         stats.metadataUpdated++;
+
+        // Update GitHub labels and post comment
+        try {
+          const { owner, name } = parseRepoSlug(metadata.repo_slug);
+
+          // Get fresh installation token for this repo
+          const jwt = createGitHubAppJWT(appId, privateKey);
+          const installationId = await getInstallationId(owner, name, jwt);
+          const tokenResult = await createInstallationToken(installationId, jwt);
+          const githubToken = tokenResult.token;
+
+          // Set label to agent:failed
+          await setSignalLabel(owner, name, metadata.issue_number, githubToken, SIGNAL_LABEL_FAILED);
+          stats.labelsUpdated++;
+
+          // Calculate elapsed time in minutes
+          const elapsedMinutes = Math.round(
+            (new Date(metadata.completed_at!).getTime() - new Date(metadata.created_at).getTime()) / (1000 * 60)
+          );
+
+          // Post timeout comment with S3 artifact link
+          const artifactKey = `${metadata.artifact_prefix}/metadata.json`;
+          const s3Url = `s3://${ARTIFACTS_BUCKET}/${artifactKey}`;
+          const commentBody = `⏱️ **Task Timeout**
+
+This autonomous task timed out after **${elapsedMinutes} minutes**. This was an infrastructure issue, not a code problem.
+
+**Logs:** ${s3Url}
+
+The task has been automatically terminated and marked as failed.`;
+
+          await addIssueComment(owner, name, metadata.issue_number, githubToken, commentBody);
+          stats.commentsPosted++;
+
+          console.log(`Updated GitHub labels and posted comment for task: ${metadata.task_id}`);
+
+        } catch (ghError) {
+          const errorMsg = `Failed to update GitHub labels/comment for task ${metadata.task_id}: ${ghError}`;
+          console.error(errorMsg);
+          stats.errors.push(errorMsg);
+          // Continue processing other tasks even if GitHub update fails
+        }
 
         console.log(`Cleaned up stale task: ${metadata.task_id}`);
 
