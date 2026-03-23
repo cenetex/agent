@@ -181,6 +181,9 @@ async function collectTaskMetadata(since: Date): Promise<DigestStats> {
     failed: 0,
     timed_out: 0,
     mergedPRs: [],
+    creditsSpent: 0,
+    repoCredits: [],
+    lowBalanceRepos: [],
     errors: [],
   };
 

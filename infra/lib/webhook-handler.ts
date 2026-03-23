@@ -1366,6 +1366,14 @@ To run this task, please purchase more credits. See documentation for details.`
     taskMetadata.status = "running";
     await storeTaskMetadata(taskMetadata);
 
+    // --- Deduct credits for this task ---
+    try {
+      await deductCredits(repoSlug, taskId, selectedModel, "succeeded");
+    } catch (creditError) {
+      console.error(`Failed to deduct credits for task ${taskId}: ${creditError}`);
+      // Don't fail task launch if credit accounting fails
+    }
+
     return {
       statusCode: 200,
       body: JSON.stringify({
