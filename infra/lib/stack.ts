@@ -424,6 +424,51 @@ export class GitHubAgentStack extends cdk.Stack {
     digestRule.addTarget(new targets.LambdaFunction(dailyDigestFunction));
 
     // -------------------------------------------------------
+    // QA Trigger Lambda (nightly QA issue creator)
+    // -------------------------------------------------------
+    const qaFunction = new NodejsFunction(this, "QAFunction", {
+      entry: path.join(__dirname, "qa-trigger.ts"),
+      handler: "handler",
+      runtime: lambda.Runtime.NODEJS_20_X,
+      architecture: lambda.Architecture.ARM_64,
+      timeout: cdk.Duration.minutes(5),
+      memorySize: 256,
+      bundling: {
+        minify: true,
+        sourceMap: true,
+        target: "node20",
+        externalModules: [],
+      },
+      environment: {
+        GITHUB_APP_ID_PARAM: PARAM_GITHUB_APP_ID,
+        GITHUB_APP_PRIVATE_KEY_PARAM: PARAM_GITHUB_APP_PRIVATE_KEY,
+      },
+    });
+
+    qaFunction.addToRolePolicy(
+      new iam.PolicyStatement({
+        actions: ["ssm:GetParameter"],
+        resources: ssmParamArns,
+      })
+    );
+
+    // -------------------------------------------------------
+    // EventBridge rule to trigger QA (2am UTC daily)
+    // -------------------------------------------------------
+    const qaRule = new events.Rule(this, "QARule", {
+      description: "Trigger nightly QA check at 2am UTC",
+      schedule: events.Schedule.cron({
+        minute: "0",
+        hour: "2",
+        day: "*",
+        month: "*",
+        year: "*",
+      }),
+    });
+
+    qaRule.addTarget(new targets.LambdaFunction(qaFunction));
+
+    // -------------------------------------------------------
     // API Gateway HTTP API
     // -------------------------------------------------------
     const httpApi = new apigwv2.HttpApi(this, "WebhookApi", {
