@@ -1281,14 +1281,19 @@ export async function handler(event: {
       repoName,
       issueNumber,
       githubToken,
-      `❌ **Insufficient credits**
+      `❌ **Insufficient credits to run this task**
 
-This task requires ${cost} credits to run (model: \`${selectedModel}\`), but your account only has ${balance?.current_balance ?? 0} credits available.
+This task requires ${cost} credits to run (model: \`${selectedModel}\`), but your repository account only has ${balance?.current_balance ?? 0} credits available.
 
-**Current balance:** ${balance?.current_balance ?? 0} credits
-**Cost for this task:** ${cost} credits
+**For this task:**
+- Required: ${cost} credits
+- Available: ${balance?.current_balance ?? 0} credits
+- Shortfall: ${cost - (balance?.current_balance ?? 0)} credits
 
-To run this task, please purchase more credits. See documentation for details.`
+**To proceed:**
+Add the \`agent\` label again after purchasing credits. Credits can be purchased through the billing dashboard.
+
+**Note:** The agent will not launch until sufficient credits are available to prevent wasting container resources.`
     );
 
     return {
