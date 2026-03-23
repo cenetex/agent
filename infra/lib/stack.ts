@@ -382,6 +382,48 @@ export class GitHubAgentStack extends cdk.Stack {
     reviewRule.addTarget(new targets.LambdaFunction(reviewHandler));
 
     // -------------------------------------------------------
+    // Daily Digest Lambda
+    // -------------------------------------------------------
+    const dailyDigestFunction = new NodejsFunction(this, "DailyDigestFunction", {
+      entry: path.join(__dirname, "daily-digest-handler.ts"),
+      handler: "handler",
+      runtime: lambda.Runtime.NODEJS_20_X,
+      architecture: lambda.Architecture.ARM_64,
+      timeout: cdk.Duration.minutes(5),
+      memorySize: 512,
+      environment: {
+        ARTIFACTS_BUCKET: artifactsBucket.bucketName,
+        GITHUB_APP_ID_PARAM: PARAM_GITHUB_APP_ID,
+        GITHUB_APP_PRIVATE_KEY_PARAM: PARAM_GITHUB_APP_PRIVATE_KEY,
+      },
+    });
+
+    dailyDigestFunction.addToRolePolicy(
+      new iam.PolicyStatement({
+        actions: ["ssm:GetParameter"],
+        resources: ssmParamArns,
+      })
+    );
+
+    artifactsBucket.grantRead(dailyDigestFunction);
+
+    // -------------------------------------------------------
+    // EventBridge rule to trigger daily digest (9am UTC)
+    // -------------------------------------------------------
+    const digestRule = new events.Rule(this, "DailyDigestRule", {
+      description: "Trigger daily digest at 9am UTC",
+      schedule: events.Schedule.cron({
+        minute: "0",
+        hour: "9",
+        day: "*",
+        month: "*",
+        year: "*",
+      }),
+    });
+
+    digestRule.addTarget(new targets.LambdaFunction(dailyDigestFunction));
+
+    // -------------------------------------------------------
     // API Gateway HTTP API
     // -------------------------------------------------------
     const httpApi = new apigwv2.HttpApi(this, "WebhookApi", {
