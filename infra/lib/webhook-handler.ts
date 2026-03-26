@@ -364,8 +364,8 @@ To prevent auto-merge, remove the \`${REVIEW_APPROVED_LABEL}\` label or add the 
 
   await addIssueComment(repoOwner, repoName, prNumber, token, messageBody);
 
-  // TODO: In a full implementation, schedule an EventBridge event or SQS message
-  // to trigger the merge after the hold period
+  // The review handler Lambda runs every 15 minutes and will merge approved PRs
+  // after the 1-hour hold period via mergeApprovedPRs()
   console.log(`Auto-merge scheduled for PR ${prNumber} at ${mergeTime.toISOString()}`);
 }
 
