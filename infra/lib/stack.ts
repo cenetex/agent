@@ -423,6 +423,55 @@ export class GitHubAgentStack extends cdk.Stack {
     digestRule.addTarget(new targets.LambdaFunction(dailyDigestFunction));
 
     // -------------------------------------------------------
+    // Release Draft Lambda
+    // -------------------------------------------------------
+    const releaseDraftFunction = new NodejsFunction(this, "ReleaseDraftFunction", {
+      entry: path.join(__dirname, "release-draft-handler.ts"),
+      handler: "handler",
+      runtime: lambda.Runtime.NODEJS_20_X,
+      architecture: lambda.Architecture.ARM_64,
+      timeout: cdk.Duration.minutes(5),
+      memorySize: 512,
+      bundling: {
+        minify: true,
+        sourceMap: true,
+        target: "node20",
+        externalModules: [],
+      },
+      environment: {
+        ARTIFACTS_BUCKET: artifactsBucket.bucketName,
+        GITHUB_APP_ID_PARAM: PARAM_GITHUB_APP_ID,
+        GITHUB_APP_PRIVATE_KEY_PARAM: PARAM_GITHUB_APP_PRIVATE_KEY,
+        MIN_MERGED_PRS_FOR_RELEASE: "5",
+      },
+    });
+
+    releaseDraftFunction.addToRolePolicy(
+      new iam.PolicyStatement({
+        actions: ["ssm:GetParameter"],
+        resources: ssmParamArns,
+      })
+    );
+
+    artifactsBucket.grantRead(releaseDraftFunction);
+
+    // -------------------------------------------------------
+    // EventBridge rule to trigger release draft check (twice daily)
+    // -------------------------------------------------------
+    const releaseDraftRule = new events.Rule(this, "ReleaseDraftRule", {
+      description: "Trigger release draft check at 8am and 6pm UTC",
+      schedule: events.Schedule.cron({
+        minute: "0",
+        hour: "8,18",
+        day: "*",
+        month: "*",
+        year: "*",
+      }),
+    });
+
+    releaseDraftRule.addTarget(new targets.LambdaFunction(releaseDraftFunction));
+
+    // -------------------------------------------------------
     // QA Trigger Lambda (nightly QA issue creator)
     // -------------------------------------------------------
     const qaFunction = new NodejsFunction(this, "QAFunction", {
