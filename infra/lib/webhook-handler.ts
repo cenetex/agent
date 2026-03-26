@@ -43,7 +43,9 @@ const s3 = new S3Client({});
 
 const CLUSTER_ARN = process.env.CLUSTER_ARN!;
 const TASK_DEFINITION_ARN = process.env.TASK_DEFINITION_ARN!;
+const DIAGNOSTIC_TASK_DEFINITION_ARN = process.env.DIAGNOSTIC_TASK_DEFINITION_ARN!;
 const CONTAINER_NAME = process.env.CONTAINER_NAME!;
+const DIAGNOSTIC_CONTAINER_NAME = process.env.DIAGNOSTIC_CONTAINER_NAME!;
 const SUBNETS = process.env.SUBNETS!;
 const SECURITY_GROUP = process.env.SECURITY_GROUP!;
 const WEBHOOK_SECRET_PARAM = process.env.WEBHOOK_SECRET_PARAM!;
@@ -52,6 +54,7 @@ const GITHUB_APP_PRIVATE_KEY_PARAM = process.env.GITHUB_APP_PRIVATE_KEY_PARAM!;
 const OPENROUTER_API_KEY_PARAM = process.env.OPENROUTER_API_KEY_PARAM!;
 const ARTIFACTS_BUCKET = process.env.ARTIFACTS_BUCKET!;
 const TRIGGER_LABEL = "agent";
+const DIAGNOSE_LABEL = "diagnose";
 const SIGNAL_LABEL_RUNNING = "agent:running";
 const SIGNAL_LABEL_WAITING = "agent:waiting";
 const SIGNAL_LABEL_FAILED = "agent:failed";
@@ -899,6 +902,75 @@ async function resolveCommitSha(
   }
 }
 
+function createTaskEnvironmentForDiagnostic(
+  taskPayload: TaskPayload,
+  issueData: any,
+  artifactPrefix: string,
+  githubToken: string,
+  openrouterKey: string
+): Record<string, string> {
+  return {
+    TASK_PAYLOAD: JSON.stringify({
+      ...taskPayload,
+      task_arn: undefined, // Will be filled in after task is created
+    }),
+    GITHUB_TOKEN: githubToken,
+    OPENROUTER_API_KEY: openrouterKey,
+    ARTIFACTS_BUCKET,
+    ARTIFACT_PREFIX: artifactPrefix,
+    TRIGGER_LABEL: DIAGNOSE_LABEL,
+    SIGNAL_LABEL_RUNNING: "diagnose:running",
+    SIGNAL_LABEL_WAITING: "diagnose:waiting",
+    SIGNAL_LABEL_FAILED: "diagnose:failed",
+    SIGNAL_LABEL_SUCCEEDED: "diagnose:succeeded",
+  };
+}
+
+async function launchDiagnosticFargateTask(
+  taskEnvironment: Record<string, string>
+): Promise<void> {
+  const params: RunTaskCommandInput = {
+    cluster: CLUSTER_ARN,
+    taskDefinition: DIAGNOSTIC_TASK_DEFINITION_ARN,
+    launchType: "FARGATE",
+    count: 1,
+    networkConfiguration: {
+      awsvpcConfiguration: {
+        subnets: SUBNETS.split(","),
+        securityGroups: [SECURITY_GROUP],
+        assignPublicIp: "ENABLED",
+      },
+    },
+    overrides: {
+      containerOverrides: [
+        {
+          name: DIAGNOSTIC_CONTAINER_NAME,
+          environment: Object.entries(taskEnvironment).map(([name, value]) => ({
+            name,
+            value,
+          })),
+        },
+      ],
+    },
+  };
+
+  const result = await ecs.send(new RunTaskCommand(params));
+  const taskArn = result.tasks?.[0]?.taskArn;
+
+  if (!taskArn || (result.failures?.length ?? 0) > 0) {
+    const failureDetails =
+      result.failures?.map((failure) => failure.reason ?? failure.arn ?? "unknown failure") ??
+      [];
+    throw new Error(
+      failureDetails.length > 0
+        ? `ECS diagnostic task launch failed: ${failureDetails.join(", ")}`
+        : "ECS diagnostic task launch did not return a task ARN"
+    );
+  }
+
+  console.log(`Started diagnostic Fargate task: ${taskArn}`);
+}
+
 export async function handler(event: {
   headers: Record<string, string | undefined>;
   body?: string;
@@ -945,6 +1017,75 @@ export async function handler(event: {
 
   if (ghEvent === "issues" && payload.action === "labeled") {
     const labelName = payload.label?.name?.toLowerCase();
+
+    // Handle diagnostic label
+    if (labelName === DIAGNOSE_LABEL) {
+      console.log(`Handling diagnostic label on issue #${payload.issue.number}`);
+
+      repoOwner = payload.repository.owner.login;
+      repoName = payload.repository.name;
+      issueNumber = payload.issue.number;
+      isPR = false;
+      requestedRef = payload.repository.default_branch || "main";
+      issueData = payload.issue;
+
+      // Launch diagnostic task
+      try {
+        // Get GitHub App credentials and mint installation token
+        const [appId, privateKey, openrouterKey] = await Promise.all([
+          getParameter(GITHUB_APP_ID_PARAM),
+          getParameter(GITHUB_APP_PRIVATE_KEY_PARAM),
+          getParameter(OPENROUTER_API_KEY_PARAM),
+        ]);
+
+        const appConfig: GitHubAppConfig = { appId, privateKey };
+        const githubToken = await getInstallationToken(repoOwner, repoName, appConfig);
+
+        const taskPayload: TaskPayload = {
+          task_id: generateTaskId(),
+          repo_slug: createRepoSlug(repoOwner, repoName),
+          requested_ref: requestedRef,
+          resolved_commit_sha: payload.repository.default_branch_commit?.sha || "HEAD",
+          task_mode: "diagnostic",
+          model: "anthropic/claude-haiku-4-5",
+          issue_metadata: {
+            number: issueNumber,
+            title: issueData.title || "",
+            body: issueData.body || "",
+            labels: (issueData.labels || []).map((l: any) => l.name),
+            author: issueData.user?.login || "unknown",
+          },
+          created_at: new Date().toISOString(),
+        };
+
+        const artifactPrefix = `tasks/${taskPayload.task_id}`;
+        const env = createTaskEnvironmentForDiagnostic(
+          taskPayload,
+          issueData,
+          artifactPrefix,
+          githubToken,
+          openrouterKey
+        );
+
+        console.log(`Launching diagnostic Fargate task: ${taskPayload.task_id}`);
+        await launchDiagnosticFargateTask(env);
+
+        return {
+          statusCode: 202,
+          body: JSON.stringify({
+            message: "Diagnostic task launched",
+            task_id: taskPayload.task_id,
+          }),
+        };
+      } catch (error) {
+        console.error("Failed to launch diagnostic task:", error);
+        return {
+          statusCode: 500,
+          body: JSON.stringify({ error: "Failed to launch diagnostic task" }),
+        };
+      }
+    }
+
     if (labelName !== TRIGGER_LABEL) {
       console.log(`Ignoring label: ${payload.label?.name}`);
       return { statusCode: 200, body: "Ignored: not the agent label" };

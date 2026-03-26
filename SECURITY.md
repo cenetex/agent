@@ -2,6 +2,47 @@
 
 This document describes the isolation boundary and security controls for the GitHub Agent infrastructure.
 
+## Three-Tier Agent Architecture
+
+The agent system implements a tiered architecture where different agents have different permissions based on their role:
+
+### Tier 1: Coding Agent (label: `agent`)
+
+**Permissions:**
+- GitHub App token (scoped to installation repositories)
+- OpenRouter API key (for Claude model inference)
+- S3 read-write access (for task artifacts)
+
+**Trigger:** Any org member labels an issue or PR with `agent`
+
+**Trust Model:** Processes untrusted issue bodies with prompt injection boundary (defense in depth)
+
+**Risk Profile:** Can push code to branches but cannot merge to main
+
+### Tier 2: Review Agent (label: `review`)
+
+**Permissions:**
+- Same as Tier 1 + Opus model (higher capability)
+- Can approve PRs for auto-merge (with 1-hour hold period before merge)
+
+**Trigger:** Scheduled (every 15 minutes) or manual label
+
+**Trust Model:** Only reads diffs and posts comments; never trusted with hostile input
+
+**Risk Profile:** Can approve PRs but hold period allows human override before merge
+
+### Tier 3: Diagnostic Agent (label: `diagnose`)
+
+**Permissions:**
+- Same as Tier 1 + CloudWatch Logs read-only access (scoped to GitHubAgentStack Lambdas only)
+- Can read Lambda execution logs for debugging
+
+**Trigger:** Manual label only (org member, human-initiated, never automatic)
+
+**Trust Model:** Can read deployment logs to diagnose failures and verify task execution
+
+**Risk Profile:** Logs may contain accidentally leaked secrets (but should not per proper logging practices)
+
 ## Isolation Boundary
 
 The GitHub Agent executes untrusted code in isolated AWS Fargate tasks within a private network environment. The isolation boundary implements defense in depth with network, compute, and identity controls.
@@ -73,6 +114,36 @@ The GitHub Agent executes untrusted code in isolated AWS Fargate tasks within a 
 - ⚠️ Code execution within the repository context (by design)
 - ⚠️ Resource consumption within task limits
 - ⚠️ Outbound network connections within allowed ports
+
+## Security Rationale for Diagnostic Agent
+
+The diagnostic agent implements the following security controls to safely access CloudWatch Logs:
+
+### IAM Policy Scoping
+
+The diagnostic task role can **ONLY** read logs from Lambdas that match the pattern `/aws/lambda/GitHubAgentStack-*`. This is enforced at the IAM policy level (not the application level) and prevents access to:
+- Logs from other services (databases, API gateways, etc.)
+- Logs from other applications or infrastructure
+- Any AWS resources other than CloudWatch Logs read operations
+
+### Threat Model
+
+**What an attacker with issue-creation access could do:**
+- If they achieve org membership, they could label an issue with `diagnose`
+- The diagnostic agent would then run and could read GitHubAgentStack Lambda logs
+- Those logs contain: webhook payloads, task launch metadata, error messages
+
+**What they CANNOT do:**
+- Read logs from other services or AWS resources (IAM policy blocks it)
+- Modify or delete logs (read-only permission)
+- Access to API keys or secrets (these are stored in SSM Parameter Store, not in logs)
+- Run arbitrary AWS CLI commands (task role only has specific CloudWatch Logs permissions)
+
+**Why this is acceptable:**
+- Org members already have AWS console access and could read these logs directly
+- Logs should not contain secrets or credentials by design (these go to SSM)
+- The `diagnose` label is manual (human-initiated), never automatic
+- The IAM policy is the hard security boundary, not the application logic
 
 ## Operational Security
 
