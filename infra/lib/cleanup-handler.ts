@@ -256,6 +256,189 @@ async function stopTask(taskArn: string): Promise<boolean> {
   }
 }
 
+async function lookupTaskMetadataForPR(
+  repoSlug: string,
+  prNumber: number
+): Promise<TaskMetadata | null> {
+  try {
+    // Search for task metadata that references this PR
+    // Path pattern: tasks/{repoSlug}/**/metadata.json
+    const prefix = `tasks/${repoSlug}/`;
+    const listResult = await s3.send(new ListObjectsV2Command({
+      Bucket: ARTIFACTS_BUCKET,
+      Prefix: prefix,
+      MaxKeys: 1000,
+    }));
+
+    if (!listResult.Contents) {
+      return null;
+    }
+
+    // Search through metadata files for one that matches this PR
+    const metadataKeys = listResult.Contents
+      .filter((obj: any) => obj.Key?.endsWith('/metadata.json'))
+      .map((obj: any) => obj.Key!);
+
+    for (const metadataKey of metadataKeys) {
+      const result = await s3.send(new GetObjectCommand({
+        Bucket: ARTIFACTS_BUCKET,
+        Key: metadataKey,
+      }));
+
+      if (!result.Body) continue;
+
+      try {
+        const content = await result.Body.transformToString() as string;
+        const metadata = JSON.parse(content) as TaskMetadata;
+
+        // Check if this task created the PR we're looking at
+        // For conflict detection, we also want to check "running" and "succeeded" states
+        if (metadata.task_mode === "pull_request" &&
+            metadata.issue_number === prNumber) {
+          return metadata;
+        }
+      } catch {
+        // Skip malformed metadata files
+        continue;
+      }
+    }
+
+    return null;
+  } catch (error) {
+    console.error(`Failed to lookup task metadata for PR #${prNumber}:`, error);
+    return null;
+  }
+}
+
+async function checkForMergeConflicts(
+  repoOwner: string,
+  repoName: string,
+  token: string
+): Promise<void> {
+  console.log(`Checking for merge conflicts in ${repoOwner}/${repoName}`);
+
+  try {
+    // Get all open PRs created by the agent bot
+    const response = await githubRequest(
+      `/repos/${repoOwner}/${repoName}/pulls?state=open&per_page=100`,
+      token,
+      { method: "GET" },
+      [200]
+    );
+
+    const prs = await response.json() as any[];
+
+    // Filter for PRs created by the agent bot
+    for (const pr of prs) {
+      const isFromBot = pr.user.login === "cenetex-coding-agent[bot]" ||
+                       pr.user.login.includes("github-agent") ||
+                       pr.user.login.includes("coding-agent");
+
+      if (!isFromBot) continue;
+
+      // Check if PR is in a conflicting state
+      if (pr.mergeable === false && pr.mergeable_state === "conflicting") {
+        console.log(`Found conflicting PR #${pr.number}: ${pr.title}`);
+
+        try {
+          // Close the PR
+          await githubRequest(
+            `/repos/${repoOwner}/${repoName}/pulls/${pr.number}`,
+            token,
+            {
+              method: "PATCH",
+              body: JSON.stringify({ state: "closed" }),
+            },
+            [200]
+          );
+
+          console.log(`Closed conflicting PR #${pr.number}`);
+
+          // Add a comment explaining the conflict
+          await githubRequest(
+            `/repos/${repoOwner}/${repoName}/issues/${pr.number}/comments`,
+            token,
+            {
+              method: "POST",
+              body: JSON.stringify({
+                body: `🔄 **Merge conflict detected**
+
+This PR has merge conflicts and cannot be merged. The PR has been automatically closed.
+
+To resolve this issue:
+1. The original issue will be automatically re-triggered to create a new PR against the updated main branch
+2. Look for a new PR shortly with the same changes
+3. If another PR also tries to merge conflicting changes, it will also be closed and re-triggered
+
+This is an automated process to handle conflicts between parallel agent runs.`
+              }),
+            },
+            [201]
+          );
+
+          console.log(`Added comment to conflicting PR #${pr.number}`);
+
+          // Extract repo slug and look up the original issue to re-trigger it
+          const repoSlug = `${repoOwner}/${repoName}`;
+
+          // Find the task metadata for this PR to get the original issue number
+          const taskMetadata = await lookupTaskMetadataForPR(repoSlug, pr.number);
+
+          if (taskMetadata) {
+            console.log(`Found task metadata for PR #${pr.number}, re-triggering issue #${taskMetadata.issue_number}`);
+
+            // Remove agent:succeeded label and add agent label to re-trigger
+            await githubRequest(
+              `/repos/${repoOwner}/${repoName}/issues/${taskMetadata.issue_number}/labels/${encodeURIComponent("agent:succeeded")}`,
+              token,
+              { method: "DELETE" },
+              [200, 204, 404]
+            );
+
+            console.log(`Removed agent:succeeded label from issue #${taskMetadata.issue_number}`);
+
+            // Add the agent label to re-trigger
+            await githubRequest(
+              `/repos/${repoOwner}/${repoName}/issues/${taskMetadata.issue_number}/labels`,
+              token,
+              {
+                method: "POST",
+                body: JSON.stringify({ labels: ["agent"] }),
+              },
+              [200]
+            );
+
+            console.log(`Added agent label to issue #${taskMetadata.issue_number} to re-trigger`);
+
+            // Add a comment to the original issue
+            await githubRequest(
+              `/repos/${repoOwner}/${repoName}/issues/${taskMetadata.issue_number}/comments`,
+              token,
+              {
+                method: "POST",
+                body: JSON.stringify({
+                  body: `ℹ️ **Re-triggered due to merge conflict**
+
+PR #${pr.number} had merge conflicts with the main branch and was closed. The agent has been re-triggered to create a new PR with the latest changes from main.`
+                }),
+              },
+              [201]
+            );
+
+            console.log(`Added re-trigger comment to issue #${taskMetadata.issue_number}`);
+          } else {
+            console.log(`Could not find task metadata for PR #${pr.number}, skipping re-trigger`);
+          }
+        } catch (error) {
+          console.error(`Failed to handle conflicting PR #${pr.number}:`, error);
+        }
+      }
+    }
+  } catch (error) {
+    console.error(`Failed to check for merge conflicts:`, error);
+  }
+}
+
 async function archiveFeedbackExamples(): Promise<{ archived: number; errors: string[] }> {
   const result = { archived: 0, errors: [] as string[] };
 
@@ -513,6 +696,38 @@ The task has been automatically terminated and marked as failed.`;
         console.error(errorMsg);
         stats.errors.push(errorMsg);
       }
+    }
+
+    // Check for merge conflicts in agent PRs
+    console.log("Checking for merge conflicts in agent PRs...");
+    try {
+      // Get GitHub credentials for checking PRs
+      const jwt = createGitHubAppJWT(appId, privateKey);
+
+      // Check merge conflicts on known installations
+      // In a full implementation, this would iterate over all app installations
+      const repositoriesWithAgent = [
+        { owner: "cenetex", name: "agent" },
+        { owner: "aws-swarm", name: "aws-swarm" },
+        { owner: "kyro", name: "kyro" },
+        { owner: "ratibot", name: "ratibot" },
+      ];
+
+      for (const repo of repositoriesWithAgent) {
+        try {
+          const installationId = await getInstallationId(repo.owner, repo.name, jwt);
+          const tokenResult = await createInstallationToken(installationId, jwt);
+          const githubToken = tokenResult.token;
+
+          await checkForMergeConflicts(repo.owner, repo.name, githubToken);
+        } catch (error) {
+          console.error(`Failed to check merge conflicts for ${repo.owner}/${repo.name}:`, error);
+          stats.errors.push(`Failed to check merge conflicts for ${repo.owner}/${repo.name}: ${error}`);
+        }
+      }
+    } catch (error) {
+      console.error(`Failed to initialize merge conflict checking:`, error);
+      stats.errors.push(`Failed to initialize merge conflict checking: ${error}`);
     }
 
     // Archive old feedback examples (30+ days old)
