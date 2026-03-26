@@ -54,7 +54,6 @@ export class GitHubAgentStack extends cdk.Stack {
     const taskSecurityGroup = new ec2.SecurityGroup(this, "TaskSG", {
       vpc,
       description: "Security group for GitHub agent Fargate tasks",
-      allowAllInbound: false,
       allowAllOutbound: false,
     });
 
