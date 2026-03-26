@@ -25,6 +25,7 @@ import {
   createCreditBalancePath,
   createCreditLedgerPath,
   getModelCost,
+  type TaskLifecycleState,
 } from "./types";
 
 const ecs = new ECSClient({});
@@ -49,6 +50,8 @@ interface CleanupStats {
   labelsUpdated: number;
   commentsPosted: number;
   feedbackExamplesArchived: number;
+  retries: number;
+  retriesSkipped: number;
   errors: string[];
 }
 
@@ -256,6 +259,163 @@ async function stopTask(taskArn: string): Promise<boolean> {
   }
 }
 
+function classifyFailureAsTransient(errorMessage: string | undefined): boolean {
+  if (!errorMessage) return false;
+
+  const lowerError = errorMessage.toLowerCase();
+
+  // Transient errors that are worth retrying
+  if (lowerError.includes("insufficient credits") || lowerError.includes("credits")) return true;
+  if (lowerError.includes("timeout") || lowerError.includes("60 minute")) return true;
+
+  // Persistent errors that should not be retried
+  if (lowerError.includes("launch failed")) return false;
+  if (lowerError.includes("missing repo")) return false;
+  if (lowerError.includes("auth") || lowerError.includes("authentication")) return false;
+  if (lowerError.includes("permission")) return false;
+  if (lowerError.includes("not found")) return false;
+
+  // Default to persistent (conservative)
+  return false;
+}
+
+async function findFailedTasksForRetry(): Promise<TaskMetadata[]> {
+  const failedMetadata: TaskMetadata[] = [];
+  const twoHoursAgo = new Date(Date.now() - 2 * 60 * 60 * 1000);
+
+  try {
+    let continuationToken: string | undefined;
+
+    do {
+      const listResult = await s3.send(new ListObjectsV2Command({
+        Bucket: ARTIFACTS_BUCKET,
+        Prefix: "tasks/",
+        ContinuationToken: continuationToken,
+        MaxKeys: 1000,
+      }));
+
+      if (listResult.Contents) {
+        // Filter for metadata.json files
+        const metadataKeys = listResult.Contents
+          .filter((obj: any) => obj.Key?.endsWith('/metadata.json'))
+          .map((obj: any) => obj.Key!);
+
+        // Check each metadata file
+        for (const metadataKey of metadataKeys) {
+          const metadata = await getTaskMetadata(metadataKey);
+          if (!metadata) continue;
+
+          // Look for failed tasks that are eligible for retry:
+          // - Status is failed or timed_out
+          // - Created > 2 hours ago (ensuring it's stable failure, not in cleanup window)
+          // - Retry count < 2 (max 2 retries per issue)
+          if ((metadata.status === "failed" || metadata.status === "timed_out") &&
+              metadata.created_at &&
+              new Date(metadata.created_at) < twoHoursAgo &&
+              (metadata.retry_count ?? 0) < 2) {
+            failedMetadata.push(metadata);
+          }
+        }
+      }
+
+      continuationToken = listResult.NextContinuationToken;
+    } while (continuationToken);
+
+  } catch (error) {
+    console.error("Failed to list failed task metadata:", error);
+  }
+
+  return failedMetadata;
+}
+
+async function retryFailedTasks(appId: string, privateKey: string): Promise<{ retries: number; skipped: number }> {
+  const result = { retries: 0, skipped: 0 };
+
+  try {
+    console.log("Starting retry process for failed agent tasks");
+
+    const failedTasks = await findFailedTasksForRetry();
+    console.log(`Found ${failedTasks.length} eligible failed tasks to consider for retry`);
+
+    for (const metadata of failedTasks) {
+      try {
+        // Check if failure is transient
+        const isTransient = classifyFailureAsTransient(metadata.error_message);
+
+        if (!isTransient) {
+          console.log(`Skipping retry for task ${metadata.task_id}: persistent error (${metadata.error_message})`);
+          result.skipped++;
+          continue;
+        }
+
+        console.log(`Retrying task ${metadata.task_id}: transient error (${metadata.error_message})`);
+
+        // Get GitHub token for this repo
+        const { owner, name } = parseRepoSlug(metadata.repo_slug);
+        const jwt = createGitHubAppJWT(appId, privateKey);
+        const installationId = await getInstallationId(owner, name, jwt);
+        const tokenResult = await createInstallationToken(installationId, jwt);
+        const githubToken = tokenResult.token;
+
+        // Update metadata with retry info
+        const retryCount = (metadata.retry_count ?? 0) + 1;
+        metadata.retry_count = retryCount;
+
+        if (!metadata.retry_attempts) {
+          metadata.retry_attempts = [];
+        }
+
+        metadata.retry_attempts.push({
+          timestamp: new Date().toISOString(),
+          reason: metadata.error_message || "Unknown failure",
+          old_status: metadata.status as any,
+        });
+
+        // Reset status to allow re-triggering
+        metadata.status = "requested";
+        metadata.completed_at = undefined;
+
+        await updateTaskMetadata(metadata);
+
+        // Remove agent:failed label and add agent label to trigger re-run
+        await deleteLabelIfPresent(owner, name, metadata.issue_number, githubToken, SIGNAL_LABEL_FAILED);
+        await githubRequest(
+          `/repos/${owner}/${name}/issues/${metadata.issue_number}/labels`,
+          githubToken,
+          {
+            method: "POST",
+            body: JSON.stringify({ labels: ["agent"] }),
+          },
+          [200]
+        );
+
+        // Post comment showing retry attempt
+        const retryComment = `🔄 **Retry attempt ${retryCount}/${2}**
+
+Previous failure: ${metadata.error_message}
+
+Automatic retry triggered by cleanup handler. ${retryCount < 2 ? 'If this retry also fails, one more retry will be attempted.' : 'This is the final retry attempt - manual intervention will be required if this fails.'}`;
+
+        await addIssueComment(owner, name, metadata.issue_number, githubToken, retryComment);
+
+        result.retries++;
+        console.log(`Triggered retry ${retryCount} for task ${metadata.task_id} on issue #${metadata.issue_number}`);
+
+      } catch (error) {
+        const errorMsg = `Failed to retry task ${metadata.task_id}: ${error}`;
+        console.error(errorMsg);
+        // Continue processing other failed tasks even if one retry fails
+      }
+    }
+
+    console.log(`Retry process completed: ${result.retries} retried, ${result.skipped} skipped`);
+  } catch (error) {
+    console.error(`Retry process error: ${error}`);
+  }
+
+  return result;
+}
+
 async function archiveFeedbackExamples(): Promise<{ archived: number; errors: string[] }> {
   const result = { archived: 0, errors: [] as string[] };
 
@@ -350,6 +510,8 @@ export async function handler(): Promise<CleanupStats> {
     labelsUpdated: 0,
     commentsPosted: 0,
     feedbackExamplesArchived: 0,
+    retries: 0,
+    retriesSkipped: 0,
     errors: [],
   };
 
@@ -514,6 +676,12 @@ The task has been automatically terminated and marked as failed.`;
         stats.errors.push(errorMsg);
       }
     }
+
+    // Process automatic retries for failed tasks
+    console.log("Running retry process for failed tasks...");
+    const retryResult = await retryFailedTasks(appId, privateKey);
+    stats.retries = retryResult.retries;
+    stats.retriesSkipped = retryResult.skipped;
 
     // Archive old feedback examples (30+ days old)
     console.log("Running feedback example archival...");

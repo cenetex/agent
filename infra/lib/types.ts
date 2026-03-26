@@ -198,6 +198,14 @@ export interface TaskMetadata {
   pr_url?: string;
   /** Issue/PR metadata at task creation time */
   issue_metadata: IssueMetadata;
+  /** Number of times this task has been retried due to transient failures */
+  retry_count?: number;
+  /** History of retry attempts for this task */
+  retry_attempts?: Array<{
+    timestamp: string;
+    reason: string;
+    old_status: TaskLifecycleState;
+  }>;
 }
 
 /**
