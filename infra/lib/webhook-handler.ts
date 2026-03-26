@@ -346,9 +346,8 @@ async function scheduleAutoMerge(
   prNumber: number,
   token: string
 ): Promise<void> {
-  // Store merge metadata for processing by a scheduled function
-  // For now, we'll just add a timestamp comment - a full implementation
-  // would use EventBridge or SQS to schedule the actual merge
+  // The actual auto-merge is handled by the review handler Lambda which runs every 15 minutes
+  // This function just posts an informational comment about the scheduled merge
 
   const mergeTime = new Date(Date.now() + MERGE_HOLD_PERIOD_MINUTES * 60 * 1000);
   const messageBody = `⏱️ **Auto-merge scheduled**
@@ -364,8 +363,6 @@ To prevent auto-merge, remove the \`${REVIEW_APPROVED_LABEL}\` label or add the 
 
   await addIssueComment(repoOwner, repoName, prNumber, token, messageBody);
 
-  // TODO: In a full implementation, schedule an EventBridge event or SQS message
-  // to trigger the merge after the hold period
   console.log(`Auto-merge scheduled for PR ${prNumber} at ${mergeTime.toISOString()}`);
 }
 
