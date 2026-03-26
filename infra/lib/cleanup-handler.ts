@@ -49,6 +49,8 @@ interface CleanupStats {
   labelsUpdated: number;
   commentsPosted: number;
   feedbackExamplesArchived: number;
+  conflictingPRsClosed: number;
+  issuesReTriggered: number;
   errors: string[];
 }
 
@@ -256,6 +258,156 @@ async function stopTask(taskArn: string): Promise<boolean> {
   }
 }
 
+async function checkMergeConflicts(token: string, appId: string, privateKey: string): Promise<{ closed: number; reTriggered: number; errors: string[] }> {
+  const result = { closed: 0, reTriggered: 0, errors: [] as string[] };
+
+  try {
+    console.log("Checking for agent PRs with merge conflicts");
+
+    // List of repos to check (same pattern as review-handler)
+    const testRepos = [
+      "cenetex/agent"
+    ];
+
+    for (const repo of testRepos) {
+      try {
+        const response = await githubRequest(
+          `/repos/${repo}/pulls?state=open&per_page=100`,
+          token,
+          { method: "GET" },
+          [200]
+        );
+
+        const prs = await response.json() as any[];
+
+        // Filter PRs created by the coding agent
+        const agentPRs = prs.filter((pr: any) => {
+          const isFromBot = pr.user.login === "cenetex-coding-agent[bot]" ||
+                           pr.user.login.includes("github-agent") ||
+                           pr.user.login.includes("coding-agent");
+          return isFromBot;
+        });
+
+        console.log(`Found ${agentPRs.length} agent PRs in ${repo}`);
+
+        for (const pr of agentPRs) {
+          // Check if PR has merge conflict (mergeable field will be false, mergeable_state will be 'conflicted')
+          if (pr.mergeable === false || pr.mergeable_state === "conflicted") {
+            console.log(`Detected merge conflict in PR #${pr.number}: ${pr.title}`);
+
+            try {
+              // Close the conflicting PR with explanation comment
+              await githubRequest(
+                `/repos/${repo}/issues/${pr.number}/comments`,
+                token,
+                {
+                  method: "POST",
+                  body: JSON.stringify({
+                    body: `🚨 **Merge Conflict Detected**\n\nThis PR has a merge conflict with the target branch. The automated agent has closed this PR to allow for a fresh attempt.\n\nThe original issue will be automatically re-triggered to create a new PR with the updated base branch.`
+                  }),
+                },
+                [201]
+              );
+
+              // Close the PR
+              await githubRequest(
+                `/repos/${repo}/pulls/${pr.number}`,
+                token,
+                {
+                  method: "PATCH",
+                  body: JSON.stringify({ state: "closed" }),
+                },
+                [200]
+              );
+
+              result.closed++;
+              console.log(`Closed conflicting PR #${pr.number}`);
+
+              // Find the original issue for this PR and re-trigger it
+              // The PR body or title should have a reference to the issue
+              // For now, we'll extract from PR title if it contains "Fixes #" or similar
+              const issueMatch = pr.body?.match(/#(\d+)/) || pr.title.match(/#(\d+)/);
+
+              if (issueMatch) {
+                const issueNumber = parseInt(issueMatch[1]);
+                const [owner, name] = repo.split("/");
+
+                try {
+                  // Get fresh token for the issue
+                  const jwt = createGitHubAppJWT(appId, privateKey);
+                  const installationId = await getInstallationId(owner, name, jwt);
+                  const tokenResult = await createInstallationToken(installationId, jwt);
+                  const freshToken = tokenResult.token;
+
+                  // Remove agent:succeeded label if present
+                  try {
+                    await githubRequest(
+                      `/repos/${repo}/issues/${issueNumber}/labels/agent%3Asucceeded`,
+                      freshToken,
+                      { method: "DELETE" },
+                      [200, 204, 404]
+                    );
+                  } catch (labelError) {
+                    console.log(`Could not remove label: ${labelError}`);
+                  }
+
+                  // Add agent label to re-trigger
+                  await githubRequest(
+                    `/repos/${repo}/issues/${issueNumber}/labels`,
+                    freshToken,
+                    {
+                      method: "POST",
+                      body: JSON.stringify({ labels: ["agent"] }),
+                    },
+                    [200]
+                  );
+
+                  // Post comment on the issue
+                  await githubRequest(
+                    `/repos/${repo}/issues/${issueNumber}/comments`,
+                    freshToken,
+                    {
+                      method: "POST",
+                      body: JSON.stringify({
+                        body: `🔄 **Re-triggered After Merge Conflict**\n\nPR #${pr.number} had a merge conflict and was closed. The issue is being re-triggered to create a new PR against the updated main branch.`
+                      }),
+                    },
+                    [201]
+                  );
+
+                  result.reTriggered++;
+                  console.log(`Re-triggered issue #${issueNumber} after conflict in PR #${pr.number}`);
+                } catch (retriggerError) {
+                  const errorMsg = `Failed to re-trigger issue #${issueNumber}: ${retriggerError}`;
+                  console.error(errorMsg);
+                  result.errors.push(errorMsg);
+                }
+              }
+
+            } catch (closeError) {
+              const errorMsg = `Failed to close conflicting PR #${pr.number}: ${closeError}`;
+              console.error(errorMsg);
+              result.errors.push(errorMsg);
+            }
+          }
+        }
+      } catch (repoError) {
+        const errorMsg = `Error checking repository ${repo}: ${repoError}`;
+        console.error(errorMsg);
+        result.errors.push(errorMsg);
+      }
+    }
+
+    console.log(`Merge conflict check completed. Closed: ${result.closed}, Re-triggered: ${result.reTriggered}`);
+  } catch (error) {
+    const errorMsg = `Merge conflict check failed: ${error}`;
+    console.error(errorMsg);
+    result.errors.push(errorMsg);
+  }
+
+  return result;
+}
+
 async function archiveFeedbackExamples(): Promise<{ archived: number; errors: string[] }> {
   const result = { archived: 0, errors: [] as string[] };
 
@@ -350,6 +502,8 @@ export async function handler(): Promise<CleanupStats> {
     labelsUpdated: 0,
     commentsPosted: 0,
     feedbackExamplesArchived: 0,
+    conflictingPRsClosed: 0,
+    issuesReTriggered: 0,
     errors: [],
   };
 
@@ -513,6 +667,26 @@ The task has been automatically terminated and marked as failed.`;
         console.error(errorMsg);
         stats.errors.push(errorMsg);
       }
+    }
+
+    // Check for merge conflicts in open agent PRs
+    console.log("Checking for merge conflicts in agent PRs...");
+    try {
+      // Get a token for the cenetex/agent repo
+      const jwt = createGitHubAppJWT(appId, privateKey);
+      const installationId = await getInstallationId("cenetex", "agent", jwt);
+      const tokenResult = await createInstallationToken(installationId, jwt);
+      const githubToken = tokenResult.token;
+
+      const conflictResult = await checkMergeConflicts(githubToken, appId, privateKey);
+      stats.conflictingPRsClosed = conflictResult.closed;
+      stats.issuesReTriggered = conflictResult.reTriggered;
+      if (conflictResult.errors.length > 0) {
+        stats.errors.push(...conflictResult.errors);
+      }
+    } catch (conflictCheckError) {
+      console.error("Failed to check for merge conflicts:", conflictCheckError);
+      stats.errors.push(`Merge conflict check failed: ${conflictCheckError}`);
     }
 
     // Archive old feedback examples (30+ days old)
