@@ -33,6 +33,8 @@ interface DigestStats {
   creditsSpent: number;
   repoCredits: Array<{ repo: string; balance: number; spent_today: number }>;
   lowBalanceRepos: Array<{ repo: string; balance: number }>;
+  draftReleases: Array<{ repo: string; version: string; url: string }>;
+  humanReviewPRs: Array<{ title: string; number: number; repo: string; url: string; label: string }>;
   errors: string[];
 }
 
@@ -117,6 +119,66 @@ async function getMergedPRsForRepo(
   }
 }
 
+async function getDraftReleases(
+  repoOwner: string,
+  repoName: string,
+  token: string
+): Promise<Array<{ version: string; url: string }>> {
+  try {
+    const response = await githubRequest(
+      `/repos/${repoOwner}/${repoName}/releases`,
+      token,
+      { method: "GET" },
+      [200]
+    );
+
+    const releases = await response.json() as any[];
+    const draftReleases = releases.filter((r: any) => r.draft === true);
+
+    return draftReleases.map((r: any) => ({
+      version: r.tag_name,
+      url: r.html_url,
+    }));
+  } catch (error) {
+    console.error(`Failed to fetch draft releases for ${repoOwner}/${repoName}:`, error);
+    return [];
+  }
+}
+
+async function getHumanReviewPRs(
+  repoOwner: string,
+  repoName: string,
+  token: string
+): Promise<Array<{ title: string; number: number; url: string; label: string }>> {
+  try {
+    const response = await githubRequest(
+      `/repos/${repoOwner}/${repoName}/pulls?state=open&sort=updated&direction=desc&per_page=50`,
+      token,
+      { method: "GET" },
+      [200]
+    );
+
+    const prs = await response.json() as any[];
+
+    // Filter for PRs with human-review labels
+    const humanReviewPRs = prs.filter((pr: any) =>
+      pr.labels.some((label: any) =>
+        label.name === "review:human-required" || label.name === "review:waiting-human"
+      )
+    );
+
+    return humanReviewPRs.map((pr: any) => ({
+      title: pr.title,
+      number: pr.number,
+      url: pr.html_url,
+      label: pr.labels.find((l: any) => l.name.startsWith("review:"))?.name || "review:human-required",
+    }));
+  } catch (error) {
+    console.error(`Failed to fetch human-review PRs for ${repoOwner}/${repoName}:`, error);
+    return [];
+  }
+}
+
 async function getAllMergedPRs(
   token: string,
   since: Date
@@ -184,6 +246,8 @@ async function collectTaskMetadata(since: Date): Promise<DigestStats> {
     creditsSpent: 0,
     repoCredits: [],
     lowBalanceRepos: [],
+    draftReleases: [],
+    humanReviewPRs: [],
     errors: [],
   };
 
@@ -336,6 +400,24 @@ async function createDigestIssue(
     creditSection += `- ⚠️ Low Balance Repos: ${stats.lowBalanceRepos.map(r => `${r.repo} (${r.balance}cr)`).join(", ")}\n`;
   }
 
+  // Build draft releases section
+  let releaseSection = "";
+  if (stats.draftReleases.length > 0) {
+    releaseSection = "\n**📦 Ready to Ship (Draft Releases)**\n";
+    for (const release of stats.draftReleases) {
+      releaseSection += `- [${release.version}](${release.url}) — Click "Publish" to deploy\n`;
+    }
+  }
+
+  // Build human-review PRs section
+  let humanReviewSection = "";
+  if (stats.humanReviewPRs.length > 0) {
+    humanReviewSection = "\n**👤 Needs Human Review**\n";
+    for (const pr of stats.humanReviewPRs) {
+      humanReviewSection += `- [${pr.title}](${pr.url}) (#${pr.number}) in ${pr.repo} — ${pr.label}\n`;
+    }
+  }
+
   const body = `## Agent Activity Summary: ${digestDate}
 
 **Task Outcomes**
@@ -344,6 +426,8 @@ async function createDigestIssue(
 - ⏱️ Timeout: ${stats.timed_out}
 - **Total: ${total}**
 ${total > 0 ? `- **Success Rate: ${successRate}%**` : ""}
+${releaseSection}
+${humanReviewSection}
 ${prSection}
 ${creditSection}
 **Artifact Bucket**
@@ -412,12 +496,34 @@ export async function handler(): Promise<DigestStats> {
       console.error("Failed to fetch merged PRs:", error);
     }
 
-    // Create digest issue in the cenetex/agent repository
+    // Create digest issue and gather actionable items
     try {
       const jwt = createGitHubAppJWT(appId, privateKey);
       const installationId = await getInstallationId("cenetex", "agent", jwt);
       const tokenResult = await createInstallationToken(installationId, jwt);
       const githubToken = tokenResult.token;
+
+      try {
+        // Fetch draft releases for cenetex/agent
+        const draftReleases = await getDraftReleases("cenetex", "agent", githubToken);
+        stats.draftReleases = draftReleases.map((release) => ({
+          ...release,
+          repo: "cenetex/agent",
+        }));
+      } catch (error) {
+        console.error("Failed to fetch draft releases:", error);
+      }
+
+      try {
+        // Fetch human-review PRs for cenetex/agent
+        const humanReviewPRs = await getHumanReviewPRs("cenetex", "agent", githubToken);
+        stats.humanReviewPRs = humanReviewPRs.map((pr) => ({
+          ...pr,
+          repo: "cenetex/agent",
+        }));
+      } catch (error) {
+        console.error("Failed to fetch human-review PRs:", error);
+      }
 
       await createDigestIssue("cenetex", "agent", githubToken, stats, dateStr);
     } catch (error) {

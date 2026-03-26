@@ -850,6 +850,265 @@ function verifySignature(
 }
 
 /**
+ * Gets the last release tag for a repository
+ */
+async function getLastReleaseTag(
+  repoOwner: string,
+  repoName: string,
+  token: string
+): Promise<string | null> {
+  try {
+    const response = await githubRequest(
+      `/repos/${repoOwner}/${repoName}/releases/latest`,
+      token,
+      { method: "GET" },
+      [200, 404]
+    );
+
+    if (response.status === 404) {
+      return null;
+    }
+
+    const data = await response.json() as any;
+    return data.tag_name || null;
+  } catch (error) {
+    console.error(`Failed to get last release tag for ${repoOwner}/${repoName}:`, error);
+    return null;
+  }
+}
+
+/**
+ * Gets merged PRs since a given tag
+ */
+async function getMergedPRsSinceTag(
+  repoOwner: string,
+  repoName: string,
+  token: string,
+  sinceTag: string | null
+): Promise<Array<{ number: number; title: string; author: string }>> {
+  try {
+    let prs: any[] = [];
+    let page = 1;
+    const perPage = 100;
+    let hasMore = true;
+
+    while (hasMore && prs.length < 200) {
+      const response = await githubRequest(
+        `/repos/${repoOwner}/${repoName}/pulls?state=closed&sort=updated&direction=desc&per_page=${perPage}&page=${page}`,
+        token,
+        { method: "GET" },
+        [200]
+      );
+
+      const data = await response.json() as any[];
+      if (!data.length) {
+        hasMore = false;
+      } else {
+        prs = prs.concat(data);
+        page++;
+      }
+    }
+
+    // Filter for merged PRs
+    const mergedPRs = prs.filter((pr: any) => pr.merged_at);
+
+    // If we have a tag, filter by merge time after the tag was created
+    if (sinceTag) {
+      try {
+        const tagResponse = await githubRequest(
+          `/repos/${repoOwner}/${repoName}/git/refs/tags/${sinceTag}`,
+          token,
+          { method: "GET" },
+          [200, 404]
+        );
+
+        if (tagResponse.status === 200) {
+          const tagData = await tagResponse.json() as any;
+          const commitResponse = await githubRequest(
+            `/repos/${repoOwner}/${repoName}/commits/${tagData.object.sha}`,
+            token,
+            { method: "GET" },
+            [200]
+          );
+          const commitData = await commitResponse.json() as any;
+          const tagDate = new Date(commitData.commit.author.date);
+
+          return mergedPRs
+            .filter((pr: any) => new Date(pr.merged_at) > tagDate)
+            .slice(0, 100)
+            .map((pr: any) => ({
+              number: pr.number,
+              title: pr.title,
+              author: pr.user.login,
+            }));
+        }
+      } catch (error) {
+        console.log(`Could not filter PRs by tag date: ${error}`);
+      }
+    }
+
+    return mergedPRs
+      .slice(0, 100)
+      .map((pr: any) => ({
+        number: pr.number,
+        title: pr.title,
+        author: pr.user.login,
+      }));
+  } catch (error) {
+    console.error(`Failed to get merged PRs for ${repoOwner}/${repoName}:`, error);
+    return [];
+  }
+}
+
+/**
+ * Increments a version string to the next patch version
+ */
+function incrementVersion(version: string): string {
+  // Remove leading 'v' if present
+  const clean = version.replace(/^v/, "");
+  const parts = clean.split(".");
+
+  if (parts.length >= 3) {
+    const patch = parseInt(parts[2]) + 1;
+    parts[2] = patch.toString();
+  } else if (parts.length === 2) {
+    parts.push("1");
+  } else {
+    parts.push("0", "1");
+  }
+
+  return parts.slice(0, 3).join(".");
+}
+
+/**
+ * Generates release notes from merged PRs
+ */
+function generateReleaseNotes(prs: Array<{ number: number; title: string; author: string }>): string {
+  if (prs.length === 0) {
+    return "No changes since last release.";
+  }
+
+  let notes = "## Changes\n\n";
+  for (const pr of prs) {
+    notes += `- ${pr.title} (#${pr.number}) @${pr.author}\n`;
+  }
+
+  return notes;
+}
+
+/**
+ * Creates a draft release for the repository
+ */
+async function createDraftRelease(
+  repoOwner: string,
+  repoName: string,
+  token: string,
+  version: string,
+  releaseNotes: string
+): Promise<boolean> {
+  try {
+    await githubRequest(
+      `/repos/${repoOwner}/${repoName}/releases`,
+      token,
+      {
+        method: "POST",
+        body: JSON.stringify({
+          tag_name: `v${version}`,
+          name: `v${version}`,
+          body: releaseNotes,
+          draft: true,
+          prerelease: false,
+        }),
+      },
+      [201]
+    );
+
+    console.log(`Created draft release v${version} for ${repoOwner}/${repoName}`);
+    return true;
+  } catch (error) {
+    console.error(`Failed to create draft release for ${repoOwner}/${repoName}:`, error);
+    return false;
+  }
+}
+
+/**
+ * Checks if there's already a draft release for a repo
+ */
+async function hasDraftRelease(
+  repoOwner: string,
+  repoName: string,
+  token: string
+): Promise<boolean> {
+  try {
+    const response = await githubRequest(
+      `/repos/${repoOwner}/${repoName}/releases`,
+      token,
+      { method: "GET" },
+      [200]
+    );
+
+    const releases = await response.json() as any[];
+    return releases.some((r: any) => r.draft === true);
+  } catch (error) {
+    console.log(`Could not check for draft releases: ${error}`);
+    return false;
+  }
+}
+
+/**
+ * Checks if a draft release should be created based on merged PR count
+ * Creates one if threshold is reached (default: 5 PRs)
+ */
+async function checkAndCreateDraftRelease(
+  repoOwner: string,
+  repoName: string,
+  token: string,
+  prThreshold: number = 5
+): Promise<void> {
+  try {
+    // Check if draft release already exists
+    if (await hasDraftRelease(repoOwner, repoName, token)) {
+      console.log(`Draft release already exists for ${repoOwner}/${repoName}`);
+      return;
+    }
+
+    // Get the last release tag
+    const lastTag = await getLastReleaseTag(repoOwner, repoName, token);
+    console.log(`Last release tag for ${repoOwner}/${repoName}: ${lastTag}`);
+
+    // Get merged PRs since last tag
+    const mergedPRs = await getMergedPRsSinceTag(repoOwner, repoName, token, lastTag);
+    console.log(`Found ${mergedPRs.length} merged PRs since ${lastTag}`);
+
+    // Only create draft release if we have enough merged PRs
+    if (mergedPRs.length >= prThreshold) {
+      const currentVersion = lastTag ? lastTag.replace(/^v/, "") : "0.0.0";
+      const nextVersion = incrementVersion(currentVersion);
+      const releaseNotes = generateReleaseNotes(mergedPRs);
+
+      const success = await createDraftRelease(
+        repoOwner,
+        repoName,
+        token,
+        nextVersion,
+        releaseNotes
+      );
+
+      if (success) {
+        console.log(`Draft release v${nextVersion} created for ${repoOwner}/${repoName}`);
+      }
+    } else {
+      console.log(
+        `Only ${mergedPRs.length}/${prThreshold} PRs merged since last release, not creating draft yet`
+      );
+    }
+  } catch (error) {
+    console.error(`Error in checkAndCreateDraftRelease: ${error}`);
+    throw error;
+  }
+}
+
+/**
  * Resolves a reference (branch, tag, or pull request) to an immutable commit SHA
  */
 async function resolveCommitSha(
@@ -1018,6 +1277,14 @@ export async function handler(event: {
         );
 
         if (followUpUrl) {
+          // After successful follow-up, check if we should create a draft release
+          try {
+            await checkAndCreateDraftRelease(repoOwner, repoName, githubToken);
+          } catch (releaseError) {
+            console.error(`Failed to check/create draft release: ${releaseError}`);
+            // Don't fail the entire handler if release creation fails
+          }
+
           return {
             statusCode: 200,
             body: JSON.stringify({
@@ -1029,6 +1296,14 @@ export async function handler(event: {
         }
       } else {
         console.log(`PR #${prNumber} was not created by an agent task, skipping follow-up`);
+
+        // Still check for draft release even if not an agent PR
+        try {
+          await checkAndCreateDraftRelease(repoOwner, repoName, githubToken);
+        } catch (releaseError) {
+          console.error(`Failed to check/create draft release: ${releaseError}`);
+          // Don't fail the entire handler if release creation fails
+        }
       }
 
       return {
@@ -1165,6 +1440,43 @@ export async function handler(event: {
     isPR = true;
     requestedRef = payload.pull_request.head.ref;
     prData = payload.pull_request;
+  } else if (ghEvent === "release" && payload.action === "published") {
+    // Handle release published: trigger deploy pipeline
+    const repoOwner = payload.repository.owner.login;
+    const repoName = payload.repository.name;
+    const releaseTagName = payload.release.tag_name;
+    const releaseUrl = payload.release.html_url;
+
+    console.log(`Handling published release ${releaseTagName} for ${repoOwner}/${repoName}`);
+
+    try {
+      const [appId, privateKey] = await Promise.all([
+        getParameter(GITHUB_APP_ID_PARAM),
+        getParameter(GITHUB_APP_PRIVATE_KEY_PARAM),
+      ]);
+
+      const appConfig: GitHubAppConfig = { appId, privateKey };
+      const githubToken = await getInstallationToken(repoOwner, repoName, appConfig);
+
+      // The deployment will be triggered by the GitHub Actions workflow
+      // which listens for new tags (publishing a release creates a tag)
+      console.log(`Release ${releaseTagName} created tag, deploy workflow will trigger automatically`);
+
+      return {
+        statusCode: 200,
+        body: JSON.stringify({
+          message: "Release published, deploy workflow triggered",
+          releaseTagName,
+          releaseUrl
+        }),
+      };
+    } catch (error) {
+      console.error(`Failed to handle release publish event: ${error}`);
+      return {
+        statusCode: 500,
+        body: JSON.stringify({ error: "Failed to handle release event" }),
+      };
+    }
   } else {
     console.log(`Ignoring event: ${ghEvent}/${payload.action}`);
     return { statusCode: 200, body: `Ignored: ${ghEvent}/${payload.action}` };

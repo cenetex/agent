@@ -51,6 +51,64 @@ The agent uses a trigger + status label system:
 - **Waiting Tasks**: Provide the requested clarification, then re-add `agent` label
 - **Manual Stop**: Remove all agent labels to cancel a running task
 
+## GitHub-Only Operator Guide
+
+Once the agent is set up, the entire workflow can be run from GitHub.com without ever opening a terminal:
+
+### Daily Workflow
+
+1. **Open your daily digest** — The agent posts an issue every morning at 9am UTC with:
+   - Summary of agent task outcomes (✅ succeeded, ❌ failed, ⏱️ timed out)
+   - Link to any **draft releases** waiting to be published
+   - List of **PRs awaiting human review** (if any)
+   - Credit balance and low-balance warnings
+   - All merged PRs from the past 24 hours
+
+2. **Ship a release (if draft exists)**
+   - Click the draft release link in the daily digest
+   - Review the auto-generated release notes
+   - Click "Publish release" button
+   - The deployment workflow automatically triggers on the release tag
+
+3. **Review and merge PRs**
+   - Click PR links in the digest
+   - Click the green "Merge pull request" button when ready
+   - The agent automatically creates follow-up issues for agent-authored PRs
+
+4. **Trigger the agent**
+   - Create a new GitHub issue or find an existing one
+   - Click the label icon on the issue
+   - Type "agent" to search for the agent label
+   - Click the label to add it
+   - The agent will start automatically (you'll see `agent:running` label)
+
+5. **Monitor results**
+   - The agent adds `agent:succeeded` or `agent:failed` label when done
+   - For issues: the agent creates a PR (click the link in the issue comments)
+   - For PRs: the agent adds review comments directly
+   - Check CloudWatch logs for detailed output if needed
+
+### Release Management
+
+**Auto-Draft Releases**
+- After 5 PRs merge, the agent automatically creates a draft release
+- The draft includes auto-generated release notes from PR titles and authors
+- No manual work needed — just review and publish
+
+**Deploy on Publish**
+- When you click "Publish release" on GitHub, the workflow automatically deploys
+- Deployment includes CDK infrastructure updates and Docker image push to ECR
+- Note: Ensure `.github/workflows/deploy.yml` has `tags: ['v*']` trigger
+
+### What You'll See
+
+|Action|Location|Result|
+|------|--------|------|
+|Create issue + add `agent` label|GitHub.com|Agent processes immediately; label becomes `agent:running`|
+|Merge a PR|GitHub.com|Agent creates follow-up issue automatically|
+|Publish a draft release|GitHub.com|Deployment workflow triggers automatically|
+|Opening daily digest|GitHub.com notifications|All actionable items in one place|
+
 ## Best Practices
 
 ### Writing Effective Agent Issues
