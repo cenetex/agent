@@ -1214,6 +1214,58 @@ export async function handler(event: {
         }),
       };
     }
+  } else if (ghEvent === "release" && payload.action === "published") {
+    // Handle published release: trigger deploy and post confirmation
+    const repoOwner = payload.repository.owner.login;
+    const repoName = payload.repository.name;
+    const releaseTag = payload.release.tag_name;
+    const releaseName = payload.release.name;
+    const releaseUrl = payload.release.html_url;
+
+    console.log(`Handling published release ${releaseTag} in ${repoOwner}/${repoName}`);
+
+    try {
+      // Get GitHub App credentials and mint installation token
+      const [appId, privateKey] = await Promise.all([
+        getParameter(GITHUB_APP_ID_PARAM),
+        getParameter(GITHUB_APP_PRIVATE_KEY_PARAM),
+      ]);
+
+      const appConfig: GitHubAppConfig = { appId, privateKey };
+      const githubToken = await getInstallationToken(repoOwner, repoName, appConfig);
+
+      // Post confirmation comment on the release
+      await githubRequest(
+        `/repos/${repoOwner}/${repoName}/releases/${payload.release.id}/comments`,
+        githubToken,
+        {
+          method: "POST",
+          body: JSON.stringify({
+            body: `🚀 **Release published and deploy triggered**\n\nRelease **${releaseName}** (${releaseTag}) has been published. The deployment pipeline has been triggered.`,
+          }),
+        },
+        [200, 201]
+      );
+
+      console.log(`Posted confirmation comment on released ${releaseTag}`);
+
+      return {
+        statusCode: 200,
+        body: JSON.stringify({
+          message: "Release published and deploy triggered",
+          releaseTag,
+          releaseName,
+        }),
+      };
+    } catch (error) {
+      console.error(`Failed to handle published release ${releaseTag}:`, error);
+      return {
+        statusCode: 500,
+        body: JSON.stringify({
+          error: "Failed to handle published release"
+        }),
+      };
+    }
   } else if (ghEvent === "pull_request" && payload.action === "labeled") {
     const labelName = payload.label?.name;
 

@@ -30,6 +30,8 @@ interface DigestStats {
   failed: number;
   timed_out: number;
   mergedPRs: Array<{ title: string; number: number; repo: string }>;
+  draftReleases: Array<{ repo: string; version: string; url: string }>;
+  reviewWaitingPRs: Array<{ title: string; number: number; repo: string; url: string }>;
   creditsSpent: number;
   repoCredits: Array<{ repo: string; balance: number; spent_today: number }>;
   lowBalanceRepos: Array<{ repo: string; balance: number }>;
@@ -175,12 +177,146 @@ async function getAllMergedPRs(
   return allMergedPRs;
 }
 
+async function getDraftReleases(
+  token: string
+): Promise<Array<{ repo: string; version: string; url: string }>> {
+  const draftReleases: Array<{ repo: string; version: string; url: string }> = [];
+
+  try {
+    // Get list of repos from task metadata
+    const reposList = new Set<string>();
+
+    let continuationToken: string | undefined;
+    do {
+      const listResult = await s3.send(new ListObjectsV2Command({
+        Bucket: ARTIFACTS_BUCKET,
+        Prefix: "tasks/",
+        ContinuationToken: continuationToken,
+        MaxKeys: 1000,
+      }));
+
+      if (listResult.Contents) {
+        for (const obj of listResult.Contents) {
+          const key = obj.Key;
+          if (key && key.includes('/metadata.json')) {
+            const parts = key.split('/');
+            if (parts.length >= 4) {
+              const repoSlug = `${parts[1]}/${parts[2]}`;
+              reposList.add(repoSlug);
+            }
+          }
+        }
+      }
+
+      continuationToken = listResult.NextContinuationToken;
+    } while (continuationToken);
+
+    // Check each repo for draft releases
+    for (const repoSlug of reposList) {
+      try {
+        const { owner, name } = parseRepoSlug(repoSlug);
+        const response = await githubRequest(
+          `/repos/${owner}/${name}/releases?per_page=10`,
+          token,
+          { method: "GET" },
+          [200]
+        );
+
+        const releases = await response.json() as any[];
+        const drafts = releases.filter((rel: any) => rel.draft);
+
+        for (const draft of drafts) {
+          draftReleases.push({
+            repo: repoSlug,
+            version: draft.tag_name,
+            url: draft.html_url,
+          });
+        }
+      } catch (error) {
+        console.log(`Could not fetch draft releases for ${repoSlug}:`, error);
+      }
+    }
+  } catch (error) {
+    console.error("Failed to get draft releases:", error);
+  }
+
+  return draftReleases;
+}
+
+async function getPRsWaitingForReview(
+  token: string
+): Promise<Array<{ title: string; number: number; repo: string; url: string }>> {
+  const waitingPRs: Array<{ title: string; number: number; repo: string; url: string }> = [];
+
+  try {
+    // Get list of repos from task metadata
+    const reposList = new Set<string>();
+
+    let continuationToken: string | undefined;
+    do {
+      const listResult = await s3.send(new ListObjectsV2Command({
+        Bucket: ARTIFACTS_BUCKET,
+        Prefix: "tasks/",
+        ContinuationToken: continuationToken,
+        MaxKeys: 1000,
+      }));
+
+      if (listResult.Contents) {
+        for (const obj of listResult.Contents) {
+          const key = obj.Key;
+          if (key && key.includes('/metadata.json')) {
+            const parts = key.split('/');
+            if (parts.length >= 4) {
+              const repoSlug = `${parts[1]}/${parts[2]}`;
+              reposList.add(repoSlug);
+            }
+          }
+        }
+      }
+
+      continuationToken = listResult.NextContinuationToken;
+    } while (continuationToken);
+
+    // Check each repo for PRs with review:human-required label
+    for (const repoSlug of reposList) {
+      try {
+        const { owner, name } = parseRepoSlug(repoSlug);
+        const response = await githubRequest(
+          `/repos/${owner}/${name}/pulls?state=open&labels=review:human-required&per_page=100`,
+          token,
+          { method: "GET" },
+          [200]
+        );
+
+        const prs = await response.json() as any[];
+
+        for (const pr of prs) {
+          waitingPRs.push({
+            title: pr.title,
+            number: pr.number,
+            repo: repoSlug,
+            url: pr.html_url,
+          });
+        }
+      } catch (error) {
+        console.log(`Could not fetch PRs for review in ${repoSlug}:`, error);
+      }
+    }
+  } catch (error) {
+    console.error("Failed to get PRs waiting for review:", error);
+  }
+
+  return waitingPRs;
+}
+
 async function collectTaskMetadata(since: Date): Promise<DigestStats> {
   const stats: DigestStats = {
     succeeded: 0,
     failed: 0,
     timed_out: 0,
     mergedPRs: [],
+    draftReleases: [],
+    reviewWaitingPRs: [],
     creditsSpent: 0,
     repoCredits: [],
     lowBalanceRepos: [],
@@ -323,17 +459,37 @@ async function createDigestIssue(
   if (stats.mergedPRs.length > 0) {
     prSection = "\n**Merged PRs**\n";
     for (const pr of stats.mergedPRs) {
-      prSection += `- ${pr.title} (#${pr.number}) in ${pr.repo}\n`;
+      prSection += `- [${pr.title} (#${pr.number})](https://github.com/${pr.repo}/pull/${pr.number}) in ${pr.repo}\n`;
     }
   } else {
     prSection = "\n**Merged PRs**\nNone\n";
   }
 
+  // Build draft releases section
+  let releaseSection = "\n**📦 Draft Releases Ready for Publishing**\n";
+  if (stats.draftReleases.length > 0) {
+    for (const release of stats.draftReleases) {
+      releaseSection += `- [${release.repo} ${release.version}](${release.url}) - Click to review and publish\n`;
+    }
+  } else {
+    releaseSection = "\n**📦 Draft Releases**\nNone\n";
+  }
+
+  // Build PRs waiting for review section
+  let reviewSection = "\n**⏳ PRs Waiting for Human Review**\n";
+  if (stats.reviewWaitingPRs.length > 0) {
+    for (const pr of stats.reviewWaitingPRs) {
+      reviewSection += `- [${pr.title} (#${pr.number})](${pr.url}) in ${pr.repo}\n`;
+    }
+  } else {
+    reviewSection = "\n**⏳ PRs Waiting for Human Review**\nNone\n";
+  }
+
   // Build credit section
-  let creditSection = "\n**Credit Usage**\n";
+  let creditSection = "\n**💳 Credit Usage**\n";
   creditSection += `- Total Spent (All Time): ${stats.creditsSpent} credits\n`;
   if (stats.lowBalanceRepos.length > 0) {
-    creditSection += `- ⚠️ Low Balance Repos: ${stats.lowBalanceRepos.map(r => `${r.repo} (${r.balance}cr)`).join(", ")}\n`;
+    creditSection += `- ⚠️ **Low Balance Repos**: ${stats.lowBalanceRepos.map(r => `${r.repo} (${r.balance}cr)`).join(", ")}\n`;
   }
 
   const body = `## Agent Activity Summary: ${digestDate}
@@ -345,6 +501,8 @@ async function createDigestIssue(
 - **Total: ${total}**
 ${total > 0 ? `- **Success Rate: ${successRate}%**` : ""}
 ${prSection}
+${releaseSection}
+${reviewSection}
 ${creditSection}
 **Artifact Bucket**
 - Artifacts available at: \`s3://${ARTIFACTS_BUCKET}/\`
@@ -404,12 +562,28 @@ export async function handler(): Promise<DigestStats> {
     // Get merged PRs from all repos
     try {
       const jwt = createGitHubAppJWT(appId, privateKey);
-      // We'll use the caller's token to fetch PRs from the target repo
-      // For now, assume single repo - in production, loop through repos
       const mergedPRs = await getAllMergedPRs(jwt, since);
       stats.mergedPRs = mergedPRs;
     } catch (error) {
       console.error("Failed to fetch merged PRs:", error);
+    }
+
+    // Get draft releases from all repos
+    try {
+      const jwt = createGitHubAppJWT(appId, privateKey);
+      const draftReleases = await getDraftReleases(jwt);
+      stats.draftReleases = draftReleases;
+    } catch (error) {
+      console.error("Failed to fetch draft releases:", error);
+    }
+
+    // Get PRs waiting for human review
+    try {
+      const jwt = createGitHubAppJWT(appId, privateKey);
+      const reviewWaitingPRs = await getPRsWaitingForReview(jwt);
+      stats.reviewWaitingPRs = reviewWaitingPRs;
+    } catch (error) {
+      console.error("Failed to fetch PRs waiting for review:", error);
     }
 
     // Create digest issue in the cenetex/agent repository
