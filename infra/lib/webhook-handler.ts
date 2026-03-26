@@ -420,6 +420,90 @@ async function lookupTaskMetadataForPR(
   }
 }
 
+/**
+ * Parses PR body for issue references like "Fixes #123" or "Closes owner/repo#123"
+ * Returns array of { issue_number, repo_owner, repo_name } for cross-repo refs
+ */
+function parseIssueReferences(prBody: string, prRepoOwner: string): Array<{ issue_number: number; repo_owner: string; repo_name: string; is_same_repo: boolean }> {
+  if (!prBody) return [];
+
+  const references: Array<{ issue_number: number; repo_owner: string; repo_name: string; is_same_repo: boolean }> = [];
+
+  // Match patterns like "Fixes #123", "Closes #456", "Resolves owner/repo#789"
+  const patterns = [
+    /(?:Fixes|Closes|Resolves)\s+#(\d+)/gi,  // Same repo: Fixes #123
+    /(?:Fixes|Closes|Resolves)\s+([a-zA-Z0-9_-]+)\/([a-zA-Z0-9_-]+)#(\d+)/gi,  // Cross-repo: Fixes owner/repo#123
+  ];
+
+  // Match same-repo references
+  const sameRepoMatches = prBody.matchAll(/(?:Fixes|Closes|Resolves)\s+#(\d+)/gi);
+  for (const match of sameRepoMatches) {
+    references.push({
+      issue_number: parseInt(match[1], 10),
+      repo_owner: prRepoOwner,
+      repo_name: "",  // Will be filled from PR context
+      is_same_repo: true,
+    });
+  }
+
+  // Match cross-repo references
+  const crossRepoMatches = prBody.matchAll(/(?:Fixes|Closes|Resolves)\s+([a-zA-Z0-9_-]+)\/([a-zA-Z0-9_-]+)#(\d+)/gi);
+  for (const match of crossRepoMatches) {
+    references.push({
+      issue_number: parseInt(match[3], 10),
+      repo_owner: match[1],
+      repo_name: match[2],
+      is_same_repo: false,
+    });
+  }
+
+  return references;
+}
+
+/**
+ * Closes a cross-repo issue and posts a comment linking to the merged PR
+ */
+async function closeCrossRepoIssue(
+  issueRepoOwner: string,
+  issueRepoName: string,
+  issueNumber: number,
+  prRepoOwner: string,
+  prRepoName: string,
+  prNumber: number,
+  prUrl: string,
+  token: string
+): Promise<void> {
+  try {
+    // Close the issue
+    await githubRequest(
+      `/repos/${issueRepoOwner}/${issueRepoName}/issues/${issueNumber}`,
+      token,
+      {
+        method: "PATCH",
+        body: JSON.stringify({ state: "closed" }),
+      },
+      [200]
+    );
+    console.log(`Closed cross-repo issue ${issueRepoOwner}/${issueRepoName}#${issueNumber}`);
+
+    // Post a comment linking to the merged PR
+    const commentBody = `Closed by merged PR: [${prRepoOwner}/${prRepoName}#${prNumber}](${prUrl})`;
+    await addIssueComment(
+      issueRepoOwner,
+      issueRepoName,
+      issueNumber,
+      token,
+      commentBody
+    );
+  } catch (error) {
+    console.error(
+      `Failed to close cross-repo issue ${issueRepoOwner}/${issueRepoName}#${issueNumber}:`,
+      error
+    );
+    // Don't fail the entire flow if closing one issue fails
+  }
+}
+
 async function createFollowUpIssue(
   repoOwner: string,
   repoName: string,
@@ -968,12 +1052,13 @@ export async function handler(event: {
     requestedRef = payload.repository.default_branch || "main";
     issueData = payload.issue;
   } else if (ghEvent === "pull_request" && payload.action === "closed" && payload.pull_request.merged) {
-    // Handle merged PR: create follow-up issue
+    // Handle merged PR: close cross-repo issues and create follow-up issue
     const repoOwner = payload.repository.owner.login;
     const repoName = payload.repository.name;
     const prNumber = payload.pull_request.number;
     const prTitle = payload.pull_request.title;
     const prUrl = payload.pull_request.html_url;
+    const prBody = payload.pull_request.body || "";
     const repoSlug = createRepoSlug(repoOwner, repoName);
 
     console.log(`Handling merged PR #${prNumber}: ${prTitle}`);
@@ -987,6 +1072,26 @@ export async function handler(event: {
 
       const appConfig: GitHubAppConfig = { appId, privateKey };
       const githubToken = await getInstallationToken(repoOwner, repoName, appConfig);
+
+      // Parse PR body for issue references and close cross-repo issues
+      const issueReferences = parseIssueReferences(prBody, repoOwner);
+      const crossRepoIssues = issueReferences.filter((ref) => !ref.is_same_repo);
+
+      if (crossRepoIssues.length > 0) {
+        console.log(`Found ${crossRepoIssues.length} cross-repo issue reference(s) in PR #${prNumber}`);
+        for (const issue of crossRepoIssues) {
+          await closeCrossRepoIssue(
+            issue.repo_owner,
+            issue.repo_name,
+            issue.issue_number,
+            repoOwner,
+            repoName,
+            prNumber,
+            prUrl,
+            githubToken
+          );
+        }
+      }
 
       // Look up if this PR was created by an agent task
       const taskMetadata = await lookupTaskMetadataForPR(repoSlug, prNumber);
@@ -1020,7 +1125,8 @@ export async function handler(event: {
             body: JSON.stringify({
               message: "Follow-up issue created and feedback recorded",
               prNumber,
-              followUpUrl
+              followUpUrl,
+              crossRepoIssuesClosed: crossRepoIssues.length
             }),
           };
         }
@@ -1032,7 +1138,8 @@ export async function handler(event: {
         statusCode: 200,
         body: JSON.stringify({
           message: "PR merged (no follow-up needed)",
-          prNumber
+          prNumber,
+          crossRepoIssuesClosed: crossRepoIssues.length
         }),
       };
     } catch (error) {
