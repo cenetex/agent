@@ -196,6 +196,59 @@ export class GitHubAgentStack extends cdk.Stack {
     });
 
     // -------------------------------------------------------
+    // Diagnostic Fargate Task Definition
+    // -------------------------------------------------------
+    const diagnosticTaskRole = new iam.Role(this, "DiagnosticTaskRole", {
+      assumedBy: new iam.ServicePrincipal("ecs-tasks.amazonaws.com"),
+      description: "Role for GitHub diagnostic agent Fargate task (read-only AWS access)",
+    });
+
+    diagnosticTaskRole.addToPolicy(
+      new iam.PolicyStatement({
+        actions: ["ssm:GetParameter"],
+        resources: ssmParamArns,
+      })
+    );
+
+    // Grant S3 permissions for artifacts
+    artifactsBucket.grantReadWrite(diagnosticTaskRole);
+
+    // Grant CloudWatch Logs read-only access — scoped to GitHubAgentStack Lambdas only
+    diagnosticTaskRole.addToPolicy(
+      new iam.PolicyStatement({
+        actions: [
+          "logs:FilterLogEvents",
+          "logs:GetLogEvents",
+          "logs:DescribeLogGroups",
+          "logs:DescribeLogStreams",
+        ],
+        resources: [
+          `arn:aws:logs:${this.region}:${this.account}:log-group:/aws/lambda/GitHubAgentStack-*`,
+          `arn:aws:logs:${this.region}:${this.account}:log-group:/aws/lambda/GitHubAgentStack-*:*`,
+        ],
+      })
+    );
+
+    const diagnosticTaskDefinition = new ecs.FargateTaskDefinition(this, "DiagnosticAgentTask", {
+      memoryLimitMiB: 2048,
+      cpu: 1024,
+      taskRole: diagnosticTaskRole,
+    });
+
+    const diagnosticContainerName = "diagnostic-agent";
+
+    diagnosticTaskDefinition.addContainer(diagnosticContainerName, {
+      image: ecs.ContainerImage.fromEcrRepository(repository, "latest"),
+      logging: ecs.LogDrivers.awsLogs({
+        streamPrefix: "github-agent-diagnostic",
+        logRetention: logs.RetentionDays.TWO_WEEKS,
+      }),
+      environment: {
+        AWS_REGION: this.region,
+      },
+    });
+
+    // -------------------------------------------------------
     // Lambda — Webhook Handler
     // -------------------------------------------------------
     const webhookHandler = new NodejsFunction(this, "WebhookHandler", {
@@ -214,7 +267,9 @@ export class GitHubAgentStack extends cdk.Stack {
       environment: {
         CLUSTER_ARN: cluster.clusterArn,
         TASK_DEFINITION_ARN: taskDefinition.taskDefinitionArn,
+        DIAGNOSTIC_TASK_DEFINITION_ARN: diagnosticTaskDefinition.taskDefinitionArn,
         CONTAINER_NAME: containerName,
+        DIAGNOSTIC_CONTAINER_NAME: diagnosticContainerName,
         SUBNETS: vpc.publicSubnets.map((s) => s.subnetId).join(","),
         SECURITY_GROUP: taskSecurityGroup.securityGroupId,
         WEBHOOK_SECRET_PARAM: PARAM_WEBHOOK_SECRET,
@@ -228,7 +283,10 @@ export class GitHubAgentStack extends cdk.Stack {
     webhookHandler.addToRolePolicy(
       new iam.PolicyStatement({
         actions: ["ecs:RunTask"],
-        resources: [taskDefinition.taskDefinitionArn],
+        resources: [
+          taskDefinition.taskDefinitionArn,
+          diagnosticTaskDefinition.taskDefinitionArn,
+        ],
       })
     );
 
@@ -238,6 +296,8 @@ export class GitHubAgentStack extends cdk.Stack {
         resources: [
           taskDefinition.taskRole.roleArn,
           taskDefinition.executionRole!.roleArn,
+          diagnosticTaskRole.roleArn,
+          diagnosticTaskDefinition.executionRole!.roleArn,
         ],
       })
     );

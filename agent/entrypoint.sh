@@ -12,6 +12,7 @@ set -Eeuo pipefail
 : "${SIGNAL_LABEL_WAITING:=agent:waiting}"
 : "${SIGNAL_LABEL_FAILED:=agent:failed}"
 : "${SIGNAL_LABEL_SUCCEEDED:=agent:succeeded}"
+: "${AWS_REGION:=us-east-1}"  # Optional, used for diagnostic tasks
 
 # --- Parse task payload ---
 echo "Parsing task payload..."
@@ -619,7 +620,36 @@ if [ "${IS_PR}" != "true" ] && [ "${TASK_MODE}" != "planning" ]; then
   FEEDBACK_SECTION=$(format_feedback_section "$REPO_SLUG" "issue" 2>/dev/null || echo "")
 fi
 
-if [ "${IS_PR}" = "true" ]; then
+if [ "${TASK_MODE}" = "diagnostic" ]; then
+  MISSION="${SYSTEM_INSTRUCTIONS}
+
+---
+
+TASK (from issue #${ISSUE_NUMBER}):
+
+You have been triggered by the 'diagnose' label on issue #${ISSUE_NUMBER} in ${REPO}.
+
+Here is the issue context:
+${CONTEXT}
+
+Your mission:
+- You have read-only access to AWS CloudWatch Logs for this deployment
+- Read the logs from recent Lambda function executions to diagnose why they failed or what they're logging
+- Check the daily digest Lambda and nightly QA Lambda logs to verify they're running correctly
+- Report your findings as a comment on this issue, including:
+  - Any errors or exceptions found in the logs
+  - The last successful run timestamp (if found)
+  - Any warnings or unusual patterns
+- When done, close this issue using: gh issue close ${ISSUE_NUMBER}
+- Be thorough but concise in your analysis.
+- IMPORTANT: Do not ask for confirmation. Execute immediately.
+
+Note: The AWS CLI is available in the container. Try commands like:
+  aws logs filter-log-events --log-group-name '/aws/lambda/GitHubAgentStack-DailyDigest' --start-time \$(($(date +%s)*1000-86400000))
+  aws logs get-log-events --log-group-name '/aws/lambda/...' --log-stream-name '...'
+
+When you close the issue, the system will detect this and mark your work as complete."
+elif [ "${IS_PR}" = "true" ]; then
   MISSION="${SYSTEM_INSTRUCTIONS}
 
 ---
