@@ -76,7 +76,7 @@ update_task_metadata() {
   local status="$1"
   local error_message="$2"
   local pr_url="$3"
-  local failure_category="$4"
+  local failure_category="${4:-}"
   local completed_timestamp=""
 
   if [ "$status" != "running" ]; then
