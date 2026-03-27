@@ -238,13 +238,13 @@ async function getRepoModelConfig(
       return null;
     }
 
-    const content = await response.json() as any;
+    const content = (await response.json()) as { type?: string; content?: string };
     if (content.type !== "file" || !content.content) {
       return null;
     }
 
     // Decode base64 content
-    const decoded = Buffer.from(content.content as string, "base64").toString("utf8");
+    const decoded = Buffer.from(content.content, "base64").toString("utf8");
 
     // Simple regex to extract model line: "model: anthropic/claude-sonnet-4"
     const modelMatch = decoded.match(/^model:\s*(.+)$/m);
