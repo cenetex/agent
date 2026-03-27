@@ -653,6 +653,210 @@ function parseIssueReferences(prBody: string, prRepoOwner: string): Array<{ issu
 }
 
 /**
+ * Parses issue body for "Blocked by" references like "Blocked by #123" or "Blocked by owner/repo#123"
+ */
+function parseBlockedByReferences(issueBody: string, issueRepoOwner: string): Array<{ issue_number: number; repo_owner: string; repo_name: string; is_same_repo: boolean }> {
+  if (!issueBody) return [];
+
+  const references: Array<{ issue_number: number; repo_owner: string; repo_name: string; is_same_repo: boolean }> = [];
+
+  // Match same-repo references: "Blocked by #123"
+  const sameRepoMatches = issueBody.matchAll(/Blocked by\s+#(\d+)/gi);
+  for (const match of sameRepoMatches) {
+    references.push({
+      issue_number: parseInt(match[1], 10),
+      repo_owner: issueRepoOwner,
+      repo_name: "",
+      is_same_repo: true,
+    });
+  }
+
+  // Match cross-repo references: "Blocked by owner/repo#123"
+  const crossRepoMatches = issueBody.matchAll(/Blocked by\s+([a-zA-Z0-9_-]+)\/([a-zA-Z0-9_-]+)#(\d+)/gi);
+  for (const match of crossRepoMatches) {
+    references.push({
+      issue_number: parseInt(match[3], 10),
+      repo_owner: match[1],
+      repo_name: match[2],
+      is_same_repo: false,
+    });
+  }
+
+  return references;
+}
+
+/**
+ * Checks if an issue body has acceptance criteria (checkboxes or explicit heading)
+ */
+function hasAcceptanceCriteria(issueBody: string): boolean {
+  if (!issueBody) return false;
+  // Look for checkboxes [ ] or [ x], or explicit "Acceptance criteria" heading
+  return /(\[ ?\]|\[ ?x\]|acceptance criteria)/i.test(issueBody);
+}
+
+/**
+ * Counts currently running agent tasks in a repository
+ */
+async function countRunningTasks(
+  repoOwner: string,
+  repoName: string,
+  token: string
+): Promise<number> {
+  try {
+    // Get all open issues and count those with agent:running label
+    const response = await githubRequest(
+      `/repos/${repoOwner}/${repoName}/issues?state=open&labels=${encodeURIComponent(SIGNAL_LABEL_RUNNING)}&per_page=100`,
+      token,
+      { method: "GET" },
+      [200]
+    );
+    const issues = await response.json() as any[];
+    return issues.length;
+  } catch (error) {
+    console.error(`Failed to count running tasks: ${error}`);
+    return 0;
+  }
+}
+
+/**
+ * Finds unblocked issues when a blocking issue is closed
+ */
+async function findUnblockedIssues(
+  closedIssueNumber: number,
+  closedRepoOwner: string,
+  closedRepoName: string,
+  repoOwner: string,
+  repoName: string,
+  token: string
+): Promise<number[]> {
+  try {
+    // List all open issues in the repository
+    const response = await githubRequest(
+      `/repos/${repoOwner}/${repoName}/issues?state=open&per_page=100`,
+      token,
+      { method: "GET" },
+      [200]
+    );
+    const openIssues = await response.json() as any[];
+
+    const unblocked: number[] = [];
+
+    for (const issue of openIssues) {
+      const issueBody = issue.body || "";
+      const blockedByRefs = parseBlockedByReferences(issueBody, repoOwner);
+
+      // Check if any "Blocked by" reference matches the closed issue
+      for (const ref of blockedByRefs) {
+        if (ref.is_same_repo && ref.issue_number === closedIssueNumber) {
+          unblocked.push(issue.number);
+          break; // Already added to unblocked, move to next issue
+        } else if (!ref.is_same_repo && ref.repo_owner === closedRepoOwner && ref.repo_name === closedRepoName && ref.issue_number === closedIssueNumber) {
+          // Cross-repo match
+          unblocked.push(issue.number);
+          break;
+        }
+      }
+    }
+
+    return unblocked;
+  } catch (error) {
+    console.error(`Failed to find unblocked issues: ${error}`);
+    return [];
+  }
+}
+
+/**
+ * Handles issue close event: scans for blocked issues and auto-unblocks them
+ */
+async function handleIssueClose(
+  repoOwner: string,
+  repoName: string,
+  closedIssueNumber: number,
+  token: string
+): Promise<void> {
+  try {
+    console.log(`Scanning for issues blocked by #${closedIssueNumber}`);
+
+    // Find unblocked issues
+    const unblockedIssues = await findUnblockedIssues(
+      closedIssueNumber,
+      repoOwner,
+      repoName,
+      repoOwner,
+      repoName,
+      token
+    );
+
+    if (unblockedIssues.length === 0) {
+      console.log(`No issues found blocked by #${closedIssueNumber}`);
+      return;
+    }
+
+    console.log(`Found ${unblockedIssues.length} unblocked issue(s): ${unblockedIssues.join(", ")}`);
+
+    // Check WIP cap to decide if we can auto-label
+    const runningCount = await countRunningTasks(repoOwner, repoName, token);
+    const WIP_CAP = 3;
+    const canAutoLabel = runningCount < WIP_CAP;
+
+    if (!canAutoLabel) {
+      console.log(`WIP cap reached (${runningCount}/${WIP_CAP}). Skipping auto-label for unblocked issues.`);
+    }
+
+    // Process each unblocked issue
+    for (const issueNumber of unblockedIssues) {
+      try {
+        // Fetch full issue details
+        const issueResponse = await githubRequest(
+          `/repos/${repoOwner}/${repoName}/issues/${issueNumber}`,
+          token,
+          { method: "GET" },
+          [200]
+        );
+        const issue = await issueResponse.json() as any;
+
+        // Post comment about being unblocked
+        const commentBody = `🔓 **Unblocked** — Issue #${closedIssueNumber} is resolved, so this issue is no longer blocked.`;
+        await addIssueComment(repoOwner, repoName, issueNumber, token, commentBody);
+        console.log(`Posted unblock comment on issue #${issueNumber}`);
+
+        // Check if we should auto-label this issue with agent
+        if (canAutoLabel) {
+          const issueBody = issue.body || "";
+          const issueLabels = (issue.labels || []).map((label: any) => label.name);
+
+          const hasReadyLabel = issueLabels.includes("ready");
+          const hasPriorityLabel = issueLabels.includes("priority:high");
+          const hasAcceptanceCrit = hasAcceptanceCriteria(issueBody);
+
+          if ((hasReadyLabel || hasPriorityLabel) && hasAcceptanceCrit) {
+            // Auto-label with agent
+            await githubRequest(
+              `/repos/${repoOwner}/${repoName}/issues/${issueNumber}/labels`,
+              token,
+              {
+                method: "POST",
+                body: JSON.stringify({ labels: [TRIGGER_LABEL] }),
+              },
+              [200]
+            );
+            console.log(`Auto-labeled issue #${issueNumber} with ${TRIGGER_LABEL}`);
+          } else {
+            console.log(`Issue #${issueNumber} does not meet auto-label criteria (ready/priority=${hasReadyLabel || hasPriorityLabel}, acceptance=${hasAcceptanceCrit})`);
+          }
+        }
+      } catch (error) {
+        console.error(`Failed to process unblocked issue #${issueNumber}: ${error}`);
+        // Continue processing other unblocked issues
+      }
+    }
+  } catch (error) {
+    console.error(`Error in handleIssueClose: ${error}`);
+    throw error;
+  }
+}
+
+/**
  * Closes a cross-repo issue and posts a comment linking to the merged PR
  */
 async function closeCrossRepoIssue(
@@ -1769,6 +1973,44 @@ export async function handler(event: {
     isPR = false;
     requestedRef = payload.repository.default_branch || "main";
     issueData = payload.issue;
+  } else if (ghEvent === "issues" && payload.action === "closed" && !payload.issue.pull_request) {
+    // Handle issue close: scan for blocked issues and auto-unblock them
+    const repoOwner = payload.repository.owner.login;
+    const repoName = payload.repository.name;
+    const closedIssueNumber = payload.issue.number;
+
+    console.log(`Handling closed issue #${closedIssueNumber}`);
+
+    try {
+      // Get GitHub App credentials and mint installation token
+      const [appId, privateKey] = await Promise.all([
+        getParameter(GITHUB_APP_ID_PARAM),
+        getParameter(GITHUB_APP_PRIVATE_KEY_PARAM),
+      ]);
+
+      const appConfig: GitHubAppConfig = { appId, privateKey };
+      const githubToken = await getInstallationToken(repoOwner, repoName, appConfig);
+
+      // Handle dependency-aware dispatch
+      await handleIssueClose(repoOwner, repoName, closedIssueNumber, githubToken);
+
+      return {
+        statusCode: 200,
+        body: JSON.stringify({
+          message: "Issue close handled, dependencies processed",
+          issueNumber: closedIssueNumber,
+        }),
+      };
+    } catch (error) {
+      console.error(`Failed to handle closed issue #${closedIssueNumber}:`, error);
+      return {
+        statusCode: 500,
+        body: JSON.stringify({
+          error: "Failed to handle issue close",
+          issueNumber: closedIssueNumber,
+        }),
+      };
+    }
   } else if (ghEvent === "pull_request" && payload.action === "closed" && payload.pull_request.merged) {
     // Handle merged PR: close cross-repo issues and create follow-up issue
     const repoOwner = payload.repository.owner.login;
