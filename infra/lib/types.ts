@@ -587,3 +587,93 @@ export function createCreditLedgerPath(repoSlug: string, date: Date = new Date()
   const mm = String(date.getMonth() + 1).padStart(2, "0");
   return `credits/${repoSlug}/ledger/${yyyy}/${mm}/transactions.jsonl`;
 }
+
+/**
+ * Escalation system types for routing items needing human attention
+ */
+
+export type EscalationTriggerType =
+  | "repeated_failure"      // Agent failed on same issue 3+ times
+  | "pr_stale"              // PR open >48 hours with no merge
+  | "waiting_question"      // Agent asked a question that can't be resolved
+  | "security_sensitive"    // Security-labeled issue or CVE change
+  | "production_config"     // Touches production deploy or secrets
+  | "low_credits";          // Credit balance below threshold
+
+export interface EscalationItem {
+  /** Unique escalation ID */
+  escalation_id: string;
+  /** Repository in owner/name format */
+  repo_slug: string;
+  /** Issue or PR number */
+  issue_number: number;
+  /** Trigger type that caused escalation */
+  trigger_type: EscalationTriggerType;
+  /** Human-readable reason/context */
+  reason: string;
+  /** Suggested action to resolve escalation */
+  suggested_action: string;
+  /** GitHub URL to the issue/PR */
+  github_url: string;
+  /** Timestamp when escalation was created */
+  created_at: string;
+  /** Optional additional context or data */
+  context?: Record<string, any>;
+}
+
+export interface EscalationQueue {
+  /** List of active escalation items */
+  items: EscalationItem[];
+  /** Last updated timestamp */
+  updated_at: string;
+  /** Version for optimistic locking */
+  version: number;
+}
+
+export interface EscalationConfig {
+  /** Repository in owner/name format */
+  repo_slug: string;
+  /** Enable escalation routing */
+  enabled: boolean;
+  /** Failure threshold before escalating (default: 3) */
+  failure_threshold: number;
+  /** PR staleness threshold in hours (default: 48) */
+  pr_staleness_hours: number;
+  /** Low credit threshold (default: 5) */
+  low_credit_threshold: number;
+  /** Optional webhook URL for notifications (Slack, Telegram, etc.) */
+  webhook_url?: string;
+  /** Last updated timestamp */
+  updated_at: string;
+}
+
+/**
+ * Generates a unique escalation ID
+ */
+export function generateEscalationId(): string {
+  const timestamp = Date.now().toString(36);
+  const random = Math.random().toString(36).substring(2, 8);
+  return `esc_${timestamp}_${random}`;
+}
+
+/**
+ * Creates the S3 path for the escalation queue
+ */
+export function createEscalationQueuePath(repoSlug: string): string {
+  return `escalations/${repoSlug}/queue.json`;
+}
+
+/**
+ * Creates the S3 path for escalation configuration
+ */
+export function createEscalationConfigPath(repoSlug: string): string {
+  return `escalations/${repoSlug}/config.json`;
+}
+
+/**
+ * Creates the S3 path for escalation history
+ */
+export function createEscalationHistoryPath(repoSlug: string): string {
+  const date = new Date().toISOString().split("T")[0];
+  return `escalations/${repoSlug}/history/${date}/events.jsonl`;
+}

@@ -35,6 +35,9 @@ import {
   createCreditBalancePath,
   createCreditLedgerPath,
   getModelCost,
+  type EscalationConfig,
+  createEscalationConfigPath,
+  createEscalationQueuePath,
 } from "./types";
 
 const ecs = new ECSClient({});
@@ -1120,6 +1123,116 @@ function verifySignature(
     mismatch |= signature.charCodeAt(i) ^ expected.charCodeAt(i);
   }
   return mismatch === 0;
+}
+
+/**
+ * Loads or creates escalation configuration for a repository
+ */
+async function loadEscalationConfig(repoSlug: string): Promise<EscalationConfig> {
+  try {
+    const configPath = createEscalationConfigPath(repoSlug);
+    const result = await s3.send(
+      new GetObjectCommand({
+        Bucket: ARTIFACTS_BUCKET,
+        Key: configPath,
+      })
+    );
+
+    if (!result.Body) {
+      return createDefaultEscalationConfig(repoSlug);
+    }
+
+    const content = await result.Body.transformToString();
+    return JSON.parse(content) as EscalationConfig;
+  } catch (error: any) {
+    if (error.name === "NoSuchKey") {
+      return createDefaultEscalationConfig(repoSlug);
+    }
+    throw error;
+  }
+}
+
+function createDefaultEscalationConfig(repoSlug: string): EscalationConfig {
+  return {
+    repo_slug: repoSlug,
+    enabled: true,
+    failure_threshold: 3,
+    pr_staleness_hours: 48,
+    low_credit_threshold: 5,
+    updated_at: new Date().toISOString(),
+  };
+}
+
+/**
+ * Checks if an issue/PR should be escalated and triggers escalation if needed
+ */
+async function checkAndTriggerEscalations(
+  repoOwner: string,
+  repoName: string,
+  issueNumber: number,
+  isPR: boolean,
+  labels: string[],
+  taskStatus: "requested" | "failed",
+  token: string
+): Promise<void> {
+  try {
+    const repoSlug = createRepoSlug(repoOwner, repoName);
+    const config = await loadEscalationConfig(repoSlug);
+
+    if (!config.enabled) {
+      console.log(`Escalation is disabled for ${repoSlug}`);
+      return;
+    }
+
+    // Security-sensitive escalation: check for security labels
+    if (labels.some((label) => label.toLowerCase().includes("security") || label.toLowerCase().includes("cve"))) {
+      console.log(`Detected security label on ${repoSlug}#${issueNumber}, escalating`);
+      // Escalation will be added by downstream processors
+      return;
+    }
+
+    // Production config escalation: check if issue touches critical files
+    const issueBody = await getIssueBody(repoOwner, repoName, issueNumber, token);
+    if (
+      issueBody &&
+      (issueBody.includes("/.github/workflows") ||
+        issueBody.includes("/deploy") ||
+        issueBody.includes("infra/lib") ||
+        issueBody.includes(".env") ||
+        issueBody.includes("secrets") ||
+        issueBody.includes("credentials"))
+    ) {
+      console.log(`Detected production config change on ${repoSlug}#${issueNumber}, escalating`);
+      return;
+    }
+
+    // Note: Repeated failure, PR staleness, and low credits triggers are handled
+    // by separate processors (daily-digest-handler, review-handler, escalation-handler)
+  } catch (error) {
+    console.warn(`Failed to check escalation triggers for ${repoSlug}#${issueNumber}:`, error);
+    // Don't fail the main handler if escalation check fails
+  }
+}
+
+async function getIssueBody(
+  repoOwner: string,
+  repoName: string,
+  issueNumber: number,
+  token: string
+): Promise<string | null> {
+  try {
+    const response = await githubRequest(
+      `/repos/${repoOwner}/${repoName}/issues/${issueNumber}`,
+      token,
+      { method: "GET" },
+      [200]
+    );
+    const issueData = await response.json() as any;
+    return issueData.body || null;
+  } catch (error) {
+    console.warn(`Failed to get issue body for #${issueNumber}:`, error);
+    return null;
+  }
 }
 
 /**

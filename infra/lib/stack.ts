@@ -582,6 +582,90 @@ export class GitHubAgentStack extends cdk.Stack {
     qaRule.addTarget(new targets.LambdaFunction(qaFunction));
 
     // -------------------------------------------------------
+    // Escalation Handler Lambda
+    // -------------------------------------------------------
+    const escalationHandler = new NodejsFunction(this, "EscalationHandler", {
+      entry: path.join(__dirname, "escalation-handler.ts"),
+      handler: "handler",
+      runtime: lambda.Runtime.NODEJS_20_X,
+      architecture: lambda.Architecture.ARM_64,
+      timeout: cdk.Duration.minutes(5),
+      memorySize: 256,
+      bundling: {
+        minify: true,
+        sourceMap: true,
+        target: "node20",
+        externalModules: [],
+      },
+      environment: {
+        ARTIFACTS_BUCKET: artifactsBucket.bucketName,
+        GITHUB_APP_ID_PARAM: PARAM_GITHUB_APP_ID,
+        GITHUB_APP_PRIVATE_KEY_PARAM: PARAM_GITHUB_APP_PRIVATE_KEY,
+      },
+    });
+
+    escalationHandler.addToRolePolicy(
+      new iam.PolicyStatement({
+        actions: ["ssm:GetParameter"],
+        resources: ssmParamArns,
+      })
+    );
+
+    artifactsBucket.grantReadWrite(escalationHandler);
+
+    // -------------------------------------------------------
+    // EventBridge rule to trigger escalation checks (every 15 minutes)
+    // -------------------------------------------------------
+    const escalationRule = new events.Rule(this, "EscalationRule", {
+      description: "Trigger escalation queue update every 15 minutes",
+      schedule: events.Schedule.rate(cdk.Duration.minutes(15)),
+    });
+
+    escalationRule.addTarget(new targets.LambdaFunction(escalationHandler));
+
+    // -------------------------------------------------------
+    // Task Status Handler Lambda
+    // -------------------------------------------------------
+    const taskStatusHandler = new NodejsFunction(this, "TaskStatusHandler", {
+      entry: path.join(__dirname, "task-status-handler.ts"),
+      handler: "handler",
+      runtime: lambda.Runtime.NODEJS_20_X,
+      architecture: lambda.Architecture.ARM_64,
+      timeout: cdk.Duration.minutes(5),
+      memorySize: 256,
+      bundling: {
+        minify: true,
+        sourceMap: true,
+        target: "node20",
+        externalModules: [],
+      },
+      environment: {
+        ARTIFACTS_BUCKET: artifactsBucket.bucketName,
+        GITHUB_APP_ID_PARAM: PARAM_GITHUB_APP_ID,
+        GITHUB_APP_PRIVATE_KEY_PARAM: PARAM_GITHUB_APP_PRIVATE_KEY,
+      },
+    });
+
+    taskStatusHandler.addToRolePolicy(
+      new iam.PolicyStatement({
+        actions: ["ssm:GetParameter"],
+        resources: ssmParamArns,
+      })
+    );
+
+    artifactsBucket.grantReadWrite(taskStatusHandler);
+
+    // -------------------------------------------------------
+    // EventBridge rule to trigger task status checks (every 30 minutes)
+    // -------------------------------------------------------
+    const taskStatusRule = new events.Rule(this, "TaskStatusRule", {
+      description: "Trigger task status monitoring every 30 minutes",
+      schedule: events.Schedule.rate(cdk.Duration.minutes(30)),
+    });
+
+    taskStatusRule.addTarget(new targets.LambdaFunction(taskStatusHandler));
+
+    // -------------------------------------------------------
     // API Gateway HTTP API
     // -------------------------------------------------------
     const httpApi = new apigwv2.HttpApi(this, "WebhookApi", {
