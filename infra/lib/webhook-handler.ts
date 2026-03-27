@@ -59,6 +59,7 @@ const SIGNAL_LABEL_RUNNING = "agent:running";
 const SIGNAL_LABEL_WAITING = "agent:waiting";
 const SIGNAL_LABEL_FAILED = "agent:failed";
 const SIGNAL_LABEL_SUCCEEDED = "agent:succeeded";
+const STATUS_LABEL_BLOCKED = "status:blocked";
 const REVIEW_APPROVED_LABEL = "review:approved";
 
 // Auto-merge hold period (1 hour)
@@ -193,6 +194,23 @@ async function addIssueComment(
       body: JSON.stringify({ body }),
     },
     [201]
+  );
+}
+
+async function addBlockedLabel(
+  repoOwner: string,
+  repoName: string,
+  issueNumber: number,
+  token: string
+): Promise<void> {
+  await githubRequest(
+    `/repos/${repoOwner}/${repoName}/issues/${issueNumber}/labels`,
+    token,
+    {
+      method: "POST",
+      body: JSON.stringify({ labels: [STATUS_LABEL_BLOCKED] }),
+    },
+    [200]
   );
 }
 
@@ -2204,13 +2222,12 @@ export async function handler(event: {
     const cost = getModelCost(selectedModel);
     console.log(`Insufficient credits for task: required=${cost}, available=${balance?.current_balance ?? 0}`);
 
-    // Update GitHub issue with credit error
-    await setSignalLabel(
+    // Update GitHub issue with blocked status due to insufficient credits
+    await addBlockedLabel(
       repoOwner,
       repoName,
       issueNumber,
-      githubToken,
-      SIGNAL_LABEL_FAILED
+      githubToken
     );
     await addIssueComment(
       repoOwner,
