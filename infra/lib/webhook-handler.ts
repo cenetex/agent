@@ -44,8 +44,10 @@ const s3 = new S3Client({});
 const CLUSTER_ARN = process.env.CLUSTER_ARN!;
 const TASK_DEFINITION_ARN = process.env.TASK_DEFINITION_ARN!;
 const DIAGNOSTIC_TASK_DEFINITION_ARN = process.env.DIAGNOSTIC_TASK_DEFINITION_ARN!;
+const REVIEW_TASK_DEFINITION_ARN = process.env.REVIEW_TASK_DEFINITION_ARN!;
 const CONTAINER_NAME = process.env.CONTAINER_NAME!;
 const DIAGNOSTIC_CONTAINER_NAME = process.env.DIAGNOSTIC_CONTAINER_NAME!;
+const REVIEW_CONTAINER_NAME = process.env.REVIEW_CONTAINER_NAME!;
 const SUBNETS = process.env.SUBNETS!;
 const SECURITY_GROUP = process.env.SECURITY_GROUP!;
 const WEBHOOK_SECRET_PARAM = process.env.WEBHOOK_SECRET_PARAM!;
@@ -419,6 +421,67 @@ async function lookupTaskMetadataForPR(
     return null;
   } catch (error) {
     console.error(`Failed to lookup task metadata for PR #${prNumber}:`, error);
+    return null;
+  }
+}
+
+/**
+ * Finds the PR associated with an issue that was created by the agent
+ * Searches for PRs created by the agent bot that reference or are related to the issue
+ */
+async function findAssociatedPRForIssue(
+  repoOwner: string,
+  repoName: string,
+  issueNumber: number,
+  token: string
+): Promise<any | null> {
+  try {
+    // Get all open PRs created by the coding agent
+    const response = await githubRequest(
+      `/repos/${repoOwner}/${repoName}/pulls?state=open&per_page=100`,
+      token,
+      { method: "GET" },
+      [200]
+    );
+
+    const prs = await response.json() as any[];
+
+    // Filter PRs created by the agent bot
+    const agentPRs = prs.filter((pr: any) => {
+      const botLogin = pr.user.login;
+      return botLogin.includes("agent") || botLogin.includes("bot");
+    });
+
+    // Look for a PR that mentions this issue in the body or title
+    for (const pr of agentPRs) {
+      const body = pr.body || "";
+      const title = pr.title || "";
+
+      // Check if PR body/title references the issue number
+      if (body.includes(`#${issueNumber}`) || title.includes(`#${issueNumber}`)) {
+        return pr;
+      }
+
+      // Also check for metadata in the PR body
+      if (body.includes(`Issue: ${issueNumber}`) || body.includes(`issue: #${issueNumber}`)) {
+        return pr;
+      }
+    }
+
+    // If no exact match found, try to find the most recent PR from the agent
+    // This handles cases where the issue number might not be explicitly mentioned
+    if (agentPRs.length > 0) {
+      // Sort by creation date descending and return the most recent
+      const sorted = agentPRs.sort(
+        (a: any, b: any) =>
+          new Date(b.created_at).getTime() - new Date(a.created_at).getTime()
+      );
+      return sorted[0];
+    }
+
+    return null;
+  } catch (error) {
+    console.error(`Failed to find associated PR for issue #${issueNumber}:`, error);
     return null;
   }
 }
@@ -1404,6 +1467,200 @@ export async function handler(event: {
         statusCode: 500,
         body: JSON.stringify({
           error: "Failed to handle published release"
+        }),
+      };
+    }
+  } else if (ghEvent === "issues" && payload.action === "labeled" && payload.label?.name?.toLowerCase() === SIGNAL_LABEL_SUCCEEDED) {
+    // Handle agent:succeeded label on issue: trigger review of associated PR
+    const repoOwner = payload.repository.owner.login;
+    const repoName = payload.repository.name;
+    const issueNumber = payload.issue.number;
+
+    console.log(`Handling agent:succeeded label on issue #${issueNumber}`);
+
+    try {
+      // Get GitHub App credentials and mint installation token
+      const [appId, privateKey, openrouterKey] = await Promise.all([
+        getParameter(GITHUB_APP_ID_PARAM),
+        getParameter(GITHUB_APP_PRIVATE_KEY_PARAM),
+        getParameter(OPENROUTER_API_KEY_PARAM),
+      ]);
+
+      const appConfig: GitHubAppConfig = { appId, privateKey };
+      const githubToken = await getInstallationToken(repoOwner, repoName, appConfig);
+
+      // Find the associated PR created by the agent for this issue
+      const repoSlug = createRepoSlug(repoOwner, repoName);
+      const associatedPR = await findAssociatedPRForIssue(
+        repoOwner,
+        repoName,
+        issueNumber,
+        githubToken
+      );
+
+      if (!associatedPR) {
+        console.log(`No associated PR found for issue #${issueNumber}`);
+        return {
+          statusCode: 200,
+          body: JSON.stringify({
+            message: "No PR found for issue",
+            issueNumber
+          }),
+        };
+      }
+
+      console.log(`Found associated PR #${associatedPR.number} for issue #${issueNumber}`);
+
+      // Trigger a review task for the PR
+      try {
+        const taskId = generateTaskId();
+        const artifactPrefix = `tasks/${repoSlug}/${taskId}`;
+
+        const reviewPayload = {
+          task_id: taskId,
+          repo_slug: repoSlug,
+          pr_number: associatedPR.number,
+          head_sha: associatedPR.head.sha,
+          base_sha: associatedPR.base.sha,
+          pr_metadata: {
+            number: associatedPR.number,
+            title: associatedPR.title,
+            body: associatedPR.body || "",
+            labels: associatedPR.labels.map((label: any) => label.name),
+            author: associatedPR.user.login,
+            head_ref: associatedPR.head.ref,
+            base_ref: associatedPR.base.ref,
+            created_by_bot: true,
+          },
+          created_at: new Date().toISOString(),
+        };
+
+        const reviewEnvironment: Record<string, string> = {
+          REVIEW_PAYLOAD: JSON.stringify(reviewPayload),
+          GITHUB_TOKEN: githubToken,
+          OPENROUTER_API_KEY: openrouterKey,
+          ARTIFACTS_BUCKET,
+          ARTIFACT_PREFIX: artifactPrefix,
+          REPO: repoSlug,
+          PR_NUMBER: associatedPR.number.toString(),
+          REVIEW_CRITERIA: JSON.stringify({
+            check_compilation: true,
+            check_security: true,
+            check_issue_alignment: true,
+            check_logic: true,
+            check_complexity: true,
+            check_cost_impact: true,
+            protected_paths: [
+              ".github/workflows/",
+              "infra/lib/stack.ts",
+              "Dockerfile",
+              "infra/",
+              ".env",
+              "credentials",
+              "secrets",
+              "*.key",
+              "*.pem",
+            ],
+          }),
+        };
+
+        const params: RunTaskCommandInput = {
+          cluster: CLUSTER_ARN,
+          taskDefinition: REVIEW_TASK_DEFINITION_ARN,
+          launchType: "FARGATE",
+          count: 1,
+          networkConfiguration: {
+            awsvpcConfiguration: {
+              subnets: SUBNETS.split(","),
+              securityGroups: [SECURITY_GROUP],
+              assignPublicIp: "ENABLED",
+            },
+          },
+          overrides: {
+            containerOverrides: [
+              {
+                name: REVIEW_CONTAINER_NAME,
+                environment: Object.entries(reviewEnvironment).map(([name, value]) => ({
+                  name,
+                  value,
+                })),
+              },
+            ],
+          },
+        };
+
+        const result = await ecs.send(new RunTaskCommand(params));
+        const taskArn = result.tasks?.[0]?.taskArn;
+
+        if (!taskArn || (result.failures?.length ?? 0) > 0) {
+          const failureDetails =
+            result.failures?.map((failure) => failure.reason ?? failure.arn ?? "unknown failure") ??
+            [];
+          throw new Error(
+            failureDetails.length > 0
+              ? `Review task launch failed: ${failureDetails.join(", ")}`
+              : "Review task launch did not return a task ARN"
+          );
+        }
+
+        console.log(`Started review task ${taskId} for PR #${associatedPR.number}`);
+
+        // Add a comment on the PR indicating review has started
+        await addIssueComment(
+          repoOwner,
+          repoName,
+          associatedPR.number,
+          githubToken,
+          `🔍 **Automated review started**
+
+The agent implementation has completed and this PR is now undergoing automated review to verify:
+- ✅ Code compiles and passes linting
+- ✅ No security issues detected
+- ✅ Implementation addresses the issue requirements
+- ✅ No logic errors or unnecessary complexity
+- ✅ Reasonable cost impact
+
+This process usually takes a few minutes. If the review passes, the PR will be automatically merged after a 1-hour hold period.`
+        );
+
+        return {
+          statusCode: 200,
+          body: JSON.stringify({
+            message: "Review task started for PR",
+            prNumber: associatedPR.number,
+            taskId,
+            taskArn
+          }),
+        };
+      } catch (reviewError) {
+        console.error(`Failed to start review task for PR #${associatedPR.number}:`, reviewError);
+
+        // Add a comment about review failure
+        await addIssueComment(
+          repoOwner,
+          repoName,
+          associatedPR.number,
+          githubToken,
+          `❌ **Failed to start automated review**
+
+An error occurred while attempting to start the automated review process. Please manually review the PR.
+
+Error: ${reviewError instanceof Error ? reviewError.message : "Unknown error"}`
+        );
+
+        return {
+          statusCode: 500,
+          body: JSON.stringify({
+            error: "Failed to start review task"
+          }),
+        };
+      }
+    } catch (error) {
+      console.error(`Failed to handle agent:succeeded label on issue #${issueNumber}:`, error);
+      return {
+        statusCode: 500,
+        body: JSON.stringify({
+          error: "Failed to handle agent:succeeded"
         }),
       };
     }
