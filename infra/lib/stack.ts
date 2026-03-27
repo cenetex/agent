@@ -488,6 +488,42 @@ export class GitHubAgentStack extends cdk.Stack {
     digestRule.addTarget(new targets.LambdaFunction(dailyDigestFunction));
 
     // -------------------------------------------------------
+    // Credit Rescan Lambda (scans for blocked issues when credits available)
+    // -------------------------------------------------------
+    const creditRescanFunction = new NodejsFunction(this, "CreditRescanFunction", {
+      entry: path.join(__dirname, "credit-rescan-handler.ts"),
+      handler: "handler",
+      runtime: lambda.Runtime.NODEJS_20_X,
+      architecture: lambda.Architecture.ARM_64,
+      timeout: cdk.Duration.minutes(5),
+      memorySize: 512,
+      environment: {
+        ARTIFACTS_BUCKET: artifactsBucket.bucketName,
+        GITHUB_APP_ID_PARAM: PARAM_GITHUB_APP_ID,
+        GITHUB_APP_PRIVATE_KEY_PARAM: PARAM_GITHUB_APP_PRIVATE_KEY,
+      },
+    });
+
+    creditRescanFunction.addToRolePolicy(
+      new iam.PolicyStatement({
+        actions: ["ssm:GetParameter"],
+        resources: ssmParamArns,
+      })
+    );
+
+    artifactsBucket.grantReadWrite(creditRescanFunction);
+
+    // -------------------------------------------------------
+    // EventBridge rule to trigger credit rescan (every hour)
+    // -------------------------------------------------------
+    const creditRescanRule = new events.Rule(this, "CreditRescanRule", {
+      description: "Trigger credit rescan hourly to unblock issues when credits are available",
+      schedule: events.Schedule.rate(cdk.Duration.hours(1)),
+    });
+
+    creditRescanRule.addTarget(new targets.LambdaFunction(creditRescanFunction));
+
+    // -------------------------------------------------------
     // Release Draft Lambda
     // -------------------------------------------------------
     const releaseDraftFunction = new NodejsFunction(this, "ReleaseDraftFunction", {
