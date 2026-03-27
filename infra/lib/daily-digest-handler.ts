@@ -11,11 +11,13 @@ import type { TaskMetadata } from "./types";
 import {
   parseRepoSlug,
   createGitHubAppJWT,
+  getInstallationToken,
   getInstallationId,
   createInstallationToken,
   type CreditBalance,
   createCreditBalancePath,
   getModelCost,
+  type GitHubAppConfig,
 } from "./types";
 
 const s3 = new S3Client({});
@@ -559,10 +561,16 @@ export async function handler(): Promise<DigestStats> {
       console.error("Failed to collect credit stats:", error);
     }
 
+    // Create installation token once for all API calls
+    const appConfig: GitHubAppConfig = {
+      appId,
+      privateKey,
+    };
+    const githubToken = await getInstallationToken("cenetex", "agent", appConfig);
+
     // Get merged PRs from all repos
     try {
-      const jwt = createGitHubAppJWT(appId, privateKey);
-      const mergedPRs = await getAllMergedPRs(jwt, since);
+      const mergedPRs = await getAllMergedPRs(githubToken, since);
       stats.mergedPRs = mergedPRs;
     } catch (error) {
       console.error("Failed to fetch merged PRs:", error);
@@ -570,8 +578,7 @@ export async function handler(): Promise<DigestStats> {
 
     // Get draft releases from all repos
     try {
-      const jwt = createGitHubAppJWT(appId, privateKey);
-      const draftReleases = await getDraftReleases(jwt);
+      const draftReleases = await getDraftReleases(githubToken);
       stats.draftReleases = draftReleases;
     } catch (error) {
       console.error("Failed to fetch draft releases:", error);
@@ -579,8 +586,7 @@ export async function handler(): Promise<DigestStats> {
 
     // Get PRs waiting for human review
     try {
-      const jwt = createGitHubAppJWT(appId, privateKey);
-      const reviewWaitingPRs = await getPRsWaitingForReview(jwt);
+      const reviewWaitingPRs = await getPRsWaitingForReview(githubToken);
       stats.reviewWaitingPRs = reviewWaitingPRs;
     } catch (error) {
       console.error("Failed to fetch PRs waiting for review:", error);
@@ -588,11 +594,6 @@ export async function handler(): Promise<DigestStats> {
 
     // Create digest issue in the cenetex/agent repository
     try {
-      const jwt = createGitHubAppJWT(appId, privateKey);
-      const installationId = await getInstallationId("cenetex", "agent", jwt);
-      const tokenResult = await createInstallationToken(installationId, jwt);
-      const githubToken = tokenResult.token;
-
       await createDigestIssue("cenetex", "agent", githubToken, stats, dateStr);
     } catch (error) {
       const errorMsg = `Failed to create digest issue: ${error}`;
