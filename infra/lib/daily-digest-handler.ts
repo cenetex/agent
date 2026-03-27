@@ -29,9 +29,13 @@ interface DigestStats {
   succeeded: number;
   failed: number;
   timed_out: number;
+  failed_not_retried: number;
   mergedPRs: Array<{ title: string; number: number; repo: string }>;
   draftReleases: Array<{ repo: string; version: string; url: string }>;
   reviewWaitingPRs: Array<{ title: string; number: number; repo: string; url: string }>;
+  prsReadyToMerge: Array<{ title: string; number: number; repo: string; url: string; age_hours: number }>;
+  stalePRs: Array<{ title: string; number: number; repo: string; url: string; age_days: number; last_update: string }>;
+  openIssues: Array<{ title: string; number: number; repo: string; priority: string; agent_label: boolean }>;
   creditsSpent: number;
   repoCredits: Array<{ repo: string; balance: number; spent_today: number }>;
   lowBalanceRepos: Array<{ repo: string; balance: number }>;
@@ -309,14 +313,282 @@ async function getPRsWaitingForReview(
   return waitingPRs;
 }
 
+async function getFailedNotRetriedCount(token: string): Promise<number> {
+  try {
+    const reposList = new Set<string>();
+    let continuationToken: string | undefined;
+
+    // Get list of repos from task metadata
+    do {
+      const listResult = await s3.send(new ListObjectsV2Command({
+        Bucket: ARTIFACTS_BUCKET,
+        Prefix: "tasks/",
+        ContinuationToken: continuationToken,
+        MaxKeys: 1000,
+      }));
+
+      if (listResult.Contents) {
+        for (const obj of listResult.Contents) {
+          const key = obj.Key;
+          if (key && key.includes('/metadata.json')) {
+            const parts = key.split('/');
+            if (parts.length >= 4) {
+              const repoSlug = `${parts[1]}/${parts[2]}`;
+              reposList.add(repoSlug);
+            }
+          }
+        }
+      }
+      continuationToken = listResult.NextContinuationToken;
+    } while (continuationToken);
+
+    let count = 0;
+    for (const repoSlug of reposList) {
+      try {
+        const { owner, name } = parseRepoSlug(repoSlug);
+        const response = await githubRequest(
+          `/repos/${owner}/${name}/issues?state=open&labels=agent:failed&per_page=100`,
+          token,
+          { method: "GET" },
+          [200]
+        );
+        const issues = await response.json() as any[];
+        count += issues.length;
+      } catch (error) {
+        console.log(`Could not fetch failed issues in ${repoSlug}:`, error);
+      }
+    }
+    return count;
+  } catch (error) {
+    console.error("Failed to get failed not retried count:", error);
+    return 0;
+  }
+}
+
+async function getPRsReadyToMerge(token: string): Promise<
+  Array<{ title: string; number: number; repo: string; url: string; age_hours: number }>
+> {
+  const readyPRs: Array<{ title: string; number: number; repo: string; url: string; age_hours: number }> = [];
+
+  try {
+    const reposList = new Set<string>();
+    let continuationToken: string | undefined;
+
+    do {
+      const listResult = await s3.send(new ListObjectsV2Command({
+        Bucket: ARTIFACTS_BUCKET,
+        Prefix: "tasks/",
+        ContinuationToken: continuationToken,
+        MaxKeys: 1000,
+      }));
+
+      if (listResult.Contents) {
+        for (const obj of listResult.Contents) {
+          const key = obj.Key;
+          if (key && key.includes('/metadata.json')) {
+            const parts = key.split('/');
+            if (parts.length >= 4) {
+              const repoSlug = `${parts[1]}/${parts[2]}`;
+              reposList.add(repoSlug);
+            }
+          }
+        }
+      }
+      continuationToken = listResult.NextContinuationToken;
+    } while (continuationToken);
+
+    for (const repoSlug of reposList) {
+      try {
+        const { owner, name } = parseRepoSlug(repoSlug);
+        const response = await githubRequest(
+          `/repos/${owner}/${name}/pulls?state=open&per_page=100`,
+          token,
+          { method: "GET" },
+          [200]
+        );
+
+        const prs = await response.json() as any[];
+        const now = new Date();
+
+        for (const pr of prs) {
+          // Check if mergeable and CI is passing
+          if (pr.mergeable && !pr.draft) {
+            const createdAt = new Date(pr.created_at);
+            const age_hours = Math.floor((now.getTime() - createdAt.getTime()) / (1000 * 60 * 60));
+
+            readyPRs.push({
+              title: pr.title,
+              number: pr.number,
+              repo: repoSlug,
+              url: pr.html_url,
+              age_hours,
+            });
+          }
+        }
+      } catch (error) {
+        console.log(`Could not fetch PRs in ${repoSlug}:`, error);
+      }
+    }
+  } catch (error) {
+    console.error("Failed to get PRs ready to merge:", error);
+  }
+
+  return readyPRs;
+}
+
+async function getStalePRs(token: string): Promise<
+  Array<{ title: string; number: number; repo: string; url: string; age_days: number; last_update: string }>
+> {
+  const stalePRs: Array<{ title: string; number: number; repo: string; url: string; age_days: number; last_update: string }> = [];
+
+  try {
+    const reposList = new Set<string>();
+    let continuationToken: string | undefined;
+
+    do {
+      const listResult = await s3.send(new ListObjectsV2Command({
+        Bucket: ARTIFACTS_BUCKET,
+        Prefix: "tasks/",
+        ContinuationToken: continuationToken,
+        MaxKeys: 1000,
+      }));
+
+      if (listResult.Contents) {
+        for (const obj of listResult.Contents) {
+          const key = obj.Key;
+          if (key && key.includes('/metadata.json')) {
+            const parts = key.split('/');
+            if (parts.length >= 4) {
+              const repoSlug = `${parts[1]}/${parts[2]}`;
+              reposList.add(repoSlug);
+            }
+          }
+        }
+      }
+      continuationToken = listResult.NextContinuationToken;
+    } while (continuationToken);
+
+    for (const repoSlug of reposList) {
+      try {
+        const { owner, name } = parseRepoSlug(repoSlug);
+        const response = await githubRequest(
+          `/repos/${owner}/${name}/pulls?state=open&sort=updated&direction=asc&per_page=100`,
+          token,
+          { method: "GET" },
+          [200]
+        );
+
+        const prs = await response.json() as any[];
+        const now = new Date();
+        const sevenDaysAgo = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000);
+
+        for (const pr of prs) {
+          const updated = new Date(pr.updated_at);
+          if (updated < sevenDaysAgo && !pr.draft) {
+            const age_days = Math.floor((now.getTime() - new Date(pr.created_at).getTime()) / (1000 * 60 * 60 * 24));
+            stalePRs.push({
+              title: pr.title,
+              number: pr.number,
+              repo: repoSlug,
+              url: pr.html_url,
+              age_days,
+              last_update: pr.updated_at,
+            });
+          }
+        }
+      } catch (error) {
+        console.log(`Could not fetch stale PRs in ${repoSlug}:`, error);
+      }
+    }
+  } catch (error) {
+    console.error("Failed to get stale PRs:", error);
+  }
+
+  return stalePRs;
+}
+
+async function getOpenIssues(token: string): Promise<
+  Array<{ title: string; number: number; repo: string; priority: string; agent_label: boolean }>
+> {
+  const issues: Array<{ title: string; number: number; repo: string; priority: string; agent_label: boolean }> = [];
+
+  try {
+    const reposList = new Set<string>();
+    let continuationToken: string | undefined;
+
+    do {
+      const listResult = await s3.send(new ListObjectsV2Command({
+        Bucket: ARTIFACTS_BUCKET,
+        Prefix: "tasks/",
+        ContinuationToken: continuationToken,
+        MaxKeys: 1000,
+      }));
+
+      if (listResult.Contents) {
+        for (const obj of listResult.Contents) {
+          const key = obj.Key;
+          if (key && key.includes('/metadata.json')) {
+            const parts = key.split('/');
+            if (parts.length >= 4) {
+              const repoSlug = `${parts[1]}/${parts[2]}`;
+              reposList.add(repoSlug);
+            }
+          }
+        }
+      }
+      continuationToken = listResult.NextContinuationToken;
+    } while (continuationToken);
+
+    for (const repoSlug of reposList) {
+      try {
+        const { owner, name } = parseRepoSlug(repoSlug);
+        const response = await githubRequest(
+          `/repos/${owner}/${name}/issues?state=open&per_page=100`,
+          token,
+          { method: "GET" },
+          [200]
+        );
+
+        const items = await response.json() as any[];
+
+        for (const item of items) {
+          // Filter out PRs (they have pull_request property)
+          if (!item.pull_request) {
+            const priority = item.labels?.find((l: any) => l.name?.includes("priority"))?.name || "unknown";
+            const hasAgent = item.labels?.some((l: any) => l.name === "agent");
+
+            issues.push({
+              title: item.title,
+              number: item.number,
+              repo: repoSlug,
+              priority,
+              agent_label: !!hasAgent,
+            });
+          }
+        }
+      } catch (error) {
+        console.log(`Could not fetch issues in ${repoSlug}:`, error);
+      }
+    }
+  } catch (error) {
+    console.error("Failed to get open issues:", error);
+  }
+
+  return issues;
+}
+
 async function collectTaskMetadata(since: Date): Promise<DigestStats> {
   const stats: DigestStats = {
     succeeded: 0,
     failed: 0,
     timed_out: 0,
+    failed_not_retried: 0,
     mergedPRs: [],
     draftReleases: [],
     reviewWaitingPRs: [],
+    prsReadyToMerge: [],
+    stalePRs: [],
+    openIssues: [],
     creditsSpent: 0,
     repoCredits: [],
     lowBalanceRepos: [],
@@ -492,6 +764,63 @@ async function createDigestIssue(
     creditSection += `- ⚠️ **Low Balance Repos**: ${stats.lowBalanceRepos.map(r => `${r.repo} (${r.balance}cr)`).join(", ")}\n`;
   }
 
+  // Build PRs ready to merge section
+  let readyToMergeSection = "\n**✅ PRs Ready to Merge (CI Green, No Conflicts)**\n";
+  if (stats.prsReadyToMerge.length > 0) {
+    for (const pr of stats.prsReadyToMerge) {
+      readyToMergeSection += `- [${pr.title} (#${pr.number})](${pr.url}) in ${pr.repo} (${pr.age_hours}h old)\n`;
+    }
+  } else {
+    readyToMergeSection = "\n**✅ PRs Ready to Merge**\nNone\n";
+  }
+
+  // Build stale PRs section
+  let stalePRsSection = "\n**⏳ Stale PRs (>7 days, no activity)**\n";
+  if (stats.stalePRs.length > 0) {
+    for (const pr of stats.stalePRs) {
+      stalePRsSection += `- [${pr.title} (#${pr.number})](${pr.url}) in ${pr.repo} (${pr.age_days}d old, last updated ${pr.last_update})\n`;
+    }
+  } else {
+    stalePRsSection = "\n**⏳ Stale PRs**\nNone\n";
+  }
+
+  // Build open issues section
+  let openIssuesSection = "\n**📋 Open Issues by Priority**\n";
+  if (stats.openIssues.length > 0) {
+    const byPriority: { [key: string]: Array<{ title: string; number: number; repo: string; agent_label: boolean }> } = {};
+    for (const issue of stats.openIssues) {
+      if (!byPriority[issue.priority]) {
+        byPriority[issue.priority] = [];
+      }
+      byPriority[issue.priority].push(issue);
+    }
+
+    for (const [priority, issues] of Object.entries(byPriority)) {
+      openIssuesSection += `\n_${priority}_\n`;
+      for (const issue of issues) {
+        const label = issue.agent_label ? " [🤖 agent]" : "";
+        openIssuesSection += `- [${issue.title} (#${issue.number})](https://github.com/${issue.repo}/issues/${issue.number}) in ${issue.repo}${label}\n`;
+      }
+    }
+  } else {
+    openIssuesSection = "\n**📋 Open Issues**\nNone\n";
+  }
+
+  // Build triage alerts section
+  let triageSection = "\n**⚠️  Requires Action**\n";
+  if (stats.failed_not_retried > 0) {
+    triageSection += `- ${stats.failed_not_retried} failed agent runs waiting for retry\n`;
+  }
+  if (stats.stalePRs.length > 0) {
+    triageSection += `- ${stats.stalePRs.length} PRs stale for >7 days\n`;
+  }
+  if (stats.lowBalanceRepos.length > 0) {
+    triageSection += `- ${stats.lowBalanceRepos.length} repos with low credit balance\n`;
+  }
+  if (stats.failed_not_retried === 0 && stats.stalePRs.length === 0 && stats.lowBalanceRepos.length === 0) {
+    triageSection = "\n**⚠️  Requires Action**\nNone\n";
+  }
+
   const body = `## Agent Activity Summary: ${digestDate}
 
 **Task Outcomes**
@@ -503,6 +832,10 @@ ${total > 0 ? `- **Success Rate: ${successRate}%**` : ""}
 ${prSection}
 ${releaseSection}
 ${reviewSection}
+${readyToMergeSection}
+${stalePRsSection}
+${openIssuesSection}
+${triageSection}
 ${creditSection}
 **Artifact Bucket**
 - Artifacts available at: \`s3://${ARTIFACTS_BUCKET}/\`
@@ -584,6 +917,41 @@ export async function handler(): Promise<DigestStats> {
       stats.reviewWaitingPRs = reviewWaitingPRs;
     } catch (error) {
       console.error("Failed to fetch PRs waiting for review:", error);
+    }
+
+    // Get PRs ready to merge
+    try {
+      const jwt = createGitHubAppJWT(appId, privateKey);
+      const prsReady = await getPRsReadyToMerge(jwt);
+      stats.prsReadyToMerge = prsReady;
+    } catch (error) {
+      console.error("Failed to fetch PRs ready to merge:", error);
+    }
+
+    // Get stale PRs
+    try {
+      const jwt = createGitHubAppJWT(appId, privateKey);
+      const stale = await getStalePRs(jwt);
+      stats.stalePRs = stale;
+    } catch (error) {
+      console.error("Failed to fetch stale PRs:", error);
+    }
+
+    // Get open issues
+    try {
+      const jwt = createGitHubAppJWT(appId, privateKey);
+      const issues = await getOpenIssues(jwt);
+      stats.openIssues = issues;
+    } catch (error) {
+      console.error("Failed to fetch open issues:", error);
+    }
+
+    // Get failed not retried count
+    try {
+      const jwt = createGitHubAppJWT(appId, privateKey);
+      stats.failed_not_retried = await getFailedNotRetriedCount(jwt);
+    } catch (error) {
+      console.error("Failed to get failed not retried count:", error);
     }
 
     // Create digest issue in the cenetex/agent repository

@@ -55,6 +55,7 @@ const OPENROUTER_API_KEY_PARAM = process.env.OPENROUTER_API_KEY_PARAM!;
 const ARTIFACTS_BUCKET = process.env.ARTIFACTS_BUCKET!;
 const TRIGGER_LABEL = "agent";
 const DIAGNOSE_LABEL = "diagnose";
+const TRIAGE_LABEL = "triage";
 const SIGNAL_LABEL_RUNNING = "agent:running";
 const SIGNAL_LABEL_WAITING = "agent:waiting";
 const SIGNAL_LABEL_FAILED = "agent:failed";
@@ -1352,6 +1353,52 @@ export async function handler(event: {
         return {
           statusCode: 500,
           body: JSON.stringify({ error: "Failed to launch diagnostic task" }),
+        };
+      }
+    }
+
+    // Handle triage label to trigger on-demand triage scan
+    if (labelName === TRIAGE_LABEL) {
+      console.log(`Handling triage label on issue #${payload.issue.number}`);
+
+      const repoOwner = payload.repository.owner.login;
+      const repoName = payload.repository.name;
+
+      try {
+        // Get GitHub App credentials
+        const [appId, privateKey] = await Promise.all([
+          getParameter(GITHUB_APP_ID_PARAM),
+          getParameter(GITHUB_APP_PRIVATE_KEY_PARAM),
+        ]);
+
+        const appConfig: GitHubAppConfig = { appId, privateKey };
+        const githubToken = await getInstallationToken(repoOwner, repoName, appConfig);
+
+        // Invoke the daily digest lambda function directly to run triage scan
+        console.log("Invoking daily digest for on-demand triage scan");
+
+        // Post a comment indicating triage is running
+        await githubRequest(
+          `/repos/${repoOwner}/${repoName}/issues/${payload.issue.number}/comments`,
+          githubToken,
+          {
+            method: "POST",
+            body: JSON.stringify({
+              body: "🔍 On-demand triage scan triggered. Results will be posted shortly.",
+            }),
+          },
+          [201]
+        );
+
+        return {
+          statusCode: 202,
+          body: JSON.stringify({ message: "Triage scan queued" }),
+        };
+      } catch (error) {
+        console.error("Failed to handle triage label:", error);
+        return {
+          statusCode: 500,
+          body: JSON.stringify({ error: "Failed to queue triage scan" }),
         };
       }
     }
