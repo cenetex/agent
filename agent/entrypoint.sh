@@ -76,6 +76,7 @@ update_task_metadata() {
   local status="$1"
   local error_message="$2"
   local pr_url="$3"
+  local failure_category="$4"
   local completed_timestamp=""
 
   if [ "$status" != "running" ]; then
@@ -99,6 +100,7 @@ update_task_metadata() {
   "started_at": "${RUN_STARTED_AT}",
   ${completed_timestamp}
   "error_message": $(if [ -n "$error_message" ]; then echo "\"$error_message\""; else echo "null"; fi),
+  "failure_category": $(if [ -n "$failure_category" ]; then echo "\"$failure_category\""; else echo "null"; fi),
   "pr_url": $(if [ -n "$pr_url" ]; then echo "\"$pr_url\""; else echo "null"; fi),
   "issue_metadata": $(echo "$TASK_PAYLOAD" | jq '.issue_metadata')
 }
@@ -249,41 +251,42 @@ on_exit() {
 
   set_signal_label "${SIGNAL_LABEL_FAILED}"
 
-  # Prepare detailed error message based on the stage
-  local error_message="${CURRENT_STAGE}"
-  local error_details=""
+  # Categorize the failure
+  local failure_info error_message error_details failure_category is_retryable suggested_action
+  failure_info=$(categorize_failure "${CURRENT_STAGE}" "Task failed during ${CURRENT_STAGE}" "${exit_code}")
+  failure_category=$(echo "$failure_info" | cut -d'|' -f1)
+  is_retryable=$(echo "$failure_info" | cut -d'|' -f2)
+  suggested_action=$(echo "$failure_info" | cut -d'|' -f3)
+
+  # Build error message for categorization
+  error_message="Task failed during ${CURRENT_STAGE}"
   case "${CURRENT_STAGE}" in
     "authenticate GitHub CLI")
       error_message="Authentication failed"
-      error_details="
-
-**Authentication Issue**: The GitHub App installation token is invalid or lacks sufficient permissions.
-
-Please check:
-- The GitHub App is installed on the target repository
-- The GitHub App has the required permissions (contents, pull requests, issues)
-- The \`GITHUB_APP_ID\` and \`GITHUB_APP_PRIVATE_KEY\` SSM parameters are correct
-- The repository is accessible with the GitHub App installation"
       ;;
     "clone repository"|"fetch issue context")
       error_message="Repository access failed"
-      error_details="
-
-**Repository Access Issue**: Unable to access repository \`${REPO}\` or issue/PR #${ISSUE_NUMBER}.
-
-Please check:
-- The repository exists and is accessible
-- The GitHub token has appropriate permissions
-- The issue/PR number is correct"
-      ;;
-    *)
-      error_message="Task failed during ${CURRENT_STAGE}"
       ;;
   esac
 
+  # Check if comment already exists to prevent duplicates
+  if comment_already_exists "${TASK_ID}"; then
+    echo "Comment for task ${TASK_ID} already exists, skipping duplicate"
+    upload_artifacts "$exit_code" ""
+    echo "=== Agent failed (duplicate comment prevented) ==="
+    exit "${exit_code}"
+  fi
+
   # Update metadata and upload artifacts
-  update_task_metadata "failed" "$error_message" ""
+  update_task_metadata "failed" "$error_message" "" "$failure_category"
   upload_artifacts "$exit_code" ""
+
+  # Build structured failure comment with diagnostics
+  local summary=$(create_completion_summary "failed" "" "$error_message")
+
+  # Create artifact links
+  local s3_artifact_link="https://console.aws.amazon.com/s3/buckets/${ARTIFACTS_BUCKET}?prefix=${ARTIFACT_PREFIX}/"
+  local cloudwatch_link="https://console.aws.amazon.com/logs/home?region=us-east-1#logsV2:log-groups"
 
   # Include last 50 lines of agent output if available
   local log_tail=""
@@ -298,12 +301,27 @@ $(tail -50 "${AGENT_LOG}")
 </details>"
   fi
 
-  # Create completion summary
-  local summary=$(create_completion_summary "failed" "" "$error_message")
+  # Build structured failure comment
+  local failure_comment="<!-- task_id: ${TASK_ID} -->
+${summary}
 
-  gh issue comment "${ISSUE_NUMBER}" -R "${REPO}" --body "${summary}${error_details}${log_tail}
+---
 
-Exit code: ${exit_code}" >/dev/null 2>&1 || true
+## Failure Diagnostics
+
+**Category:** \`${failure_category}\`
+**Retryable:** $([ "$is_retryable" = "true" ] && echo "Yes ✅" || echo "No ❌")
+
+**Suggested Action:** ${suggested_action}
+
+### Artifacts & Logs
+- **Task ID:** \`${TASK_ID}\`
+- **S3 Artifacts:** [View task output, logs, and metadata](${s3_artifact_link})
+- **CloudWatch Logs:** [View Lambda execution logs](${cloudwatch_link})
+- **Exit Code:** ${exit_code}
+${log_tail}"
+
+  gh issue comment "${ISSUE_NUMBER}" -R "${REPO}" --body "${failure_comment}" >/dev/null 2>&1 || true
 
   echo "=== Agent failed ==="
   exit "${exit_code}"
@@ -341,6 +359,45 @@ has_agent_question_comment() {
     )
     | length > 0
   ' >/dev/null <<<"${comments_json}"
+}
+
+categorize_failure() {
+  local stage="$1"
+  local error_message="$2"
+  local exit_code="$3"
+
+  # Returns: category|retryable|suggested_action
+  # Transient (retryable) failures
+  if echo "$error_message" | grep -qi "insufficient credits"; then
+    echo "credit_exhaustion|true|Top up OpenRouter credits via your account dashboard"
+  elif echo "$error_message" | grep -qi "timeout\|60 minute"; then
+    echo "timeout|true|The task will be retried automatically; you can also retry manually"
+  elif echo "$error_message" | grep -qi "openrouter\|connection"; then
+    echo "external_service|true|External service is temporarily unavailable; will retry automatically"
+
+  # Permanent (non-retryable) failures
+  elif echo "$error_message" | grep -qi "authentication\|auth failed"; then
+    echo "auth_failure|false|Check GitHub App installation and token permissions"
+  elif echo "$error_message" | grep -qi "permission\|forbidden\|not authorized"; then
+    echo "permission_denied|false|The GitHub App lacks required permissions for this repository"
+  elif echo "$error_message" | grep -qi "repository\|repo.*not found"; then
+    echo "repo_not_found|false|Verify the repository exists and the GitHub App is installed"
+  elif [ "$stage" = "pre-flight checks" ]; then
+    echo "pre_flight_failure|false|Check infrastructure requirements: gh CLI, aws CLI, claude CLI"
+  elif [ "$stage" = "run agent"* ]; then
+    echo "execution_failure|false|Check the agent logs and issue requirements"
+  else
+    echo "unknown|false|Review the error details and GitHub App permissions"
+  fi
+}
+
+comment_already_exists() {
+  local task_id="$1"
+
+  # Check if a comment with this task ID already exists (prevent duplicates)
+  gh api "repos/${REPO}/issues/${ISSUE_NUMBER}/comments?per_page=100" \
+    --jq ".[] | select(.body | contains(\"<!-- task_id: ${task_id} -->\")) | .id" \
+    2>/dev/null | grep -q .
 }
 
 issue_was_closed() {
