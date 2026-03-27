@@ -1241,6 +1241,284 @@ async function launchDiagnosticFargateTask(
   console.log(`Started diagnostic Fargate task: ${taskArn}`);
 }
 
+/**
+ * Gets all open PRs in the repository
+ */
+async function getOpenPRs(
+  repoOwner: string,
+  repoName: string,
+  token: string
+): Promise<any[]> {
+  const response = await githubRequest(
+    `/repos/${repoOwner}/${repoName}/pulls?state=open&per_page=100`,
+    token,
+    { method: "GET" },
+    [200]
+  );
+  return await response.json() as any[];
+}
+
+/**
+ * Checks if a PR has agent:succeeded label on its source issue
+ */
+async function hasAgentSucceededLabel(
+  repoOwner: string,
+  repoName: string,
+  prNumber: number,
+  prBody: string,
+  token: string
+): Promise<boolean> {
+  try {
+    // Parse PR body for issue references (e.g., "Fixes #123")
+    const issueReferences = parseIssueReferences(prBody, repoOwner);
+    const sameRepoIssues = issueReferences.filter((ref) => ref.is_same_repo);
+
+    if (sameRepoIssues.length === 0) {
+      console.log(`No issue references found in PR #${prNumber} body`);
+      return false;
+    }
+
+    // Check labels on the referenced issue
+    for (const issue of sameRepoIssues) {
+      const labels = await getIssueLabels(repoOwner, repoName, issue.issue_number, token);
+      if (labels.includes(SIGNAL_LABEL_SUCCEEDED)) {
+        console.log(`Issue #${issue.issue_number} has ${SIGNAL_LABEL_SUCCEEDED} label`);
+        return true;
+      }
+    }
+
+    console.log(`No referenced issue has ${SIGNAL_LABEL_SUCCEEDED} label`);
+    return false;
+  } catch (error) {
+    console.error(`Failed to check for agent:succeeded label: ${error}`);
+    return false;
+  }
+}
+
+/**
+ * Attempts to auto-rebase a PR using gh pr update-branch
+ * Returns true if successful, false if rebase failed
+ */
+async function attemptAutoRebase(
+  repoOwner: string,
+  repoName: string,
+  prNumber: number,
+  token: string
+): Promise<boolean> {
+  try {
+    const response = await githubRequest(
+      `/repos/${repoOwner}/${repoName}/pulls/${prNumber}/update-branch`,
+      token,
+      {
+        method: "PUT",
+        body: JSON.stringify({
+          expected_head_sha: null, // Allow any current head
+        }),
+      },
+      [200, 422]
+    );
+
+    const result = await response.json() as any;
+
+    if (response.status === 200) {
+      console.log(`Successfully rebased PR #${prNumber}`);
+      return true;
+    } else {
+      // 422 indicates merge conflict that can't be auto-resolved
+      console.log(`PR #${prNumber} has unresolvable conflicts: ${JSON.stringify(result)}`);
+      return false;
+    }
+  } catch (error) {
+    console.error(`Error attempting to rebase PR #${prNumber}: ${error}`);
+    return false;
+  }
+}
+
+/**
+ * Creates a fix issue for a PR with unresolvable conflicts
+ */
+async function createConflictFixIssue(
+  repoOwner: string,
+  repoName: string,
+  prNumber: number,
+  prTitle: string,
+  prUrl: string,
+  token: string
+): Promise<string | null> {
+  try {
+    const fixIssueTitle = `fix: resolve merge conflicts in PR #${prNumber}`;
+    const fixIssueBody = `## Context
+This issue was automatically created because PR #${prNumber} has merge conflicts that cannot be auto-resolved.
+
+**Original PR:** ${prUrl}
+**PR Title:** ${prTitle}
+
+## Problem
+The base branch has been updated, and the PR now has merge conflicts that require manual resolution.
+
+## Solution
+1. Pull the base branch to get the latest changes
+2. Resolve the conflicts locally
+3. Push the resolved changes to the PR branch
+
+---
+*This issue was auto-created by the conflict detection system. Add the \`agent\` label if you'd like the agent to handle this.*`;
+
+    const response = await githubRequest(
+      `/repos/${repoOwner}/${repoName}/issues`,
+      token,
+      {
+        method: "POST",
+        body: JSON.stringify({
+          title: fixIssueTitle,
+          body: fixIssueBody,
+        }),
+      },
+      [201]
+    );
+
+    const issue = await response.json() as any;
+    const issueNumber = issue.number;
+
+    console.log(`Created conflict fix issue #${issueNumber} for PR #${prNumber}`);
+
+    // Label the fix issue with agent label for auto-assignment
+    await githubRequest(
+      `/repos/${repoOwner}/${repoName}/issues/${issueNumber}/labels`,
+      token,
+      {
+        method: "POST",
+        body: JSON.stringify({ labels: [TRIGGER_LABEL] }),
+      },
+      [200, 404]
+    );
+
+    return issue.html_url;
+  } catch (error) {
+    console.error(`Failed to create conflict fix issue for PR #${prNumber}: ${error}`);
+    return null;
+  }
+}
+
+/**
+ * Handles push events to main branch - scans for conflicts and auto-rebases PRs
+ */
+async function handlePushToMain(
+  repoOwner: string,
+  repoName: string,
+  token: string
+): Promise<{ rebased: number; conflicts: number; fixIssuesCreated: number }> {
+  const stats = { rebased: 0, conflicts: 0, fixIssuesCreated: 0 };
+
+  try {
+    console.log(`Scanning for conflicting PRs in ${repoOwner}/${repoName} after push to main`);
+
+    // Get all open PRs
+    const openPRs = await getOpenPRs(repoOwner, repoName, token);
+    console.log(`Found ${openPRs.length} open PRs`);
+
+    for (const pr of openPRs) {
+      const prNumber = pr.number;
+      const prTitle = pr.title;
+      const prUrl = pr.html_url;
+      const prBody = pr.body || "";
+      const prMergeable = pr.mergeable;
+
+      // Skip if PR is already mergeable (no conflicts)
+      if (prMergeable === true) {
+        console.log(`PR #${prNumber} is mergeable, skipping`);
+        continue;
+      }
+
+      // Skip if mergeable is null (still computing)
+      if (prMergeable === null) {
+        console.log(`PR #${prNumber} mergeable status is still computing, skipping`);
+        continue;
+      }
+
+      console.log(`PR #${prNumber} has merge conflicts (mergeable=${prMergeable})`);
+
+      // Check if this PR was created by an agent task with agent:succeeded label
+      const hasAgentSucceeded = await hasAgentSucceededLabel(
+        repoOwner,
+        repoName,
+        prNumber,
+        prBody,
+        token
+      );
+
+      if (!hasAgentSucceeded) {
+        console.log(`PR #${prNumber} does not have agent:succeeded on source issue, skipping auto-rebase`);
+        continue;
+      }
+
+      console.log(`PR #${prNumber} has agent:succeeded label, attempting auto-rebase`);
+
+      // Attempt auto-rebase
+      const rebaseSuccessful = await attemptAutoRebase(repoOwner, repoName, prNumber, token);
+
+      if (rebaseSuccessful) {
+        stats.rebased++;
+
+        // Comment on PR about successful rebase
+        await addIssueComment(
+          repoOwner,
+          repoName,
+          prNumber,
+          token,
+          `✅ **Auto-rebased successfully**
+
+This PR had merge conflicts after another PR merged to main. The conflicts have been automatically resolved by rebasing onto the latest main branch.
+
+No further action required.`
+        );
+      } else {
+        stats.conflicts++;
+
+        // Comment on PR about failed rebase
+        await addIssueComment(
+          repoOwner,
+          repoName,
+          prNumber,
+          token,
+          `⚠️ **Manual conflict resolution required**
+
+This PR has merge conflicts that cannot be automatically resolved. A fix issue has been created to handle this.`
+        );
+
+        // Create fix issue for manual resolution
+        const fixIssueUrl = await createConflictFixIssue(
+          repoOwner,
+          repoName,
+          prNumber,
+          prTitle,
+          prUrl,
+          token
+        );
+
+        if (fixIssueUrl) {
+          stats.fixIssuesCreated++;
+
+          // Add comment with link to fix issue
+          await addIssueComment(
+            repoOwner,
+            repoName,
+            prNumber,
+            token,
+            `🔗 **Fix Issue:** ${fixIssueUrl}`
+          );
+        }
+      }
+    }
+
+    console.log(`Conflict scan complete: rebased=${stats.rebased}, conflicts=${stats.conflicts}, fixIssuesCreated=${stats.fixIssuesCreated}`);
+    return stats;
+  } catch (error) {
+    console.error(`Failed to handle push to main: ${error}`);
+    throw error;
+  }
+}
+
 export async function handler(event: {
   headers: Record<string, string | undefined>;
   body?: string;
@@ -1694,6 +1972,50 @@ export async function handler(event: {
           error: "Failed to handle published release"
         }),
       };
+    }
+  } else if (ghEvent === "push" && !payload.deleted) {
+    // Handle push to main branch - scan for conflicts and auto-rebase
+    const ref = payload.ref;
+    const isMainBranch = ref === "refs/heads/main" || ref === "refs/heads/master";
+
+    if (isMainBranch) {
+      const repoOwner = payload.repository.owner.login;
+      const repoName = payload.repository.name;
+
+      console.log(`Handling push to ${ref} in ${repoOwner}/${repoName}`);
+
+      try {
+        // Get GitHub App credentials and mint installation token
+        const [appId, privateKey] = await Promise.all([
+          getParameter(GITHUB_APP_ID_PARAM),
+          getParameter(GITHUB_APP_PRIVATE_KEY_PARAM),
+        ]);
+
+        const appConfig: GitHubAppConfig = { appId, privateKey };
+        const githubToken = await getInstallationToken(repoOwner, repoName, appConfig);
+
+        // Run conflict detection and auto-rebase
+        const stats = await handlePushToMain(repoOwner, repoName, githubToken);
+
+        return {
+          statusCode: 200,
+          body: JSON.stringify({
+            message: "Conflict detection completed",
+            stats,
+          }),
+        };
+      } catch (error) {
+        console.error(`Failed to handle push to main: ${error}`);
+        return {
+          statusCode: 500,
+          body: JSON.stringify({
+            error: "Failed to handle push to main"
+          }),
+        };
+      }
+    } else {
+      console.log(`Ignoring push to non-main branch: ${ref}`);
+      return { statusCode: 200, body: `Ignored: push to ${ref}` };
     }
   } else if (ghEvent === "pull_request" && payload.action === "labeled") {
     const labelName = payload.label?.name;
