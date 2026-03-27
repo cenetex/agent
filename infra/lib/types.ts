@@ -194,6 +194,8 @@ export interface TaskMetadata {
   completed_at?: string;
   /** Error message if failed */
   error_message?: string;
+  /** Failure category for classification and diagnostics */
+  failure_category?: string;
   /** Created PR URL if applicable */
   pr_url?: string;
   /** Issue/PR metadata at task creation time */
@@ -206,6 +208,8 @@ export interface TaskMetadata {
     reason: string;
     old_status: TaskLifecycleState;
   }>;
+  /** GitHub issue created for this failure (if applicable) */
+  failure_issue_number?: number;
 }
 
 /**

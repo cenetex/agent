@@ -52,6 +52,7 @@ interface CleanupStats {
   feedbackExamplesArchived: number;
   retries: number;
   retriesSkipped: number;
+  failureIssuesCreated: number;
   errors: string[];
 }
 
@@ -181,6 +182,121 @@ async function addIssueComment(
   );
 }
 
+async function createFailureIssue(
+  repoOwner: string,
+  repoName: string,
+  metadata: TaskMetadata,
+  token: string,
+  logKey: string
+): Promise<number | null> {
+  try {
+    const failureCategory = getFailureCategory(metadata.error_message, metadata.failure_category);
+    const artifactUrl = `https://console.aws.amazon.com/s3/buckets/${ARTIFACTS_BUCKET}?prefix=${metadata.artifact_prefix}/`;
+
+    // Build suggested next steps based on failure category
+    let suggestedNextSteps = "";
+    switch (failureCategory) {
+      case "credit_exhaustion":
+        suggestedNextSteps = `
+**Suggested next steps:**
+- Top up OpenRouter credits in your account
+- Check current credit balance at https://openrouter.ai/account
+- Once credits are available, re-tag the issue with the \`agent\` label to automatically retry`;
+        break;
+      case "auth_failure":
+        suggestedNextSteps = `
+**Suggested next steps:**
+- Verify the GitHub App is installed on this repository
+- Check that the GitHub App has the required permissions (contents, pull requests, issues)
+- Review GitHub App settings at https://github.com/apps/cenetex-coding-agent/installations`;
+        break;
+      case "repo_not_found":
+        suggestedNextSteps = `
+**Suggested next steps:**
+- Verify the repository exists and is accessible
+- Check that the GitHub App is installed on the repository
+- Ensure the issue/PR number is correct`;
+        break;
+      case "permission_denied":
+        suggestedNextSteps = `
+**Suggested next steps:**
+- Check the GitHub App installation permissions
+- Verify the branch protection rules aren't blocking the agent
+- Review repository access settings`;
+        break;
+      case "timeout":
+        suggestedNextSteps = `
+**Suggested next steps:**
+- The task exceeded the time limit — this is usually due to large repositories or slow operations
+- Consider breaking the task into smaller, more focused issues
+- Re-tag with \`agent\` to retry automatically`;
+        break;
+      case "build_failure":
+        suggestedNextSteps = `
+**Suggested next steps:**
+- Review the agent output to understand what caused the build failure
+- The issue may require manual refinement of the acceptance criteria
+- Consider opening a new issue with more specific requirements`;
+        break;
+      default:
+        suggestedNextSteps = `
+**Suggested next steps:**
+- Review the agent output and logs below
+- Check if the task can be retried after fixing underlying issues
+- Consider refining the issue description with more details`;
+    }
+
+    const title = `🤖 Agent failed on #${metadata.issue_number}: ${failureCategory}`;
+
+    const body = `## Agent Run Failed
+
+The autonomous agent encountered a permanent failure while working on issue/PR #${metadata.issue_number}.
+
+**Details:**
+- Task ID: \`${metadata.task_id}\`
+- Failure Category: \`${failureCategory}\`
+- Error: ${metadata.error_message || "Unknown error"}
+- Commit SHA: \`${metadata.resolved_commit_sha}\`
+- Task Mode: \`${metadata.task_mode}\`
+- Original Issue/PR: #${metadata.issue_number}
+
+**Artifacts:**
+- [View all artifacts](${artifactUrl})
+- [View task metadata](${artifactUrl}metadata.json)
+- [View agent logs](${artifactUrl}agent.log)
+
+**Recent Examples:**
+- [CloudWatch Logs](https://console.aws.amazon.com/logs/home?region=us-east-1&query=%5BTASK_ID%20%3D%20%22${metadata.task_id}%22%5D)
+${suggestedNextSteps}
+
+---
+*This issue was automatically created by the agent cleanup handler when a task failed permanently.*`;
+
+    const issueResponse = await githubRequest(
+      `/repos/${repoOwner}/${repoName}/issues`,
+      token,
+      {
+        method: "POST",
+        body: JSON.stringify({
+          title,
+          body,
+          labels: ["agent:failed", "bug"],
+        }),
+      },
+      [201]
+    );
+
+    const issueData = await issueResponse.json() as any;
+    const failureIssueNumber = issueData.number;
+
+    console.log(`Created failure issue #${failureIssueNumber} for task ${metadata.task_id}`);
+    return failureIssueNumber;
+  } catch (error) {
+    console.error(`Failed to create failure issue: ${error}`);
+    return null;
+  }
+}
+
 async function findStaleTaskMetadata(): Promise<TaskMetadata[]> {
   const staleThreshold = new Date(Date.now() - STALE_TASK_THRESHOLD_MINUTES * 60 * 1000);
   const staleMetadata: TaskMetadata[] = [];
@@ -279,6 +395,40 @@ function classifyFailureAsTransient(errorMessage: string | undefined): boolean {
   return false;
 }
 
+function getFailureCategory(errorMessage: string | undefined, failureCategory: string | undefined): string {
+  // Use the categorized failure_category from metadata if available
+  if (failureCategory) {
+    return failureCategory;
+  }
+
+  // Fallback to categorizing from error message
+  if (!errorMessage) return "unknown";
+
+  const lowerError = errorMessage.toLowerCase();
+  if (lowerError.includes("insufficient credits") || lowerError.includes("credits") || lowerError.includes("402")) {
+    return "credit_exhaustion";
+  }
+  if (lowerError.includes("timeout") || lowerError.includes("60 minute")) {
+    return "timeout";
+  }
+  if (lowerError.includes("authentication") || lowerError.includes("auth failed")) {
+    return "auth_failure";
+  }
+  if (lowerError.includes("repository") || lowerError.includes("repo not found") || lowerError.includes("404")) {
+    return "repo_not_found";
+  }
+  if (lowerError.includes("permission") || lowerError.includes("access denied")) {
+    return "permission_denied";
+  }
+  if (lowerError.includes("build fail") || lowerError.includes("compilation") || lowerError.includes("lint")) {
+    return "build_failure";
+  }
+  if (lowerError.includes("git push") || lowerError.includes("push failed")) {
+    return "git_failure";
+  }
+  return "unknown";
+}
+
 async function findFailedTasksForRetry(): Promise<TaskMetadata[]> {
   const failedMetadata: TaskMetadata[] = [];
   const twoHoursAgo = new Date(Date.now() - 2 * 60 * 60 * 1000);
@@ -328,8 +478,8 @@ async function findFailedTasksForRetry(): Promise<TaskMetadata[]> {
   return failedMetadata;
 }
 
-async function retryFailedTasks(appId: string, privateKey: string): Promise<{ retries: number; skipped: number }> {
-  const result = { retries: 0, skipped: 0 };
+async function retryFailedTasks(appId: string, privateKey: string): Promise<{ retries: number; skipped: number; failureIssuesCreated: number }> {
+  const result = { retries: 0, skipped: 0, failureIssuesCreated: 0 };
 
   try {
     console.log("Starting retry process for failed agent tasks");
@@ -342,20 +492,47 @@ async function retryFailedTasks(appId: string, privateKey: string): Promise<{ re
         // Check if failure is transient
         const isTransient = classifyFailureAsTransient(metadata.error_message);
 
-        if (!isTransient) {
-          console.log(`Skipping retry for task ${metadata.task_id}: persistent error (${metadata.error_message})`);
-          result.skipped++;
-          continue;
-        }
-
-        console.log(`Retrying task ${metadata.task_id}: transient error (${metadata.error_message})`);
-
-        // Get GitHub token for this repo
+        // Get GitHub token for this repo (needed for both retry and failure issue creation)
         const { owner, name } = parseRepoSlug(metadata.repo_slug);
         const jwt = createGitHubAppJWT(appId, privateKey);
         const installationId = await getInstallationId(owner, name, jwt);
         const tokenResult = await createInstallationToken(installationId, jwt);
         const githubToken = tokenResult.token;
+
+        if (!isTransient) {
+          // Permanent failure - create a diagnostic issue if not already created
+          if (!metadata.failure_issue_number) {
+            console.log(`Creating failure issue for task ${metadata.task_id}: permanent error (${metadata.error_message})`);
+            const failureIssueNumber = await createFailureIssue(
+              owner,
+              name,
+              metadata,
+              githubToken,
+              `${metadata.artifact_prefix}/agent.log`
+            );
+
+            if (failureIssueNumber) {
+              metadata.failure_issue_number = failureIssueNumber;
+              await updateTaskMetadata(metadata);
+              result.failureIssuesCreated++;
+
+              // Post a comment on the original issue linking to the failure issue
+              const linkComment = `❌ **Autonomous agent failed** due to: ${metadata.error_message}
+
+A diagnostic issue has been created: #${failureIssueNumber}
+
+Please review the failure issue for details and suggested next steps.`;
+              await addIssueComment(owner, name, metadata.issue_number, githubToken, linkComment);
+            }
+          } else {
+            console.log(`Failure issue already created for task ${metadata.task_id} (issue #${metadata.failure_issue_number})`);
+          }
+
+          result.skipped++;
+          continue;
+        }
+
+        console.log(`Retrying task ${metadata.task_id}: transient error (${metadata.error_message})`);
 
         // Update metadata with retry info
         const retryCount = (metadata.retry_count ?? 0) + 1;
@@ -402,13 +579,13 @@ Automatic retry triggered by cleanup handler. ${retryCount < 2 ? 'If this retry 
         console.log(`Triggered retry ${retryCount} for task ${metadata.task_id} on issue #${metadata.issue_number}`);
 
       } catch (error) {
-        const errorMsg = `Failed to retry task ${metadata.task_id}: ${error}`;
+        const errorMsg = `Failed to process retry for task ${metadata.task_id}: ${error}`;
         console.error(errorMsg);
         // Continue processing other failed tasks even if one retry fails
       }
     }
 
-    console.log(`Retry process completed: ${result.retries} retried, ${result.skipped} skipped`);
+    console.log(`Retry process completed: ${result.retries} retried, ${result.skipped} skipped, ${result.failureIssuesCreated} failure issues created`);
   } catch (error) {
     console.error(`Retry process error: ${error}`);
   }
@@ -512,6 +689,7 @@ export async function handler(): Promise<CleanupStats> {
     feedbackExamplesArchived: 0,
     retries: 0,
     retriesSkipped: 0,
+    failureIssuesCreated: 0,
     errors: [],
   };
 
@@ -682,6 +860,7 @@ The task has been automatically terminated and marked as failed.`;
     const retryResult = await retryFailedTasks(appId, privateKey);
     stats.retries = retryResult.retries;
     stats.retriesSkipped = retryResult.skipped;
+    stats.failureIssuesCreated = retryResult.failureIssuesCreated;
 
     // Archive old feedback examples (30+ days old)
     console.log("Running feedback example archival...");

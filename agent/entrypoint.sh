@@ -72,14 +72,54 @@ set_signal_label() {
   gh issue edit "${ISSUE_NUMBER}" --add-label "${target_label}" -R "${REPO}" >/dev/null 2>&1 || true
 }
 
+categorize_failure() {
+  local error_message="$1"
+  local stage="${CURRENT_STAGE}"
+
+  if [ -z "$error_message" ]; then
+    echo "unknown"
+    return
+  fi
+
+  local lower_error=$(echo "$error_message" | tr '[:upper:]' '[:lower:]')
+
+  # Check for specific failure categories
+  if echo "$lower_error" | grep -q "insufficient credits\|credits\|402"; then
+    echo "credit_exhaustion"
+  elif echo "$lower_error" | grep -q "timeout\|60 minute"; then
+    echo "timeout"
+  elif echo "$lower_error" | grep -q "authentication\|auth failed\|invalid token"; then
+    echo "auth_failure"
+  elif echo "$lower_error" | grep -q "repository\|repo not found\|404"; then
+    echo "repo_not_found"
+  elif echo "$lower_error" | grep -q "permission\|access denied"; then
+    echo "permission_denied"
+  elif echo "$lower_error" | grep -q "build fail\|compilation\|lint"; then
+    echo "build_failure"
+  elif echo "$lower_error" | grep -q "git push\|push failed"; then
+    echo "git_failure"
+  elif echo "$stage" | grep -q "authenticate"; then
+    echo "auth_failure"
+  elif echo "$stage" | grep -q "clone\|fetch"; then
+    echo "repo_not_found"
+  else
+    echo "unknown"
+  fi
+}
+
 update_task_metadata() {
   local status="$1"
   local error_message="$2"
   local pr_url="$3"
   local completed_timestamp=""
+  local failure_category=""
 
   if [ "$status" != "running" ]; then
     completed_timestamp="\"completed_at\": \"$(date -u +"%Y-%m-%dT%H:%M:%SZ")\","
+  fi
+
+  if [ "$status" = "failed" ] || [ "$status" = "timed_out" ]; then
+    failure_category="\"failure_category\": \"$(categorize_failure "$error_message")\","
   fi
 
   # Create updated metadata JSON
@@ -99,6 +139,7 @@ update_task_metadata() {
   "started_at": "${RUN_STARTED_AT}",
   ${completed_timestamp}
   "error_message": $(if [ -n "$error_message" ]; then echo "\"$error_message\""; else echo "null"; fi),
+  ${failure_category}
   "pr_url": $(if [ -n "$pr_url" ]; then echo "\"$pr_url\""; else echo "null"; fi),
   "issue_metadata": $(echo "$TASK_PAYLOAD" | jq '.issue_metadata')
 }
