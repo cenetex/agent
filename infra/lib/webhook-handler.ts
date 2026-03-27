@@ -229,13 +229,13 @@ async function getRepoModelConfig(
       return null;
     }
 
-    const content = await response.json();
+    const content = await response.json() as any;
     if (content.type !== "file" || !content.content) {
       return null;
     }
 
     // Decode base64 content
-    const decoded = Buffer.from(content.content, "base64").toString("utf8");
+    const decoded = Buffer.from(content.content as string, "base64").toString("utf8");
 
     // Simple regex to extract model line: "model: anthropic/claude-sonnet-4"
     const modelMatch = decoded.match(/^model:\s*(.+)$/m);
@@ -419,6 +419,195 @@ async function lookupTaskMetadataForPR(
     return null;
   } catch (error) {
     console.error(`Failed to lookup task metadata for PR #${prNumber}:`, error);
+    return null;
+  }
+}
+
+/**
+ * Finds the PR created by a succeeded issue task by looking at issue timeline
+ */
+async function findPRCreatedBySucceededTask(
+  repoOwner: string,
+  repoName: string,
+  issueNumber: number,
+  token: string
+): Promise<{ pr_number: number; pr_url: string } | null> {
+  try {
+    // Get issue timeline to find cross-references to PRs
+    const response = await githubRequest(
+      `/repos/${repoOwner}/${repoName}/issues/${issueNumber}/timeline?per_page=100`,
+      token,
+      { method: "GET" },
+      [200]
+    );
+
+    const timeline = await response.json() as any[];
+
+    // Look for cross-referenced events with PR links
+    for (const event of timeline) {
+      if (event.event === "cross-referenced" &&
+          event.source?.issue?.pull_request?.html_url) {
+        const prUrl = event.source.issue.pull_request.html_url;
+        const prNumber = parseInt(prUrl.split("/").pop(), 10);
+
+        console.log(`Found PR #${prNumber} created by issue #${issueNumber}`);
+        return { pr_number: prNumber, pr_url: prUrl };
+      }
+    }
+
+    console.log(`No PR found in timeline for issue #${issueNumber}`);
+    return null;
+  } catch (error) {
+    console.error(`Failed to find PR for issue #${issueNumber}:`, error);
+    return null;
+  }
+}
+
+/**
+ * Triggers a review task for a specific PR
+ */
+async function triggerReviewForPR(
+  repoOwner: string,
+  repoName: string,
+  prNumber: number,
+  token: string,
+  openrouterKey: string
+): Promise<string | null> {
+  try {
+    // Fetch PR details
+    const prResponse = await githubRequest(
+      `/repos/${repoOwner}/${repoName}/pulls/${prNumber}`,
+      token,
+      { method: "GET" },
+      [200]
+    );
+
+    const pr = await prResponse.json() as any;
+    const repoSlug = createRepoSlug(repoOwner, repoName);
+    const taskId = generateTaskId();
+    const artifactPrefix = `tasks/${repoSlug}/${taskId}`;
+
+    // Create review payload (mirrors review-handler.ts pattern)
+    const reviewPayload = {
+      task_id: taskId,
+      repo_slug: repoSlug,
+      pr_number: prNumber,
+      head_sha: pr.head.sha,
+      base_sha: pr.base.sha,
+      pr_metadata: {
+        number: prNumber,
+        title: pr.title,
+        body: pr.body || "",
+        labels: pr.labels.map((label: any) => label.name),
+        author: pr.user.login,
+        head_ref: pr.head.ref,
+        base_ref: pr.base.ref,
+        created_by_bot: true,
+      },
+      created_at: new Date().toISOString(),
+    };
+
+    // Protected file patterns that should never be auto-merged
+    const PROTECTED_PATHS = [
+      ".github/workflows/",
+      "infra/lib/stack.ts",
+      "Dockerfile",
+      "infra/",
+      ".env",
+      "credentials",
+      "secrets",
+      "*.key",
+      "*.pem",
+    ];
+
+    const reviewCriteria = {
+      check_compilation: true,
+      check_security: true,
+      check_issue_alignment: true,
+      check_logic: true,
+      check_complexity: true,
+      check_cost_impact: true,
+      protected_paths: PROTECTED_PATHS,
+    };
+
+    const reviewEnvironment: Record<string, string> = {
+      REVIEW_PAYLOAD: JSON.stringify(reviewPayload),
+      GITHUB_TOKEN: token,
+      OPENROUTER_API_KEY: openrouterKey,
+      ARTIFACTS_BUCKET,
+      ARTIFACT_PREFIX: artifactPrefix,
+      REPO: repoSlug,
+      PR_NUMBER: prNumber.toString(),
+      REVIEW_CRITERIA: JSON.stringify(reviewCriteria),
+    };
+
+    // Get environment variables for ECS task
+    const REVIEW_TASK_DEFINITION_ARN = process.env.REVIEW_TASK_DEFINITION_ARN!;
+    const REVIEW_CONTAINER_NAME = process.env.REVIEW_CONTAINER_NAME!;
+
+    const params: RunTaskCommandInput = {
+      cluster: CLUSTER_ARN,
+      taskDefinition: REVIEW_TASK_DEFINITION_ARN,
+      launchType: "FARGATE",
+      count: 1,
+      networkConfiguration: {
+        awsvpcConfiguration: {
+          subnets: SUBNETS.split(","),
+          securityGroups: [SECURITY_GROUP],
+          assignPublicIp: "ENABLED",
+        },
+      },
+      overrides: {
+        containerOverrides: [
+          {
+            name: REVIEW_CONTAINER_NAME,
+            environment: Object.entries(reviewEnvironment).map(([name, value]) => ({
+              name,
+              value,
+            })),
+          },
+        ],
+      },
+    };
+
+    const result = await ecs.send(new RunTaskCommand(params));
+    const taskArn = result.tasks?.[0]?.taskArn;
+
+    if (!taskArn || (result.failures?.length ?? 0) > 0) {
+      const failureDetails =
+        result.failures?.map((failure) => failure.reason ?? failure.arn ?? "unknown failure") ??
+        [];
+      throw new Error(
+        failureDetails.length > 0
+          ? `Review task launch failed: ${failureDetails.join(", ")}`
+          : "Review task launch did not return a task ARN"
+      );
+    }
+
+    console.log(`Triggered review task ${taskId} for PR #${prNumber} (${taskArn})`);
+
+    // Store initial review metadata
+    const metadata = {
+      task_id: taskId,
+      pr_number: prNumber,
+      repo_slug: repoSlug,
+      status: "running",
+      task_arn: taskArn,
+      created_at: reviewPayload.created_at,
+      started_at: new Date().toISOString(),
+    };
+
+    await s3.send(new PutObjectCommand({
+      Bucket: ARTIFACTS_BUCKET,
+      Key: `${artifactPrefix}/review-metadata.json`,
+      Body: JSON.stringify(metadata, null, 2),
+      ContentType: "application/json",
+    }));
+
+    console.log(`Stored review metadata at ${artifactPrefix}/review-metadata.json`);
+    return taskArn;
+  } catch (error) {
+    console.error(`Failed to trigger review for PR #${prNumber}:`, error);
     return null;
   }
 }
@@ -1163,6 +1352,105 @@ export async function handler(event: {
         return {
           statusCode: 500,
           body: JSON.stringify({ error: "Failed to launch diagnostic task" }),
+        };
+      }
+    }
+
+    // Handle agent:succeeded label to trigger automatic review
+    if (labelName === SIGNAL_LABEL_SUCCEEDED) {
+      console.log(`Handling agent:succeeded label on issue #${payload.issue.number}`);
+
+      const repoOwner = payload.repository.owner.login;
+      const repoName = payload.repository.name;
+      const issueNumber = payload.issue.number;
+
+      try {
+        // Get GitHub App credentials and mint installation token
+        const [appId, privateKey, openrouterKey] = await Promise.all([
+          getParameter(GITHUB_APP_ID_PARAM),
+          getParameter(GITHUB_APP_PRIVATE_KEY_PARAM),
+          getParameter(OPENROUTER_API_KEY_PARAM),
+        ]);
+
+        const appConfig: GitHubAppConfig = { appId, privateKey };
+        const githubToken = await getInstallationToken(repoOwner, repoName, appConfig);
+
+        // Find the PR created by the succeeded task
+        const pr = await findPRCreatedBySucceededTask(
+          repoOwner,
+          repoName,
+          issueNumber,
+          githubToken
+        );
+
+        if (pr) {
+          console.log(`Found PR #${pr.pr_number} created by issue #${issueNumber}`);
+
+          // Trigger review for this PR
+          const taskArn = await triggerReviewForPR(
+            repoOwner,
+            repoName,
+            pr.pr_number,
+            githubToken,
+            openrouterKey
+          );
+
+          if (taskArn) {
+            // Post informational comment on PR
+            await addIssueComment(
+              repoOwner,
+              repoName,
+              pr.pr_number,
+              githubToken,
+              `🔍 **Automated PR Review Started**\n\nThis PR was created by the agent and is now being automatically reviewed for:\n- ✅ CI/build status\n- ✅ Mergeability\n- ✅ Code quality and security\n- ✅ Compliance with acceptance criteria`
+            );
+
+            return {
+              statusCode: 200,
+              body: JSON.stringify({
+                message: "Review triggered for agent-created PR",
+                issueNumber,
+                prNumber: pr.pr_number,
+                prUrl: pr.pr_url,
+              }),
+            };
+          } else {
+            // Review task launch failed
+            await addIssueComment(
+              repoOwner,
+              repoName,
+              pr.pr_number,
+              githubToken,
+              `⚠️ **Failed to start automated review**\n\nThe automated review process could not be started. This PR requires manual review before merging.`
+            );
+
+            return {
+              statusCode: 500,
+              body: JSON.stringify({
+                error: "Failed to trigger review task",
+                issueNumber,
+                prNumber: pr.pr_number,
+              }),
+            };
+          }
+        } else {
+          console.log(`No PR found for issue #${issueNumber}, skipping review`);
+          return {
+            statusCode: 200,
+            body: JSON.stringify({
+              message: "No associated PR found",
+              issueNumber,
+            }),
+          };
+        }
+      } catch (error) {
+        console.error(`Failed to handle agent:succeeded for issue #${issueNumber}:`, error);
+        return {
+          statusCode: 500,
+          body: JSON.stringify({
+            error: "Failed to process agent:succeeded event",
+            issueNumber,
+          }),
         };
       }
     }

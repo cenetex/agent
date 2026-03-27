@@ -268,8 +268,10 @@ export class GitHubAgentStack extends cdk.Stack {
         CLUSTER_ARN: cluster.clusterArn,
         TASK_DEFINITION_ARN: taskDefinition.taskDefinitionArn,
         DIAGNOSTIC_TASK_DEFINITION_ARN: diagnosticTaskDefinition.taskDefinitionArn,
+        REVIEW_TASK_DEFINITION_ARN: reviewTaskDefinition.taskDefinitionArn,
         CONTAINER_NAME: containerName,
         DIAGNOSTIC_CONTAINER_NAME: diagnosticContainerName,
+        REVIEW_CONTAINER_NAME: reviewContainerName,
         SUBNETS: vpc.publicSubnets.map((s) => s.subnetId).join(","),
         SECURITY_GROUP: taskSecurityGroup.securityGroupId,
         WEBHOOK_SECRET_PARAM: PARAM_WEBHOOK_SECRET,
@@ -286,6 +288,7 @@ export class GitHubAgentStack extends cdk.Stack {
         resources: [
           taskDefinition.taskDefinitionArn,
           diagnosticTaskDefinition.taskDefinitionArn,
+          reviewTaskDefinition.taskDefinitionArn,
         ],
       })
     );
@@ -298,6 +301,8 @@ export class GitHubAgentStack extends cdk.Stack {
           taskDefinition.executionRole!.roleArn,
           diagnosticTaskRole.roleArn,
           diagnosticTaskDefinition.executionRole!.roleArn,
+          reviewTaskRole.roleArn,
+          reviewTaskDefinition.executionRole!.roleArn,
         ],
       })
     );
