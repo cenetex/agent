@@ -653,6 +653,226 @@ function parseIssueReferences(prBody: string, prRepoOwner: string): Array<{ issu
 }
 
 /**
+ * Parses issue body for blocker references like "Blocked by #123" or "Blocked by owner/repo#123"
+ * Returns array of { issue_number, repo_owner, repo_name, is_same_repo }
+ */
+function parseBlockerReferences(issueBody: string, issueRepoOwner: string): Array<{ issue_number: number; repo_owner: string; repo_name: string; is_same_repo: boolean }> {
+  if (!issueBody) return [];
+
+  const references: Array<{ issue_number: number; repo_owner: string; repo_name: string; is_same_repo: boolean }> = [];
+
+  // Match same-repo references: "Blocked by #123"
+  const sameRepoMatches = issueBody.matchAll(/(?:Blocked by)\s+#(\d+)/gi);
+  for (const match of sameRepoMatches) {
+    references.push({
+      issue_number: parseInt(match[1], 10),
+      repo_owner: issueRepoOwner,
+      repo_name: "",
+      is_same_repo: true,
+    });
+  }
+
+  // Match cross-repo references: "Blocked by owner/repo#123"
+  const crossRepoMatches = issueBody.matchAll(/(?:Blocked by)\s+([a-zA-Z0-9_-]+)\/([a-zA-Z0-9_-]+)#(\d+)/gi);
+  for (const match of crossRepoMatches) {
+    references.push({
+      issue_number: parseInt(match[3], 10),
+      repo_owner: match[1],
+      repo_name: match[2],
+      is_same_repo: false,
+    });
+  }
+
+  return references;
+}
+
+/**
+ * Configuration for issue dispatch (read from .github/AGENT.md)
+ */
+interface DispatchConfig {
+  auto_dispatch: boolean;
+  auto_dispatch_labels: string[];
+  wip_cap: number;
+}
+
+/**
+ * Reads dispatch configuration from repo's .github/AGENT.md
+ * Returns config with defaults if file doesn't exist
+ */
+async function getDispatchConfig(
+  repoOwner: string,
+  repoName: string,
+  token: string
+): Promise<DispatchConfig> {
+  try {
+    const response = await githubRequest(
+      `/repos/${repoOwner}/${repoName}/contents/.github/AGENT.md`,
+      token,
+      { method: "GET" },
+      [200, 404]
+    );
+
+    if (response.status === 404) {
+      return { auto_dispatch: true, auto_dispatch_labels: ["ready"], wip_cap: 0 };
+    }
+
+    const content = await response.json() as any;
+    if (content.type !== "file" || !content.content) {
+      return { auto_dispatch: true, auto_dispatch_labels: ["ready"], wip_cap: 0 };
+    }
+
+    // Decode base64 content
+    const decoded = Buffer.from(content.content as string, "base64").toString("utf8");
+
+    // Extract configuration lines
+    const autoDispatchMatch = decoded.match(/^auto_dispatch:\s*(.+)$/m);
+    const labelsMatch = decoded.match(/^auto_dispatch_labels:\s*(.+)$/m);
+    const wipCapMatch = decoded.match(/^wip_cap:\s*(\d+)$/m);
+
+    const auto_dispatch = autoDispatchMatch ? autoDispatchMatch[1].trim().toLowerCase() === "true" : true;
+    const auto_dispatch_labels = labelsMatch
+      ? labelsMatch[1].trim().split(",").map(l => l.trim()).filter(l => l)
+      : ["ready"];
+    const wip_cap = wipCapMatch ? parseInt(wipCapMatch[1], 10) : 0;
+
+    return { auto_dispatch, auto_dispatch_labels, wip_cap };
+  } catch (error) {
+    console.log(`Failed to fetch dispatch config from .github/AGENT.md: ${error}`);
+    return { auto_dispatch: true, auto_dispatch_labels: ["ready"], wip_cap: 0 };
+  }
+}
+
+/**
+ * Checks if an issue body contains acceptance criteria (checklist items)
+ */
+function hasAcceptanceCriteria(issueBody: string): boolean {
+  if (!issueBody) return false;
+  // Check for markdown checkbox pattern: - [ ] or - [x]
+  return /- \[[ xX]\]/m.test(issueBody);
+}
+
+/**
+ * Scans open issues for blockers that match the closed issue
+ * and dispatches unblocked issues if conditions are met
+ */
+async function handleBlockerUnblock(
+  repoOwner: string,
+  repoName: string,
+  closedIssueNumber: number,
+  token: string
+): Promise<void> {
+  try {
+    const repoSlug = createRepoSlug(repoOwner, repoName);
+
+    // Get dispatch configuration
+    const config = await getDispatchConfig(repoOwner, repoName, token);
+
+    // Fetch open issues
+    const listIssuesResponse = await githubRequest(
+      `/repos/${repoOwner}/${repoName}/issues?state=open&per_page=100`,
+      token,
+      { method: "GET" },
+      [200]
+    );
+
+    const openIssues = await listIssuesResponse.json() as any[];
+    console.log(`Found ${openIssues.length} open issues, scanning for blockers of #${closedIssueNumber}`);
+
+    let unblockedCount = 0;
+    let dispatchedCount = 0;
+
+    for (const issue of openIssues) {
+      // Skip PRs (they have pull_request field)
+      if (issue.pull_request) continue;
+
+      const issueNumber = issue.number;
+      const issueBody = issue.body || "";
+      const issueLabels = issue.labels.map((l: any) => l.name);
+
+      // Check if this issue is blocked by the closed issue
+      const blockerReferences = parseBlockerReferences(issueBody, repoOwner);
+      const isBlockedByClosed = blockerReferences.some(
+        ref => ref.issue_number === closedIssueNumber && ref.is_same_repo
+      );
+
+      if (!isBlockedByClosed) continue;
+
+      unblockedCount++;
+      console.log(`Issue #${issueNumber} is unblocked by #${closedIssueNumber}`);
+
+      // Post unblocked notification comment
+      const unblockedComment = `🎉 **Unblocked** — Issue #${closedIssueNumber} is resolved!\n\nThis issue is now eligible for dispatch.`;
+      await addIssueComment(repoOwner, repoName, issueNumber, token, unblockedComment);
+
+      // Check if we should auto-dispatch
+      if (!config.auto_dispatch) {
+        console.log(`Issue #${issueNumber}: auto_dispatch disabled, skipping dispatch`);
+        continue;
+      }
+
+      // Check for required labels
+      const hasRequiredLabels = config.auto_dispatch_labels.length === 0 ||
+        config.auto_dispatch_labels.some(label => issueLabels.includes(label));
+
+      if (!hasRequiredLabels) {
+        console.log(
+          `Issue #${issueNumber}: missing required labels (need one of: ${config.auto_dispatch_labels.join(", ")}), skipping dispatch`
+        );
+        continue;
+      }
+
+      // Check for acceptance criteria
+      if (!hasAcceptanceCriteria(issueBody)) {
+        console.log(`Issue #${issueNumber}: missing acceptance criteria, skipping dispatch`);
+        continue;
+      }
+
+      // Check WIP cap if configured
+      if (config.wip_cap > 0) {
+        // Count issues with agent:running label
+        const listRunningResponse = await githubRequest(
+          `/repos/${repoOwner}/${repoName}/issues?state=open&labels=${encodeURIComponent(SIGNAL_LABEL_RUNNING)}&per_page=100`,
+          token,
+          { method: "GET" },
+          [200]
+        );
+        const runningIssues = await listRunningResponse.json() as any[];
+        const runningCount = runningIssues.length;
+
+        if (runningCount >= config.wip_cap) {
+          const wipMessage = `ℹ️ **Dispatch queued** — WIP cap reached (${runningCount}/${config.wip_cap})\n\nThis issue will be dispatched when capacity becomes available.`;
+          await addIssueComment(repoOwner, repoName, issueNumber, token, wipMessage);
+          console.log(
+            `Issue #${issueNumber}: WIP cap reached (${runningCount}/${config.wip_cap}), skipping dispatch for now`
+          );
+          continue;
+        }
+      }
+
+      // All checks passed, add agent label
+      console.log(`Dispatching issue #${issueNumber}`);
+      await githubRequest(
+        `/repos/${repoOwner}/${repoName}/issues/${issueNumber}/labels`,
+        token,
+        {
+          method: "POST",
+          body: JSON.stringify({ labels: [TRIGGER_LABEL] }),
+        },
+        [200]
+      );
+      dispatchedCount++;
+    }
+
+    console.log(
+      `Blocker scan complete for #${closedIssueNumber}: found ${unblockedCount} unblocked issue(s), dispatched ${dispatchedCount}`
+    );
+  } catch (error) {
+    console.error(`Error during blocker unblock handling:`, error);
+    // Don't throw - this is a side effect, shouldn't block PR merge
+  }
+}
+
+/**
  * Closes a cross-repo issue and posts a comment linking to the merged PR
  */
 async function closeCrossRepoIssue(
@@ -2039,6 +2259,48 @@ export async function handler(event: {
     isPR = true;
     requestedRef = payload.pull_request.head.ref;
     prData = payload.pull_request;
+  } else if (ghEvent === "issues" && payload.action === "closed") {
+    // Handle issue closure: scan for dependent issues blocked by this one
+    const repoOwner = payload.repository.owner.login;
+    const repoName = payload.repository.name;
+    const closedIssueNumber = payload.issue.number;
+
+    console.log(`Handling closed issue #${closedIssueNumber} in ${repoOwner}/${repoName}`);
+
+    try {
+      // Get GitHub App credentials and mint installation token
+      const [appId, privateKey] = await Promise.all([
+        getParameter(GITHUB_APP_ID_PARAM),
+        getParameter(GITHUB_APP_PRIVATE_KEY_PARAM),
+      ]);
+
+      const appConfig: GitHubAppConfig = { appId, privateKey };
+      const githubToken = await getInstallationToken(repoOwner, repoName, appConfig);
+
+      // Scan for dependent issues and dispatch unblocked ones
+      await handleBlockerUnblock(
+        repoOwner,
+        repoName,
+        closedIssueNumber,
+        githubToken
+      );
+
+      return {
+        statusCode: 200,
+        body: JSON.stringify({
+          message: "Issue closed, blocker scan completed",
+          closedIssueNumber
+        }),
+      };
+    } catch (error) {
+      console.error(`Failed to handle closed issue #${closedIssueNumber}:`, error);
+      return {
+        statusCode: 500,
+        body: JSON.stringify({
+          error: "Failed to process issue closure"
+        }),
+      };
+    }
   } else if (ghEvent === "push") {
     // Handle push event (PR merged to main) - scan for conflicts
     const repoOwner = payload.repository.owner.login;
