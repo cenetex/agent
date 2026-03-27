@@ -194,6 +194,8 @@ export interface TaskMetadata {
   completed_at?: string;
   /** Error message if failed */
   error_message?: string;
+  /** Failure category for classification and retry decision (e.g., credit_exhaustion, timeout, auth_failure) */
+  failure_category?: string;
   /** Created PR URL if applicable */
   pr_url?: string;
   /** Issue/PR metadata at task creation time */

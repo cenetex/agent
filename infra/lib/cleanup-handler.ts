@@ -259,6 +259,12 @@ async function stopTask(taskArn: string): Promise<boolean> {
   }
 }
 
+function isTransientCategory(category: string): boolean {
+  // Transient categories that should be retried
+  const transientCategories = ["credit_exhaustion", "timeout", "external_service"];
+  return transientCategories.includes(category.toLowerCase());
+}
+
 function classifyFailureAsTransient(errorMessage: string | undefined): boolean {
   if (!errorMessage) return false;
 
@@ -339,16 +345,19 @@ async function retryFailedTasks(appId: string, privateKey: string): Promise<{ re
 
     for (const metadata of failedTasks) {
       try {
-        // Check if failure is transient
-        const isTransient = classifyFailureAsTransient(metadata.error_message);
+        // Check if failure is transient using the pre-categorized failure_category if available
+        // Otherwise fall back to parsing error message (for backward compatibility)
+        const isTransient = metadata.failure_category
+          ? isTransientCategory(metadata.failure_category)
+          : classifyFailureAsTransient(metadata.error_message);
 
         if (!isTransient) {
-          console.log(`Skipping retry for task ${metadata.task_id}: persistent error (${metadata.error_message})`);
+          console.log(`Skipping retry for task ${metadata.task_id}: persistent error (${metadata.failure_category || metadata.error_message})`);
           result.skipped++;
           continue;
         }
 
-        console.log(`Retrying task ${metadata.task_id}: transient error (${metadata.error_message})`);
+        console.log(`Retrying task ${metadata.task_id}: transient error (${metadata.failure_category || metadata.error_message})`);
 
         // Get GitHub token for this repo
         const { owner, name } = parseRepoSlug(metadata.repo_slug);
