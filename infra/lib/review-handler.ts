@@ -102,13 +102,19 @@ async function discoverReviewablePRs(token: string): Promise<any[]> {
   // 3. Filter by author (coding agent bot)
 
   // For this PR, we'll focus on a single repo pattern
-  const testRepos = [
-    "cenetex/agent" // This repository for testing
+  const repos = [
+    "cenetex/aws-swarm",
+    "cenetex/kyro",
+    "cenetex/raticross",
+    "cenetex/ratibot",
+    "cenetex/litigation",
+    "cenetex/agent",
+    "cenetex/governance",
   ];
 
   const reviewablePRs: any[] = [];
 
-  for (const repo of testRepos) {
+  for (const repo of repos) {
     try {
       console.log(`Checking repository: ${repo}`);
 
@@ -320,11 +326,17 @@ async function startReviewTask(
 async function mergeApprovedPRs(token: string): Promise<void> {
   console.log("Checking for PRs ready for auto-merge...");
 
-  const testRepos = [
-    "cenetex/agent" // This repository for testing
+  const repos = [
+    "cenetex/aws-swarm",
+    "cenetex/kyro",
+    "cenetex/raticross",
+    "cenetex/ratibot",
+    "cenetex/litigation",
+    "cenetex/agent",
+    "cenetex/governance",
   ];
 
-  for (const repo of testRepos) {
+  for (const repo of repos) {
     try {
       console.log(`Checking repository for approved PRs: ${repo}`);
 
