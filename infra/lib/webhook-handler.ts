@@ -63,6 +63,7 @@ const REVIEW_APPROVED_LABEL = "review:approved";
 
 // Auto-merge hold period (1 hour)
 const MERGE_HOLD_PERIOD_MINUTES = 60;
+const STATUS_BLOCKED_LABEL = "status:blocked";
 const SIGNAL_LABELS = [
   {
     name: SIGNAL_LABEL_RUNNING,
@@ -83,6 +84,11 @@ const SIGNAL_LABELS = [
     name: SIGNAL_LABEL_SUCCEEDED,
     color: "0E8A16",
     description: "Autonomous run finished successfully",
+  },
+  {
+    name: STATUS_BLOCKED_LABEL,
+    color: "999999",
+    description: "Task is blocked (insufficient credits or other blocker)",
   },
 ] as const;
 
@@ -2466,14 +2472,20 @@ export async function handler(event: {
     const cost = getModelCost(selectedModel);
     console.log(`Insufficient credits for task: required=${cost}, available=${balance?.current_balance ?? 0}`);
 
-    // Update GitHub issue with credit error
-    await setSignalLabel(
-      repoOwner,
-      repoName,
-      issueNumber,
+    // Ensure signal labels exist
+    await ensureSignalLabels(repoOwner, repoName, githubToken);
+
+    // Update GitHub issue with status:blocked label and credit error
+    await githubRequest(
+      `/repos/${repoOwner}/${repoName}/issues/${issueNumber}/labels`,
       githubToken,
-      SIGNAL_LABEL_FAILED
+      {
+        method: "POST",
+        body: JSON.stringify({ labels: [STATUS_BLOCKED_LABEL] }),
+      },
+      [200]
     );
+
     await addIssueComment(
       repoOwner,
       repoName,
