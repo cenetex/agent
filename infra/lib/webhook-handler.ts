@@ -1172,6 +1172,295 @@ async function resolveCommitSha(
   }
 }
 
+/**
+ * Finds the issue number associated with a PR's source branch
+ * by looking up task metadata for the PR
+ */
+async function findIssueNumberForPR(
+  repoSlug: string,
+  prNumber: number
+): Promise<number | null> {
+  try {
+    // Search for task metadata that references this PR
+    const prefix = `tasks/${repoSlug}/`;
+    const listResult = await s3.send(new ListObjectsV2Command({
+      Bucket: ARTIFACTS_BUCKET,
+      Prefix: prefix,
+      MaxKeys: 1000,
+    }));
+
+    if (!listResult.Contents) {
+      return null;
+    }
+
+    // Search through metadata files for one that created this PR
+    const metadataKeys = listResult.Contents
+      .filter((obj: any) => obj.Key?.endsWith('/metadata.json'))
+      .map((obj: any) => obj.Key!);
+
+    for (const metadataKey of metadataKeys) {
+      const result = await s3.send(new GetObjectCommand({
+        Bucket: ARTIFACTS_BUCKET,
+        Key: metadataKey,
+      }));
+
+      if (!result.Body) continue;
+
+      try {
+        const content = await result.Body.transformToString() as string;
+        const metadata = JSON.parse(content) as TaskMetadata;
+
+        // Check if this task created the PR we're looking at
+        if (metadata.task_mode === "pull_request" &&
+            metadata.issue_number === prNumber &&
+            metadata.status === "succeeded") {
+          return metadata.issue_metadata?.number ?? null;
+        }
+      } catch {
+        // Skip malformed metadata files
+        continue;
+      }
+    }
+
+    return null;
+  } catch (error) {
+    console.error(`Failed to find issue number for PR #${prNumber}:`, error);
+    return null;
+  }
+}
+
+/**
+ * Checks if a PR has mergeable_state of "conflict" (has merge conflicts)
+ */
+async function getPRMergeableState(
+  repoOwner: string,
+  repoName: string,
+  prNumber: number,
+  token: string
+): Promise<{ mergeable_state: string; mergeable: boolean | null } | null> {
+  try {
+    const response = await githubRequest(
+      `/repos/${repoOwner}/${repoName}/pulls/${prNumber}`,
+      token,
+      { method: "GET" },
+      [200]
+    );
+
+    const prData = await response.json() as any;
+    return {
+      mergeable_state: prData.mergeable_state, // "mergeable", "conflicting", "unknown"
+      mergeable: prData.mergeable, // true, false, or null (unknown)
+    };
+  } catch (error) {
+    console.error(`Failed to get PR mergeable state for #${prNumber}:`, error);
+    return null;
+  }
+}
+
+/**
+ * Attempts to rebase a PR using gh pr update-branch
+ * Returns true if rebase succeeded, false if failed
+ */
+async function attemptPRRebase(
+  repoOwner: string,
+  repoName: string,
+  prNumber: number,
+  token: string
+): Promise<boolean> {
+  try {
+    // Use GitHub API to update branch (rebase)
+    // This endpoint attempts to rebase the PR head onto the base branch
+    const response = await githubRequest(
+      `/repos/${repoOwner}/${repoName}/pulls/${prNumber}/update-branch`,
+      token,
+      {
+        method: "PUT",
+        body: JSON.stringify({ expected_head_sha: "" }), // Empty to auto-detect
+      },
+      [200, 202, 409, 422]
+    );
+
+    if (response.status === 200 || response.status === 202) {
+      console.log(`Successfully initiated rebase for PR #${prNumber}`);
+      return true;
+    } else if (response.status === 409 || response.status === 422) {
+      console.log(`Rebase failed for PR #${prNumber} (status ${response.status}) - conflicts cannot be auto-resolved`);
+      return false;
+    }
+
+    return false;
+  } catch (error) {
+    console.error(`Exception during rebase attempt for PR #${prNumber}:`, error);
+    return false;
+  }
+}
+
+/**
+ * Creates a fix issue for a PR that has unresolvable conflicts
+ */
+async function createConflictFixIssue(
+  repoOwner: string,
+  repoName: string,
+  prNumber: number,
+  prTitle: string,
+  prUrl: string,
+  sourceIssueNumber: number | null,
+  token: string
+): Promise<string | null> {
+  try {
+    const fixIssueTitle = `Fix merge conflict: PR #${prNumber} (${prTitle})`;
+    const sourceIssueRef = sourceIssueNumber ? `issue #${sourceIssueNumber}` : "PR #" + prNumber;
+
+    const fixIssueBody = `## Context
+A merge conflict was detected in PR #${prNumber} (created from ${sourceIssueRef}).
+
+**Original PR:** ${prUrl}
+**Title:** ${prTitle}
+
+## Problem
+When another PR was merged to the base branch, this PR developed unresolvable merge conflicts. The automatic rebase attempt failed.
+
+## Task
+Resolve the merge conflicts in PR #${prNumber} by:
+1. Rebasing the PR onto the latest base branch
+2. Resolving any conflicting files
+3. Pushing the resolved changes
+
+Once resolved, comment on PR #${prNumber} to trigger the automated review process.
+
+---
+*This issue was auto-created by the merge conflict detection system. Add the \`agent\` label if you'd like the agent to handle fixing the conflict.*`;
+
+    const response = await githubRequest(
+      `/repos/${repoOwner}/${repoName}/issues`,
+      token,
+      {
+        method: "POST",
+        body: JSON.stringify({
+          title: fixIssueTitle,
+          body: fixIssueBody,
+          labels: [TRIGGER_LABEL], // Auto-label with agent to allow agent to fix
+        }),
+      },
+      [201]
+    );
+
+    const issue = await response.json() as any;
+    console.log(`Created conflict fix issue #${issue.number} for PR #${prNumber}`);
+    return issue.html_url;
+  } catch (error) {
+    console.error(`Failed to create conflict fix issue for PR #${prNumber}:`, error);
+    return null;
+  }
+}
+
+/**
+ * Scans open PRs for merge conflicts after a push to main
+ */
+async function handleMergeConflictDetection(
+  repoOwner: string,
+  repoName: string,
+  token: string,
+  appConfig: GitHubAppConfig
+): Promise<void> {
+  try {
+    // Get list of open PRs
+    const listPRsResponse = await githubRequest(
+      `/repos/${repoOwner}/${repoName}/pulls?state=open&per_page=100`,
+      token,
+      { method: "GET" },
+      [200]
+    );
+
+    const openPRs = await listPRsResponse.json() as any[];
+    console.log(`Found ${openPRs.length} open PRs, scanning for conflicts`);
+
+    const repoSlug = createRepoSlug(repoOwner, repoName);
+    const conflictingPRs: number[] = [];
+
+    for (const pr of openPRs) {
+      const prNumber = pr.number;
+      const prTitle = pr.title;
+      const prUrl = pr.html_url;
+
+      // Check if PR has merge conflicts
+      const mergeState = await getPRMergeableState(repoOwner, repoName, prNumber, token);
+      if (!mergeState) {
+        console.log(`Could not determine mergeable state for PR #${prNumber}, skipping`);
+        continue;
+      }
+
+      // "conflicting" means there are merge conflicts
+      if (mergeState.mergeable_state !== "conflicting") {
+        console.log(`PR #${prNumber} has mergeable_state "${mergeState.mergeable_state}", no action needed`);
+        continue;
+      }
+
+      console.log(`Found conflicting PR #${prNumber}: ${prTitle}`);
+      conflictingPRs.push(prNumber);
+
+      // Check if this PR was created by an agent task
+      const sourceIssueNumber = await findIssueNumberForPR(repoSlug, prNumber);
+
+      // If the PR wasn't created by agent, skip it (leave human PRs alone)
+      if (!sourceIssueNumber) {
+        console.log(`PR #${prNumber} was not created by agent task, skipping (not in scope)`);
+        continue;
+      }
+
+      console.log(`PR #${prNumber} was created by agent issue #${sourceIssueNumber}, attempting auto-fix`);
+
+      // Attempt rebase
+      const rebaseSuccess = await attemptPRRebase(repoOwner, repoName, prNumber, token);
+
+      if (rebaseSuccess) {
+        // Rebase succeeded - post comment on PR
+        const commentBody = `✅ **Auto-rebase successful**
+
+The merge conflict was automatically resolved by rebasing this PR onto the latest \`${process.env.DEFAULT_BRANCH || 'main'}\` branch.
+
+The PR is now ready for review.`;
+
+        await addIssueComment(repoOwner, repoName, prNumber, token, commentBody);
+        console.log(`Posted success comment on PR #${prNumber}`);
+      } else {
+        // Rebase failed - create a fix issue and post comment
+        const fixIssueUrl = await createConflictFixIssue(
+          repoOwner,
+          repoName,
+          prNumber,
+          prTitle,
+          prUrl,
+          sourceIssueNumber,
+          token
+        );
+
+        let commentBody = `❌ **Auto-rebase failed due to true conflicts**
+
+The automatic rebase could not resolve this merge conflict. Manual intervention is required.`;
+
+        if (fixIssueUrl) {
+          commentBody += `\n\n🔧 **Fix issue created:** [#${fixIssueUrl.split('/').pop()}](${fixIssueUrl})\n\nPlease use the fix issue to resolve the conflicts.`;
+        }
+
+        await addIssueComment(repoOwner, repoName, prNumber, token, commentBody);
+        console.log(`Posted failure comment on PR #${prNumber}`);
+      }
+    }
+
+    if (conflictingPRs.length > 0) {
+      console.log(
+        `Conflict scan complete: ${conflictingPRs.length} conflicting PR(s) found and processed: ${conflictingPRs.join(", ")}`
+      );
+    } else {
+      console.log("Conflict scan complete: no conflicting PRs found");
+    }
+  } catch (error) {
+    console.error(`Error during merge conflict detection:`, error);
+    throw error;
+  }
+}
+
 function createTaskEnvironmentForDiagnostic(
   taskPayload: TaskPayload,
   issueData: any,
@@ -1750,6 +2039,54 @@ export async function handler(event: {
     isPR = true;
     requestedRef = payload.pull_request.head.ref;
     prData = payload.pull_request;
+  } else if (ghEvent === "push") {
+    // Handle push event (PR merged to main) - scan for conflicts
+    const repoOwner = payload.repository.owner.login;
+    const repoName = payload.repository.name;
+    const pushedRef = payload.ref; // e.g., "refs/heads/main"
+    const defaultBranch = payload.repository.default_branch || "main";
+
+    // Only process pushes to the default branch (main/master)
+    if (pushedRef !== `refs/heads/${defaultBranch}`) {
+      console.log(`Ignoring push to non-default branch: ${pushedRef}`);
+      return { statusCode: 200, body: "Ignored: not push to default branch" };
+    }
+
+    console.log(`Handling push to ${defaultBranch} in ${repoOwner}/${repoName}`);
+
+    try {
+      // Get GitHub App credentials and mint installation token
+      const [appId, privateKey] = await Promise.all([
+        getParameter(GITHUB_APP_ID_PARAM),
+        getParameter(GITHUB_APP_PRIVATE_KEY_PARAM),
+      ]);
+
+      const appConfig: GitHubAppConfig = { appId, privateKey };
+      const githubToken = await getInstallationToken(repoOwner, repoName, appConfig);
+
+      // Scan open PRs for merge conflicts
+      await handleMergeConflictDetection(
+        repoOwner,
+        repoName,
+        githubToken,
+        appConfig
+      );
+
+      return {
+        statusCode: 200,
+        body: JSON.stringify({
+          message: "Push to default branch processed, conflict scan completed"
+        }),
+      };
+    } catch (error) {
+      console.error(`Failed to handle push to ${defaultBranch}:`, error);
+      return {
+        statusCode: 500,
+        body: JSON.stringify({
+          error: "Failed to process push event"
+        }),
+      };
+    }
   } else {
     console.log(`Ignoring event: ${ghEvent}/${payload.action}`);
     return { statusCode: 200, body: `Ignored: ${ghEvent}/${payload.action}` };
