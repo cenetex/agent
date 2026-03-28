@@ -231,7 +231,7 @@ async function getDraftReleases(
           draftReleases.push({
             repo: repoSlug,
             version: draft.tag_name,
-            url: draft.html_url,
+            url: `https://github.com/${owner}/${name}/releases/${draft.id}`,
           });
         }
       } catch (error) {
