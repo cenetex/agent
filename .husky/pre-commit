@@ -1,0 +1,32 @@
+#!/bin/sh
+. "$(dirname "$0")/_/husky.sh"
+
+echo "[pre-commit] Running TypeScript type checks..."
+
+# Check infra for TypeScript errors
+if [ -f "infra/tsconfig.json" ]; then
+  cd infra
+  npm install >/dev/null 2>&1 || true
+  if ! npx tsc --noEmit 2>&1; then
+    echo "❌ [pre-commit] TypeScript compilation errors in infra/"
+    cd ..
+    exit 1
+  fi
+  cd ..
+fi
+
+# Check for common issues in shell scripts (bash scripts only)
+echo "[pre-commit] Checking shell scripts..."
+if ! find . -type f -name "*.sh" -not -path "./.git/*" -not -path "./.husky/*" -not -path "./node_modules/*" | \
+     xargs grep -l "^#!/bin/bash" | \
+     while read script; do
+       if ! bash -n "$script" 2>/dev/null; then
+         echo "❌ [pre-commit] Shell syntax error in $script"
+         exit 1
+       fi
+     done; then
+  exit 1
+fi
+
+echo "✅ [pre-commit] All checks passed"
+exit 0

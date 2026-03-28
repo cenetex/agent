@@ -447,6 +447,19 @@ cd repo
 # Fix git remote URL for push authentication
 git remote set-url origin "https://x-access-token:${GITHUB_TOKEN}@github.com/${REPO}.git"
 
+# Install git hooks (pre-commit, pre-push)
+echo "Setting up git hooks..."
+if [ -f ".husky/pre-commit" ] && [ -f ".husky/pre-push" ]; then
+  echo "Git hooks found, installing..."
+  # Make hooks executable
+  chmod +x .husky/pre-commit .husky/pre-push
+  # Configure git to use hooks from .husky directory
+  git config core.hooksPath .husky || true
+  echo "Git hooks installed successfully"
+else
+  echo "WARNING: .husky hooks not found in repository"
+fi
+
 # --- Checkout resolved commit SHA ---
 # For PRs, the SHA is on the PR branch — not in the shallow main clone.
 # Fetch it explicitly before attempting checkout.

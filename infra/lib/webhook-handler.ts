@@ -1401,8 +1401,8 @@ async function checkAndTriggerEscalations(
   taskStatus: "requested" | "failed",
   token: string
 ): Promise<void> {
+  const repoSlug = createRepoSlug(repoOwner, repoName);
   try {
-    const repoSlug = createRepoSlug(repoOwner, repoName);
     const config = await loadEscalationConfig(repoSlug);
 
     if (!config.enabled) {
