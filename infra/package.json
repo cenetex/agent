@@ -4,6 +4,7 @@
   "private": true,
   "scripts": {
     "build": "tsc",
+    "typecheck": "tsc --noEmit",
     "cdk": "cdk",
     "synth": "cdk synth",
     "deploy": "cdk deploy --all",

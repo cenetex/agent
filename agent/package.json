@@ -2,5 +2,8 @@
   "name": "@ratimics/github-agent",
   "version": "1.0.0",
   "private": true,
-  "description": "Fargate container that runs Claude Code on GitHub issues/PRs"
+  "description": "Fargate container that runs Claude Code on GitHub issues/PRs",
+  "scripts": {
+    "build": "echo 'Agent container - no build step required for TypeScript'"
+  }
 }
