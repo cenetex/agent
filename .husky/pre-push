@@ -1,0 +1,43 @@
+#!/bin/sh
+. "$(dirname "$0")/_/husky.sh"
+
+echo "[pre-push] Running pre-push validation checks..."
+
+# Get the remote being pushed to
+remote=$1
+url=$2
+
+echo "[pre-push] Remote: $remote"
+
+# Don't run checks for non-GitHub remotes or certain branches
+if [ "$(git rev-parse --abbrev-ref HEAD)" = "main" ]; then
+  echo "❌ [pre-push] Direct push to main is not allowed. Create a feature branch and PR instead."
+  exit 1
+fi
+
+# Run TypeScript compilation in infra
+if [ -f "infra/tsconfig.json" ]; then
+  echo "[pre-push] Building infra TypeScript..."
+  cd infra
+  npm install >/dev/null 2>&1 || true
+  if ! npx tsc --noEmit 2>&1; then
+    echo "❌ [pre-push] TypeScript compilation errors in infra/"
+    cd ..
+    exit 1
+  fi
+  cd ..
+fi
+
+# Validate workflow files if present
+if [ -d ".github/workflows" ]; then
+  echo "[pre-push] Validating GitHub workflow files..."
+  find .github/workflows -name "*.yml" -o -name "*.yaml" | while read workflow; do
+    if ! head -1 "$workflow" | grep -q "^name:"; then
+      echo "❌ [pre-push] Invalid workflow file: $workflow (missing 'name:' field)"
+      exit 1
+    fi
+  done || exit 1
+fi
+
+echo "✅ [pre-push] All pre-push checks passed"
+exit 0

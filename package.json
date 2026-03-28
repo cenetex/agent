@@ -7,6 +7,10 @@
     "build:lambda": "cd infra && npm run build",
     "build:agent": "cd agent && npm run build",
     "deploy": "cd infra && npx cdk deploy --all",
-    "synth": "cd infra && npx cdk synth"
+    "synth": "cd infra && npx cdk synth",
+    "prepare": "husky install"
+  },
+  "devDependencies": {
+    "husky": "^9.0.0"
   }
 }
