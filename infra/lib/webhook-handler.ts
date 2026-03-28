@@ -1869,6 +1869,348 @@ async function launchDiagnosticFargateTask(
   console.log(`Started diagnostic Fargate task: ${taskArn}`);
 }
 
+/**
+ * Fetches workflow run logs for error extraction
+ */
+async function getWorkflowRunLogs(
+  repoOwner: string,
+  repoName: string,
+  runId: number,
+  token: string
+): Promise<string | null> {
+  try {
+    const response = await githubRequest(
+      `/repos/${repoOwner}/${repoName}/actions/runs/${runId}/logs`,
+      token,
+      { method: "GET" },
+      [200]
+    );
+
+    const logsContent = await response.text();
+
+    // Extract last 20 lines of error logs
+    const lines = logsContent.split("\n");
+    const lastLines = lines.slice(Math.max(0, lines.length - 20)).join("\n");
+
+    return lastLines.substring(0, 1000); // Truncate to 1000 chars for issue body
+  } catch (error) {
+    console.warn(`Failed to fetch workflow logs for run ${runId}:`, error);
+    return null;
+  }
+}
+
+/**
+ * Searches for existing open issues matching a workflow failure pattern
+ * Returns the issue number if found, null otherwise
+ */
+async function findExistingWorkflowIssue(
+  repoOwner: string,
+  repoName: string,
+  workflowName: string,
+  failedJobName: string,
+  token: string
+): Promise<number | null> {
+  try {
+    // Search for open issues with a pattern matching the workflow failure
+    const searchQuery = `repo:${repoOwner}/${repoName} state:open "Workflow failure" "${workflowName}" in:title`;
+
+    const response = await githubRequest(
+      `/search/issues?q=${encodeURIComponent(searchQuery)}&sort=created&order=desc&per_page=10`,
+      token,
+      { method: "GET" },
+      [200]
+    );
+
+    const results = await response.json() as any;
+
+    // Find issues that match this specific workflow and job
+    for (const issue of results.items || []) {
+      if (
+        issue.title.includes(workflowName) &&
+        issue.body?.includes(failedJobName)
+      ) {
+        console.log(`Found existing workflow issue #${issue.number}`);
+        return issue.number;
+      }
+    }
+
+    return null;
+  } catch (error) {
+    console.warn(`Failed to search for existing workflow issues:`, error);
+    return null;
+  }
+}
+
+/**
+ * Determines if a workflow is a deploy workflow based on name patterns
+ */
+function isDeployWorkflow(workflowName: string): boolean {
+  const lowerName = workflowName.toLowerCase();
+  return (
+    lowerName.includes("deploy") ||
+    lowerName === "Deploy Staging" ||
+    lowerName === "Deploy Production"
+  );
+}
+
+/**
+ * Extracts environment (staging/production) from workflow name
+ */
+function extractEnvironment(workflowName: string): string {
+  const lowerName = workflowName.toLowerCase();
+  if (lowerName.includes("prod") || lowerName.includes("production")) {
+    return "production";
+  }
+  if (lowerName.includes("staging") || lowerName.includes("stage")) {
+    return "staging";
+  }
+  return "unknown";
+}
+
+/**
+ * Creates an issue for a workflow failure
+ */
+async function createWorkflowFailureIssue(
+  repoOwner: string,
+  repoName: string,
+  workflowName: string,
+  failedJobName: string,
+  failedStepName: string,
+  errorLogs: string | null,
+  runUrl: string,
+  environment: string,
+  token: string
+): Promise<number | null> {
+  try {
+    const environment_label = environment === "production" ? "prod" : "staging";
+    const priority = environment === "production" ? "priority:high" : "priority:medium";
+
+    const issueTitle = `Workflow failure: ${workflowName}`;
+    const issueBody = `## Workflow Failure Report
+
+**Workflow:** ${workflowName}
+**Environment:** ${environment}
+**Run URL:** ${runUrl}
+
+### Failed Job
+- **Job Name:** ${failedJobName}
+- **Failed Step:** ${failedStepName}
+
+### Error Output
+\`\`\`
+${errorLogs || "No error logs available"}
+\`\`\`
+
+---
+*This issue was automatically created by the deployment monitoring system.*`;
+
+    const labels = ["type:bug", priority];
+    if (environment === "production") {
+      labels.push("agent"); // Auto-trigger fix for production failures
+    }
+
+    const response = await githubRequest(
+      `/repos/${repoOwner}/${repoName}/issues`,
+      token,
+      {
+        method: "POST",
+        body: JSON.stringify({
+          title: issueTitle,
+          body: issueBody,
+          labels,
+        }),
+      },
+      [201]
+    );
+
+    const issue = await response.json() as any;
+    console.log(`Created workflow failure issue #${issue.number}`);
+    return issue.number;
+  } catch (error) {
+    console.error(`Failed to create workflow failure issue:`, error);
+    return null;
+  }
+}
+
+/**
+ * Updates an existing workflow failure issue with new failure details
+ */
+async function updateWorkflowFailureIssue(
+  repoOwner: string,
+  repoName: string,
+  issueNumber: number,
+  failedJobName: string,
+  failedStepName: string,
+  errorLogs: string | null,
+  runUrl: string,
+  token: string
+): Promise<void> {
+  try {
+    const comment = `## Failure Recurrence
+
+**New failure detected**
+- **Job:** ${failedJobName}
+- **Step:** ${failedStepName}
+- **Run URL:** ${runUrl}
+
+### Error Output
+\`\`\`
+${errorLogs || "No error logs available"}
+\`\`\`
+
+---
+*Automatic failure detection - $(date)*`;
+
+    await addIssueComment(repoOwner, repoName, issueNumber, token, comment);
+
+    // Add escalation label for repeated failures
+    await githubRequest(
+      `/repos/${repoOwner}/${repoName}/issues/${issueNumber}/labels`,
+      token,
+      {
+        method: "POST",
+        body: JSON.stringify({ labels: ["escalation:repeated-failure"] }),
+      },
+      [200]
+    );
+
+    console.log(`Updated workflow failure issue #${issueNumber}`);
+  } catch (error) {
+    console.error(`Failed to update workflow failure issue #${issueNumber}:`, error);
+  }
+}
+
+/**
+ * Handles workflow_run events with failure conclusion
+ */
+async function handleWorkflowRunFailure(
+  payload: any,
+  token: string
+): Promise<{ statusCode: number; body: string }> {
+  try {
+    const repoOwner = payload.repository.owner.login;
+    const repoName = payload.repository.name;
+    const runId = payload.workflow_run.id;
+    const workflowName = payload.workflow_run.name;
+    const runUrl = payload.workflow_run.html_url;
+    const conclusion = payload.workflow_run.conclusion;
+
+    // Only process failures
+    if (conclusion !== "failure") {
+      console.log(`Workflow run ${runId} has conclusion "${conclusion}", skipping`);
+      return { statusCode: 200, body: "Ignored: workflow did not fail" };
+    }
+
+    // Only process deploy workflows
+    if (!isDeployWorkflow(workflowName)) {
+      console.log(`Workflow "${workflowName}" is not a deploy workflow, skipping`);
+      return { statusCode: 200, body: "Ignored: not a deploy workflow" };
+    }
+
+    console.log(`Handling workflow failure: ${workflowName} (run ${runId})`);
+
+    // Get workflow run details to find failed jobs
+    const runsResponse = await githubRequest(
+      `/repos/${repoOwner}/${repoName}/actions/runs/${runId}/jobs`,
+      token,
+      { method: "GET" },
+      [200]
+    );
+
+    const runsData = await runsResponse.json() as any;
+    const failedJobs = runsData.jobs?.filter((job: any) => job.conclusion === "failure") || [];
+
+    if (failedJobs.length === 0) {
+      console.log(`Workflow run ${runId} has no failed jobs`);
+      return { statusCode: 200, body: "Ignored: no failed jobs found" };
+    }
+
+    const failedJob = failedJobs[0]; // Take the first failed job
+    const failedJobName = failedJob.name;
+    const failedStepName = failedJob.steps?.find((step: any) => step.conclusion === "failure")?.name || "Unknown";
+
+    // Try to extract error logs
+    const errorLogs = await getWorkflowRunLogs(repoOwner, repoName, runId, token);
+
+    // Get environment
+    const environment = extractEnvironment(workflowName);
+
+    // Check if an issue already exists for this pattern
+    const existingIssueNumber = await findExistingWorkflowIssue(
+      repoOwner,
+      repoName,
+      workflowName,
+      failedJobName,
+      token
+    );
+
+    if (existingIssueNumber) {
+      console.log(`Found existing issue #${existingIssueNumber} for this workflow failure`);
+
+      // Update existing issue with new failure details
+      await updateWorkflowFailureIssue(
+        repoOwner,
+        repoName,
+        existingIssueNumber,
+        failedJobName,
+        failedStepName,
+        errorLogs,
+        runUrl,
+        token
+      );
+
+      return {
+        statusCode: 200,
+        body: JSON.stringify({
+          message: "Updated existing workflow failure issue",
+          issueNumber: existingIssueNumber,
+          workflowName,
+          environment,
+        }),
+      };
+    } else {
+      // Create new issue
+      const issueNumber = await createWorkflowFailureIssue(
+        repoOwner,
+        repoName,
+        workflowName,
+        failedJobName,
+        failedStepName,
+        errorLogs,
+        runUrl,
+        environment,
+        token
+      );
+
+      if (!issueNumber) {
+        return {
+          statusCode: 500,
+          body: JSON.stringify({ error: "Failed to create workflow failure issue" }),
+        };
+      }
+
+      return {
+        statusCode: 200,
+        body: JSON.stringify({
+          message: "Created new workflow failure issue",
+          issueNumber,
+          workflowName,
+          environment,
+        }),
+      };
+    }
+  } catch (error) {
+    console.error("Failed to handle workflow_run event:", error);
+    return {
+      statusCode: 500,
+      body: JSON.stringify({
+        error: "Failed to process workflow_run event",
+        details: error instanceof Error ? error.message : "Unknown error",
+      }),
+    };
+  }
+}
+
 export async function handler(event: {
   headers: Record<string, string | undefined>;
   body?: string;
@@ -2465,6 +2807,31 @@ export async function handler(event: {
         statusCode: 500,
         body: JSON.stringify({
           error: "Failed to process push event"
+        }),
+      };
+    }
+  } else if (ghEvent === "workflow_run") {
+    // Handle workflow_run events for deploy workflow failures
+    try {
+      // Get GitHub App credentials and mint installation token
+      const [appId, privateKey] = await Promise.all([
+        getParameter(GITHUB_APP_ID_PARAM),
+        getParameter(GITHUB_APP_PRIVATE_KEY_PARAM),
+      ]);
+
+      const appConfig: GitHubAppConfig = { appId, privateKey };
+      const repoOwner = payload.repository.owner.login;
+      const repoName = payload.repository.name;
+      const githubToken = await getInstallationToken(repoOwner, repoName, appConfig);
+
+      // Handle workflow run failure
+      return await handleWorkflowRunFailure(payload, githubToken);
+    } catch (error) {
+      console.error("Failed to handle workflow_run event:", error);
+      return {
+        statusCode: 500,
+        body: JSON.stringify({
+          error: "Failed to process workflow_run event"
         }),
       };
     }
