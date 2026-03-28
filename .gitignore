@@ -5,3 +5,4 @@ cdk-outputs.json
 *.d.ts
 *.js.map
 !cdk.json
+!jest.config.js
