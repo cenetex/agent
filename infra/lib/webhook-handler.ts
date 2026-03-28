@@ -39,6 +39,7 @@ import {
   createEscalationConfigPath,
   createEscalationQueuePath,
 } from "./types";
+import { publishDigestToSocialMedia } from "./digest-publisher";
 
 const ecs = new ECSClient({});
 const ssm = new SSMClient({});
@@ -2344,6 +2345,34 @@ export async function handler(event: {
           body: JSON.stringify({
             error: "Failed to process agent:succeeded event",
             issueNumber,
+          }),
+        };
+      }
+    }
+
+    // Handle bot-summary label for digest publishing
+    if (labelName === "bot-summary") {
+      console.log(`Handling bot-summary label on issue #${payload.issue.number}`);
+      try {
+        await publishDigestToSocialMedia(
+          payload.issue.title,
+          payload.issue.body,
+          payload.issue.html_url
+        );
+        return {
+          statusCode: 200,
+          body: JSON.stringify({
+            message: "Digest published to social media",
+            issueNumber: payload.issue.number,
+          }),
+        };
+      } catch (error) {
+        console.error(`Failed to publish digest for issue #${payload.issue.number}:`, error);
+        return {
+          statusCode: 500,
+          body: JSON.stringify({
+            error: "Failed to publish digest",
+            issueNumber: payload.issue.number,
           }),
         };
       }

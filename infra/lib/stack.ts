@@ -20,6 +20,9 @@ const PARAM_GITHUB_APP_PRIVATE_KEY = "/github-agent/GITHUB_APP_PRIVATE_KEY";
 const PARAM_WEBHOOK_SECRET = "/github-agent/GITHUB_WEBHOOK_SECRET";
 const PARAM_OPENROUTER_KEY = "/github-agent/OPENROUTER_API_KEY";
 const PARAM_ANTHROPIC_KEY = "/github-agent/ANTHROPIC_API_KEY";
+const PARAM_TWITTER_BEARER_TOKEN = "/github-agent/TWITTER_BEARER_TOKEN";
+const PARAM_TELEGRAM_BOT_TOKEN = "/github-agent/TELEGRAM_BOT_TOKEN";
+const PARAM_TELEGRAM_CHANNEL_ID = "/github-agent/TELEGRAM_CHANNEL_ID";
 
 export class GitHubAgentStack extends cdk.Stack {
   constructor(scope: Construct, id: string, props?: cdk.StackProps) {
@@ -31,6 +34,9 @@ export class GitHubAgentStack extends cdk.Stack {
       PARAM_WEBHOOK_SECRET,
       PARAM_OPENROUTER_KEY,
       PARAM_ANTHROPIC_KEY,
+      PARAM_TWITTER_BEARER_TOKEN,
+      PARAM_TELEGRAM_BOT_TOKEN,
+      PARAM_TELEGRAM_CHANNEL_ID,
     ].map(
       (name) =>
         `arn:aws:ssm:${this.region}:${this.account}:parameter${name}`
@@ -715,6 +721,47 @@ export class GitHubAgentStack extends cdk.Stack {
       integration: new apigwv2Integrations.HttpLambdaIntegration(
         "WebhookIntegration",
         webhookHandler
+      ),
+    });
+
+    // -------------------------------------------------------
+    // Digest Publisher Lambda (posts to X/Twitter and Telegram)
+    // -------------------------------------------------------
+    const digestPublisherFunction = new NodejsFunction(this, "DigestPublisherFunction", {
+      entry: path.join(__dirname, "digest-publisher.ts"),
+      handler: "handler",
+      runtime: lambda.Runtime.NODEJS_20_X,
+      architecture: lambda.Architecture.ARM_64,
+      timeout: cdk.Duration.minutes(2),
+      memorySize: 256,
+      bundling: {
+        minify: true,
+        sourceMap: true,
+        target: "node20",
+        externalModules: [],
+      },
+      environment: {
+        GITHUB_APP_ID_PARAM: PARAM_GITHUB_APP_ID,
+        GITHUB_APP_PRIVATE_KEY_PARAM: PARAM_GITHUB_APP_PRIVATE_KEY,
+        TWITTER_BEARER_TOKEN_PARAM: PARAM_TWITTER_BEARER_TOKEN,
+        TELEGRAM_BOT_TOKEN_PARAM: PARAM_TELEGRAM_BOT_TOKEN,
+        TELEGRAM_CHANNEL_ID_PARAM: PARAM_TELEGRAM_CHANNEL_ID,
+      },
+    });
+
+    digestPublisherFunction.addToRolePolicy(
+      new iam.PolicyStatement({
+        actions: ["ssm:GetParameter"],
+        resources: ssmParamArns,
+      })
+    );
+
+    httpApi.addRoutes({
+      path: "/digest-publish",
+      methods: [apigwv2.HttpMethod.POST],
+      integration: new apigwv2Integrations.HttpLambdaIntegration(
+        "DigestPublishIntegration",
+        digestPublisherFunction
       ),
     });
 
