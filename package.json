@@ -8,6 +8,8 @@
     "build:agent": "cd agent && npm run build",
     "deploy": "cd infra && npx cdk deploy --all",
     "synth": "cd infra && npx cdk synth",
+    "test": "cd infra && npm run test",
+    "test:watch": "cd infra && npm run test:watch",
     "prepare": "husky install"
   },
   "devDependencies": {
