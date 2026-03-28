@@ -1435,6 +1435,7 @@ async function checkAndTriggerEscalations(
     // Note: Repeated failure, PR staleness, and low credits triggers are handled
     // by separate processors (daily-digest-handler, review-handler, escalation-handler)
   } catch (error) {
+    const repoSlug = createRepoSlug(repoOwner, repoName);
     console.warn(`Failed to check escalation triggers for ${repoSlug}#${issueNumber}:`, error);
     // Don't fail the main handler if escalation check fails
   }
@@ -1867,6 +1868,271 @@ async function launchDiagnosticFargateTask(
   }
 
   console.log(`Started diagnostic Fargate task: ${taskArn}`);
+}
+
+/**
+ * Checks if a workflow failure issue already exists for this workflow run
+ */
+async function checkExistingWorkflowFailureIssue(
+  repoOwner: string,
+  repoName: string,
+  workflowName: string,
+  token: string
+): Promise<number | null> {
+  try {
+    // Search for open issues with specific label pattern and title
+    const query = `repo:${repoOwner}/${repoName} is:issue is:open label:type:bug "${workflowName}" workflow`;
+    const response = await fetch(
+      `https://api.github.com/search/issues?q=${encodeURIComponent(query)}&per_page=5`,
+      {
+        headers: {
+          Accept: "application/vnd.github+json",
+          Authorization: `Bearer ${token}`,
+          "User-Agent": "github-agent-control-plane",
+        },
+      }
+    );
+
+    if (!response.ok) {
+      console.warn(`Failed to search for existing issues: ${response.status}`);
+      return null;
+    }
+
+    const data = await response.json() as any;
+    if (data.items && data.items.length > 0) {
+      console.log(`Found ${data.items.length} existing workflow failure issue(s)`);
+      return data.items[0].number;
+    }
+
+    return null;
+  } catch (error) {
+    console.warn(`Failed to check for existing workflow issue: ${error}`);
+    return null;
+  }
+}
+
+/**
+ * Extracts error messages from workflow run logs
+ */
+async function extractWorkflowErrorMessages(
+  repoOwner: string,
+  repoName: string,
+  runId: number,
+  token: string,
+  failedJobName: string
+): Promise<string> {
+  try {
+    // Get workflow run jobs
+    const jobsResponse = await githubRequest(
+      `/repos/${repoOwner}/${repoName}/actions/runs/${runId}/jobs`,
+      token,
+      { method: "GET" },
+      [200]
+    );
+
+    const jobsData = await jobsResponse.json() as any;
+    const failedJob = jobsData.jobs?.find((j: any) => j.name === failedJobName && j.conclusion === "failure");
+
+    if (!failedJob) {
+      console.log(`Failed job "${failedJobName}" not found in workflow run`);
+      return "Failed step information not available";
+    }
+
+    // Extract step information
+    let errorMessage = "";
+    const failedSteps = failedJob.steps?.filter((s: any) => s.conclusion === "failure") || [];
+
+    if (failedSteps.length > 0) {
+      const failedStep = failedSteps[0];
+      errorMessage = `**Step:** ${failedStep.name}\n**Status:** ${failedStep.conclusion}\n`;
+    }
+
+    // Try to get logs from the failed job
+    try {
+      const logsUrl = `https://api.github.com/repos/${repoOwner}/${repoName}/actions/jobs/${failedJob.id}/logs`;
+      const logsResponse = await fetch(logsUrl, {
+        headers: {
+          Accept: "application/vnd.github+json",
+          Authorization: `Bearer ${token}`,
+          "User-Agent": "github-agent-control-plane",
+        },
+      });
+
+      if (logsResponse.ok) {
+        const logs = await logsResponse.text();
+        // Extract last 20 lines of logs
+        const logLines = logs.split("\n");
+        const lastLines = logLines.slice(-20).join("\n");
+        errorMessage += `\n**Last log lines:**\n\`\`\`\n${lastLines}\n\`\`\``;
+      }
+    } catch (logsError) {
+      console.warn(`Could not fetch job logs: ${logsError}`);
+      errorMessage += "\n*(Full logs could not be retrieved)*";
+    }
+
+    return errorMessage;
+  } catch (error) {
+    console.warn(`Failed to extract error messages: ${error}`);
+    return "Error message extraction failed";
+  }
+}
+
+/**
+ * Determines if workflow is a deploy workflow and the environment
+ */
+function parseWorkflowEnvironment(
+  workflowName: string
+): { isDeployWorkflow: boolean; environment?: "production" | "staging" } {
+  const lowerName = workflowName.toLowerCase();
+
+  if (lowerName.includes("production") || lowerName.includes("prod deploy")) {
+    return { isDeployWorkflow: true, environment: "production" };
+  }
+
+  if (lowerName.includes("staging") || lowerName.includes("stage")) {
+    return { isDeployWorkflow: true, environment: "staging" };
+  }
+
+  if (lowerName.includes("deploy")) {
+    return { isDeployWorkflow: true };
+  }
+
+  return { isDeployWorkflow: false };
+}
+
+/**
+ * Handles workflow_run events with failure conclusion
+ */
+async function handleWorkflowRunFailure(
+  repoOwner: string,
+  repoName: string,
+  workflowName: string,
+  workflowRunId: number,
+  workflowRunUrl: string,
+  failedJobName: string,
+  conclusion: string,
+  token: string
+): Promise<void> {
+  try {
+    const repoSlug = createRepoSlug(repoOwner, repoName);
+    const { isDeployWorkflow, environment } = parseWorkflowEnvironment(workflowName);
+
+    if (!isDeployWorkflow) {
+      console.log(`Workflow "${workflowName}" is not a deploy workflow, skipping`);
+      return;
+    }
+
+    console.log(
+      `Handling workflow failure: ${workflowName} (run #${workflowRunId}) in ${repoSlug}`
+    );
+
+    // Check if an issue already exists for this workflow
+    const existingIssueNumber = await checkExistingWorkflowFailureIssue(
+      repoOwner,
+      repoName,
+      workflowName,
+      token
+    );
+
+    if (existingIssueNumber) {
+      console.log(`Found existing issue #${existingIssueNumber} for workflow failure`);
+
+      // Update the existing issue with new failure information
+      const errorMessages = await extractWorkflowErrorMessages(
+        repoOwner,
+        repoName,
+        workflowRunId,
+        token,
+        failedJobName
+      );
+
+      const updateComment = `## Workflow Failure Detected (Run #${workflowRunId})
+
+**Workflow:** [${workflowName}](${workflowRunUrl})
+**Time:** ${new Date().toISOString()}
+**Status:** ${conclusion}
+
+**Failed Job:** ${failedJobName}
+
+${errorMessages}`;
+
+      await addIssueComment(repoOwner, repoName, existingIssueNumber, token, updateComment);
+      console.log(`Updated existing issue #${existingIssueNumber} with new failure`);
+      return;
+    }
+
+    // Create new issue for this workflow failure
+    const errorMessages = await extractWorkflowErrorMessages(
+      repoOwner,
+      repoName,
+      workflowRunId,
+      token,
+      failedJobName
+    );
+
+    const issueTitle = `🚨 Deploy Workflow Failed: ${workflowName} (Run #${workflowRunId})`;
+
+    const issueBody = `## Workflow Failure
+
+**Workflow:** [${workflowName}](${workflowRunUrl})
+**Repository:** ${repoSlug}
+**Run ID:** ${workflowRunId}
+**Status:** ${conclusion}
+**Environment:** ${environment || "Unknown"}
+
+### Failed Job
+
+**Job Name:** ${failedJobName}
+
+${errorMessages}
+
+### Details
+
+[View workflow run](${workflowRunUrl})
+
+---
+*This issue was auto-created by the deployment monitoring system. It indicates a failure in the CI/CD deployment pipeline.*`;
+
+    // Determine labels based on environment
+    const labels: string[] = ["type:bug"];
+
+    if (environment === "production") {
+      labels.push("priority:high", TRIGGER_LABEL); // Auto-trigger agent for prod failures
+    } else if (environment === "staging") {
+      labels.push("priority:medium");
+    }
+
+    // Create the issue
+    const createResponse = await githubRequest(
+      `/repos/${repoOwner}/${repoName}/issues`,
+      token,
+      {
+        method: "POST",
+        body: JSON.stringify({
+          title: issueTitle,
+          body: issueBody,
+          labels,
+        }),
+      },
+      [201]
+    );
+
+    const createdIssue = await createResponse.json() as any;
+    console.log(
+      `Created workflow failure issue #${createdIssue.number} in ${repoSlug}`
+    );
+
+    // For production failures, post a comment to trigger immediate agent action
+    if (environment === "production" && labels.includes(TRIGGER_LABEL)) {
+      const triggerComment = `🚀 **Production Deployment Failure - Auto-triggering agent fix attempt**
+
+This production deployment failure has been automatically escalated. The agent will attempt to diagnose and fix the issue.`;
+      await addIssueComment(repoOwner, repoName, createdIssue.number, token, triggerComment);
+    }
+  } catch (error) {
+    console.error(`Failed to handle workflow run failure: ${error}`);
+    throw error;
+  }
 }
 
 export async function handler(event: {
@@ -2465,6 +2731,87 @@ export async function handler(event: {
         statusCode: 500,
         body: JSON.stringify({
           error: "Failed to process push event"
+        }),
+      };
+    }
+  } else if (ghEvent === "workflow_run" && payload.action === "completed") {
+    // Handle workflow_run events with failure conclusion - create issues for deploy failures
+    const repoOwner = payload.repository.owner.login;
+    const repoName = payload.repository.name;
+    const workflowRun = payload.workflow_run;
+    const workflowName = payload.workflow?.name || workflowRun.name || "Unknown Workflow";
+    const workflowRunId = workflowRun.id;
+    const workflowRunUrl = workflowRun.html_url;
+    const workflowConclusion = workflowRun.conclusion;
+
+    // Only handle failures
+    if (workflowConclusion !== "failure") {
+      console.log(`Workflow run #${workflowRunId} concluded with ${workflowConclusion}, skipping`);
+      return { statusCode: 200, body: `Ignored: workflow conclusion is ${workflowConclusion}` };
+    }
+
+    console.log(
+      `Handling workflow_run failure: ${workflowName} (${repoOwner}/${repoName})`
+    );
+
+    try {
+      // Get GitHub App credentials and mint installation token
+      const [appId, privateKey] = await Promise.all([
+        getParameter(GITHUB_APP_ID_PARAM),
+        getParameter(GITHUB_APP_PRIVATE_KEY_PARAM),
+      ]);
+
+      const appConfig: GitHubAppConfig = { appId, privateKey };
+      const githubToken = await getInstallationToken(repoOwner, repoName, appConfig);
+
+      // Determine the failed job name
+      let failedJobName = "Unknown Job";
+      if (workflowRun.jobs_url) {
+        try {
+          const jobsResponse = await githubRequest(
+            `/repos/${repoOwner}/${repoName}/actions/runs/${workflowRunId}/jobs`,
+            githubToken,
+            { method: "GET" },
+            [200]
+          );
+          const jobsData = await jobsResponse.json() as any;
+          const failedJob = jobsData.jobs?.find((j: any) => j.conclusion === "failure");
+          if (failedJob) {
+            failedJobName = failedJob.name;
+          }
+        } catch (jobError) {
+          console.warn(`Could not fetch job details: ${jobError}`);
+        }
+      }
+
+      // Handle the workflow failure - this will create an issue or update existing one
+      await handleWorkflowRunFailure(
+        repoOwner,
+        repoName,
+        workflowName,
+        workflowRunId,
+        workflowRunUrl,
+        failedJobName,
+        workflowConclusion,
+        githubToken
+      );
+
+      return {
+        statusCode: 200,
+        body: JSON.stringify({
+          message: "Workflow failure processed",
+          workflowName,
+          workflowRunId,
+        }),
+      };
+    } catch (error) {
+      console.error(`Failed to handle workflow_run failure for ${workflowName}:`, error);
+      return {
+        statusCode: 500,
+        body: JSON.stringify({
+          error: "Failed to process workflow_run event",
+          workflowName,
+          workflowRunId,
         }),
       };
     }
