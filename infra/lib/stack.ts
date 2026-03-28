@@ -20,6 +20,12 @@ const PARAM_GITHUB_APP_PRIVATE_KEY = "/github-agent/GITHUB_APP_PRIVATE_KEY";
 const PARAM_WEBHOOK_SECRET = "/github-agent/GITHUB_WEBHOOK_SECRET";
 const PARAM_OPENROUTER_KEY = "/github-agent/OPENROUTER_API_KEY";
 const PARAM_ANTHROPIC_KEY = "/github-agent/ANTHROPIC_API_KEY";
+const PARAM_X_API_KEY = "/github-agent/X_API_KEY";
+const PARAM_X_API_SECRET = "/github-agent/X_API_SECRET";
+const PARAM_X_ACCESS_TOKEN = "/github-agent/X_ACCESS_TOKEN";
+const PARAM_X_ACCESS_TOKEN_SECRET = "/github-agent/X_ACCESS_TOKEN_SECRET";
+const PARAM_TELEGRAM_BOT_TOKEN = "/github-agent/TELEGRAM_BOT_TOKEN";
+const PARAM_TELEGRAM_CHAT_ID = "/github-agent/TELEGRAM_CHAT_ID";
 
 export class GitHubAgentStack extends cdk.Stack {
   constructor(scope: Construct, id: string, props?: cdk.StackProps) {
@@ -31,6 +37,12 @@ export class GitHubAgentStack extends cdk.Stack {
       PARAM_WEBHOOK_SECRET,
       PARAM_OPENROUTER_KEY,
       PARAM_ANTHROPIC_KEY,
+      PARAM_X_API_KEY,
+      PARAM_X_API_SECRET,
+      PARAM_X_ACCESS_TOKEN,
+      PARAM_X_ACCESS_TOKEN_SECRET,
+      PARAM_TELEGRAM_BOT_TOKEN,
+      PARAM_TELEGRAM_CHAT_ID,
     ].map(
       (name) =>
         `arn:aws:ssm:${this.region}:${this.account}:parameter${name}`
@@ -249,6 +261,39 @@ export class GitHubAgentStack extends cdk.Stack {
     });
 
     // -------------------------------------------------------
+    // Social Media Handler Lambda (posts digest to X and Telegram)
+    // -------------------------------------------------------
+    const socialMediaFunction = new NodejsFunction(this, "SocialMediaFunction", {
+      entry: path.join(__dirname, "social-media-handler.ts"),
+      handler: "handler",
+      runtime: lambda.Runtime.NODEJS_20_X,
+      architecture: lambda.Architecture.ARM_64,
+      timeout: cdk.Duration.minutes(2),
+      memorySize: 256,
+      bundling: {
+        minify: true,
+        sourceMap: true,
+        target: "node20",
+        externalModules: [],
+      },
+      environment: {
+        X_API_KEY_PARAM: PARAM_X_API_KEY,
+        X_API_SECRET_PARAM: PARAM_X_API_SECRET,
+        X_ACCESS_TOKEN_PARAM: PARAM_X_ACCESS_TOKEN,
+        X_ACCESS_TOKEN_SECRET_PARAM: PARAM_X_ACCESS_TOKEN_SECRET,
+        TELEGRAM_BOT_TOKEN_PARAM: PARAM_TELEGRAM_BOT_TOKEN,
+        TELEGRAM_CHAT_ID_PARAM: PARAM_TELEGRAM_CHAT_ID,
+      },
+    });
+
+    socialMediaFunction.addToRolePolicy(
+      new iam.PolicyStatement({
+        actions: ["ssm:GetParameter"],
+        resources: ssmParamArns,
+      })
+    );
+
+    // -------------------------------------------------------
     // Lambda — Webhook Handler
     // -------------------------------------------------------
     const webhookHandler = new NodejsFunction(this, "WebhookHandler", {
@@ -279,6 +324,7 @@ export class GitHubAgentStack extends cdk.Stack {
         GITHUB_APP_PRIVATE_KEY_PARAM: PARAM_GITHUB_APP_PRIVATE_KEY,
         OPENROUTER_API_KEY_PARAM: PARAM_OPENROUTER_KEY,
         ARTIFACTS_BUCKET: artifactsBucket.bucketName,
+        SOCIAL_MEDIA_FUNCTION_NAME: socialMediaFunction.functionName,
       },
     });
 
@@ -316,6 +362,13 @@ export class GitHubAgentStack extends cdk.Stack {
 
     // Grant S3 permissions for task metadata
     artifactsBucket.grantReadWrite(webhookHandler);
+
+    webhookHandler.addToRolePolicy(
+      new iam.PolicyStatement({
+        actions: ["lambda:InvokeFunction"],
+        resources: [socialMediaFunction.functionArn],
+      })
+    );
 
     // -------------------------------------------------------
     // Lambda — Review Handler

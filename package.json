@@ -14,5 +14,8 @@
   },
   "devDependencies": {
     "husky": "^9.0.0"
+  },
+  "dependencies": {
+    "@aws-sdk/client-lambda": "^3.1019.0"
   }
 }

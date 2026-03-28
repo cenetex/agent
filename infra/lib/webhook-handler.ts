@@ -15,6 +15,10 @@ import {
   ListObjectsV2Command,
 } from "@aws-sdk/client-s3";
 import {
+  LambdaClient,
+  InvokeCommand,
+} from "@aws-sdk/client-lambda";
+import {
   TaskPayload,
   IssueMetadata,
   generateTaskId,
@@ -43,6 +47,7 @@ import {
 const ecs = new ECSClient({});
 const ssm = new SSMClient({});
 const s3 = new S3Client({});
+const lambda = new LambdaClient({});
 
 const CLUSTER_ARN = process.env.CLUSTER_ARN!;
 const TASK_DEFINITION_ARN = process.env.TASK_DEFINITION_ARN!;
@@ -56,6 +61,7 @@ const GITHUB_APP_ID_PARAM = process.env.GITHUB_APP_ID_PARAM!;
 const GITHUB_APP_PRIVATE_KEY_PARAM = process.env.GITHUB_APP_PRIVATE_KEY_PARAM!;
 const OPENROUTER_API_KEY_PARAM = process.env.OPENROUTER_API_KEY_PARAM!;
 const ARTIFACTS_BUCKET = process.env.ARTIFACTS_BUCKET!;
+const SOCIAL_MEDIA_FUNCTION_NAME = process.env.SOCIAL_MEDIA_FUNCTION_NAME!;
 const TRIGGER_LABEL = "agent";
 const DIAGNOSE_LABEL = "diagnose";
 const SIGNAL_LABEL_RUNNING = "agent:running";
@@ -2246,6 +2252,66 @@ export async function handler(event: {
         return {
           statusCode: 500,
           body: JSON.stringify({ error: "Failed to launch diagnostic task" }),
+        };
+      }
+    }
+
+    // Handle bot-summary label to post digest to social media
+    if (labelName === "bot-summary") {
+      console.log(`Handling bot-summary label on issue #${payload.issue.number}`);
+
+      try {
+        const repoOwner = payload.repository.owner.login;
+        const repoName = payload.repository.name;
+        const issueNumber = payload.issue.number;
+        const issueData = payload.issue;
+
+        // Invoke social media handler Lambda
+        console.log(`Publishing digest to social media for issue #${issueNumber}`);
+
+        // Send event to social media handler
+        const socialMediaEvent = {
+          issue: {
+            number: issueNumber,
+            title: issueData.title,
+            body: issueData.body,
+            labels: issueData.labels.map((l: any) => ({ name: l.name })),
+            html_url: issueData.html_url,
+            repository_url: `${payload.repository.html_url}/issues/${issueNumber}`,
+          },
+        };
+
+        // Invoke the social media Lambda function asynchronously
+        try {
+          const response = await lambda.send(
+            new InvokeCommand({
+              FunctionName: SOCIAL_MEDIA_FUNCTION_NAME,
+              InvocationType: "Event", // Async invocation
+              Payload: JSON.stringify(socialMediaEvent),
+            })
+          );
+
+          console.log(`Successfully queued digest to social media handler (StatusCode: ${response.StatusCode})`);
+
+          return {
+            statusCode: 202,
+            body: JSON.stringify({
+              message: "Digest queued for social media posting",
+              issueNumber,
+            }),
+          };
+        } catch (lambdaError) {
+          console.error(`Failed to invoke social media Lambda:`, lambdaError);
+          throw lambdaError;
+        }
+      } catch (error) {
+        console.error(`Failed to handle bot-summary label for issue #${payload.issue.number}:`, error);
+        return {
+          statusCode: 500,
+          body: JSON.stringify({
+            error: "Failed to queue digest for social media",
+            issueNumber: payload.issue.number,
+          }),
         };
       }
     }
