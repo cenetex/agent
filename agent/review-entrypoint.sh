@@ -174,6 +174,18 @@ on_exit() {
 
   set +e
 
+  # Check if timeout occurred (exit code 124 is the timeout command's exit code)
+  if [ "${exit_code}" -eq 124 ]; then
+    local error_message="Review execution exceeded 30-minute timeout"
+    update_review_status "failed" "error" "" "$error_message"
+    upload_review_artifacts
+    apply_review_labels "error"
+    post_review_comment "error" "Review analysis timed out after 30 minutes. This may indicate the PR is too large or the review criteria are too complex. Please try again or simplify the review scope."
+
+    echo "=== Review timeout ==="
+    exit "${exit_code}"
+  fi
+
   if [ "${REVIEW_STATUS}" = "error" ] || [ "${exit_code}" -ne 0 ]; then
     local error_message="Review failed during ${CURRENT_STAGE}"
     update_review_status "failed" "error" "" "$error_message"
@@ -326,10 +338,12 @@ export ANTHROPIC_API_KEY=""
 cd ../pr-worktree
 
 # Run Claude Code with the review mission
-claude --dangerously-skip-permissions \
+# Add 30-minute (1800 second) hard timeout to prevent stuck reviews from burning credits
+CLAUDE_EXIT_CODE=0
+timeout 1800 claude --dangerously-skip-permissions \
   --model "anthropic/claude-opus-4-6" \
   --print \
-  "${REVIEW_MISSION}" 2>&1 | tee "${REVIEW_LOG}"
+  "${REVIEW_MISSION}" 2>&1 | tee "${REVIEW_LOG}" || CLAUDE_EXIT_CODE=$?
 
 # Parse the review output for the decision and findings
 REVIEW_OUTPUT=$(cat "${REVIEW_LOG}")
