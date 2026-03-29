@@ -18,6 +18,8 @@ import {
   createRepoSlug,
   getInstallationToken,
   createArtifactPrefix,
+  PROTECTED_PATHS,
+  CODING_AGENT_BOT_LOGINS,
   type ReviewEnvironment,
   type GitHubAppConfig,
 } from "./types";
@@ -39,23 +41,7 @@ const ARTIFACTS_BUCKET = process.env.ARTIFACTS_BUCKET!;
 // Monitored repositories for automated review (comma-separated)
 const MONITORED_REPOS = (process.env.MONITORED_REPOS || "").split(",").filter(r => r.trim());
 
-// Bot username for filtering PRs created by the coding agent
-const CODING_AGENT_BOT_LOGIN = "cenetex-coding-agent[bot]";
-
-// Protected file patterns that should never be auto-merged
-const PROTECTED_PATHS = [
-  ".github/workflows/",
-  "infra/lib/stack.ts",
-  "infra/bin/",
-  "infra/cdk.json",
-  "Dockerfile",
-  ".env",
-  "credentials",
-  "secrets",
-  "*.key",
-  "*.pem",
-  "deploy.sh",
-];
+// PROTECTED_PATHS and CODING_AGENT_BOT_LOGINS imported from types.ts
 
 async function getParameter(name: string): Promise<string> {
   const resp = await ssm.send(
@@ -126,9 +112,9 @@ async function discoverReviewablePRs(token: string): Promise<any[]> {
 
       // Filter PRs created by the coding agent that don't have review labels yet
       const needsReview = prs.filter((pr: any) => {
-        const isFromBot = pr.user.login === CODING_AGENT_BOT_LOGIN ||
-                         pr.user.login.includes("github-agent") ||
-                         pr.user.login.includes("coding-agent");
+        const isFromBot = CODING_AGENT_BOT_LOGINS.some(
+          login => pr.user.login === login || pr.user.login.includes(login.replace("[bot]", ""))
+        );
 
         const hasReviewLabel = pr.labels.some((label: any) =>
           label.name.startsWith("review:")
