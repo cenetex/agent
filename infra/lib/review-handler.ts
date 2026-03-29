@@ -43,8 +43,10 @@ const CODING_AGENT_BOT_LOGIN = "cenetex-coding-agent[bot]";
 const PROTECTED_PATHS = [
   ".github/workflows/",
   "infra/lib/stack.ts",
+  "infra/bin/",
+  "infra/cdk.json",
   "Dockerfile",
-  "infra/",
+  "deploy.sh",
   ".env",
   "credentials",
   "secrets",
