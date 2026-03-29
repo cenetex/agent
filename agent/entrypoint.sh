@@ -345,6 +345,30 @@ find_created_pr_url() {
     '
 }
 
+check_for_existing_agent_pr() {
+  # For issues, check if an open PR already exists that references this issue
+  # Search for open PRs with "Fixes #ISSUE_NUMBER" in the body
+  # Returns the PR number if found, empty string otherwise
+
+  if [ "${IS_PR}" = "true" ]; then
+    # For PR tasks, don't check (this is a PR review/modification task)
+    return
+  fi
+
+  echo "Checking for existing open PRs that reference issue #${ISSUE_NUMBER}..."
+
+  # Query all open PRs and check their bodies for references to this issue
+  local existing_pr
+  existing_pr=$(gh api "repos/${REPO}/pulls?state=open&per_page=100" \
+    --jq ".[] | select((.body | contains(\"Fixes #${ISSUE_NUMBER}\") or contains(\"Closes #${ISSUE_NUMBER}\") or contains(\"Resolves #${ISSUE_NUMBER}\"))) | .number" \
+    2>/dev/null | head -1)
+
+  if [ -n "$existing_pr" ]; then
+    echo "Found existing open PR #${existing_pr} that references issue #${ISSUE_NUMBER}"
+    echo "$existing_pr"
+  fi
+}
+
 has_agent_question_comment() {
   local comments_json
 
@@ -763,6 +787,15 @@ Your mission:
 
 When you close the issue, the system will detect this and mark your work as complete."
 else
+  # Check for existing agent PR before building mission
+  EXISTING_PR_NUMBER=$(check_for_existing_agent_pr)
+  EXISTING_PR_NOTE=""
+  if [ -n "$EXISTING_PR_NUMBER" ]; then
+    EXISTING_PR_NOTE="
+
+**NOTE:** An open PR (#${EXISTING_PR_NUMBER}) already exists that references this issue. You should push your changes to that existing PR (branch) instead of creating a new one, or inform the user if the PR is from a different agent run."
+  fi
+
   MISSION="${SYSTEM_INSTRUCTIONS}${FEEDBACK_SECTION}
 
 ---
@@ -772,7 +805,7 @@ TASK (from issue #${ISSUE_NUMBER}):
 You have been triggered by the 'agent' label on issue #${ISSUE_NUMBER} in ${REPO}.
 
 Here is the issue context:
-${CONTEXT}
+${CONTEXT}${EXISTING_PR_NOTE}
 
 Your mission:
 - Understand the issue and explore the codebase to find the relevant files

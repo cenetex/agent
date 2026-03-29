@@ -2136,6 +2136,64 @@ This production deployment failure has been automatically escalated. The agent w
   }
 }
 
+/**
+ * Checks if there's an active running task for the given issue in S3 metadata
+ * Returns true if an active task is found, false otherwise
+ */
+async function checkForActiveTasks(
+  repoSlug: string,
+  issueNumber: number
+): Promise<boolean> {
+  try {
+    // List all metadata files for this repo
+    const prefix = `tasks/${repoSlug}/`;
+    const listResult = await s3.send(new ListObjectsV2Command({
+      Bucket: ARTIFACTS_BUCKET,
+      Prefix: prefix,
+      MaxKeys: 1000,
+    }));
+
+    if (!listResult.Contents) {
+      return false;
+    }
+
+    // Search through metadata files for active tasks on this issue
+    const metadataKeys = listResult.Contents
+      .filter((obj: any) => obj.Key?.endsWith('/metadata.json'))
+      .map((obj: any) => obj.Key!);
+
+    for (const metadataKey of metadataKeys) {
+      const result = await s3.send(new GetObjectCommand({
+        Bucket: ARTIFACTS_BUCKET,
+        Key: metadataKey,
+      }));
+
+      if (!result.Body) continue;
+
+      try {
+        const content = await result.Body.transformToString() as string;
+        const metadata = JSON.parse(content) as TaskMetadata;
+
+        // Check if this task is for the same issue and is still running
+        if (metadata.issue_number === issueNumber &&
+            metadata.status === "running") {
+          console.log(`Found active running task: ${metadata.task_id} for issue #${issueNumber}`);
+          return true;
+        }
+      } catch {
+        // Skip malformed metadata files
+        continue;
+      }
+    }
+
+    return false;
+  } catch (error) {
+    console.error(`Failed to check for active tasks:`, error);
+    // If we can't check, err on the side of caution and allow (don't block)
+    return false;
+  }
+}
+
 export async function handler(event: {
   headers: Record<string, string | undefined>;
   body?: string;
@@ -2876,8 +2934,16 @@ export async function handler(event: {
   // --- Check for concurrency guard ---
   const issueLabels = await getIssueLabels(repoOwner, repoName, issueNumber, githubToken);
   if (issueLabels.includes(SIGNAL_LABEL_RUNNING)) {
-    console.log(`Issue #${issueNumber} already has agent:running, skipping`);
+    console.log(`Issue #${issueNumber} already has agent:running label, skipping`);
     return { statusCode: 200, body: "Already running" };
+  }
+
+  // Also check S3 metadata for active running tasks
+  const repoSlug = createRepoSlug(repoOwner, repoName);
+  const hasActiveTask = await checkForActiveTasks(repoSlug, issueNumber);
+  if (hasActiveTask) {
+    console.log(`Issue #${issueNumber} has an active running task in S3, skipping`);
+    return { statusCode: 200, body: "Already running (active task found)" };
   }
 
   await ensureSignalLabels(repoOwner, repoName, githubToken);
@@ -2903,7 +2969,6 @@ export async function handler(event: {
 
   // --- Create task payload ---
   const taskId = generateTaskId();
-  const repoSlug = createRepoSlug(repoOwner, repoName);
 
   // Extract label names from the webhook payload
   const labels = isPR
