@@ -406,6 +406,98 @@ issue_was_closed() {
   [ "$state" = "closed" ]
 }
 
+poll_pr_checks() {
+  local pr_number="$1"
+  local max_wait_seconds=600  # 10 minutes
+  local poll_interval=10     # check every 10 seconds
+  local elapsed=0
+
+  echo "[PR checks] Polling CI status for PR #${pr_number}..."
+
+  while [ $elapsed -lt $max_wait_seconds ]; do
+    # Get the PR status from combined checks
+    local checks_json
+    checks_json=$(gh pr checks "${pr_number}" -R "${REPO}" --jq '.[-1]' 2>/dev/null || echo "{}")
+
+    if [ -z "$checks_json" ] || [ "$checks_json" = "{}" ]; then
+      echo "[PR checks] No checks found yet, waiting..."
+      sleep $poll_interval
+      elapsed=$((elapsed + poll_interval))
+      continue
+    fi
+
+    local status
+    status=$(echo "$checks_json" | jq -r '.status // "unknown"' 2>/dev/null)
+    local conclusion
+    conclusion=$(echo "$checks_json" | jq -r '.conclusion // null' 2>/dev/null)
+    local name
+    name=$(echo "$checks_json" | jq -r '.name // "check"' 2>/dev/null)
+
+    echo "[PR checks] Status: ${status}, Conclusion: ${conclusion}, Name: ${name}"
+
+    # If all checks are complete, check the final conclusion
+    if [ "$status" = "completed" ]; then
+      if [ "$conclusion" = "success" ]; then
+        echo "[PR checks] ✅ All CI checks passed!"
+        return 0
+      elif [ "$conclusion" = "failure" ]; then
+        echo "[PR checks] ❌ CI checks failed"
+        # Check if main is also broken
+        if is_main_also_broken; then
+          echo "[PR checks] ⚠️  Main branch is also broken — treating as pre-existing issue"
+          return 2  # Pre-existing failure
+        else
+          echo "[PR checks] This is a new failure introduced by the PR"
+          return 1  # PR-introduced failure
+        fi
+      elif [ "$conclusion" = "neutral" ] || [ "$conclusion" = "skipped" ]; then
+        echo "[PR checks] ⚠️  Checks skipped or neutral"
+        return 0  # Treat skipped/neutral as success
+      fi
+    fi
+
+    # Still in progress
+    echo "[PR checks] Waiting for checks to complete (${elapsed}/${max_wait_seconds}s)..."
+    sleep $poll_interval
+    elapsed=$((elapsed + poll_interval))
+  done
+
+  # Timeout reached
+  echo "[PR checks] ⏱️  CI checks timed out after ${max_wait_seconds} seconds"
+  return 3  # Timeout
+}
+
+is_main_also_broken() {
+  # Query the latest commit on main to see if CI is failing there too
+  local main_latest_sha
+  main_latest_sha=$(gh api "repos/${REPO}/commits/main" --jq '.sha' 2>/dev/null)
+
+  if [ -z "$main_latest_sha" ]; then
+    echo "[PR checks] Could not determine main branch status"
+    return 1  # Assume main is OK if we can't check
+  fi
+
+  # Check pulls (as commit status is deprecated)
+  # Get recent check runs on main
+  local main_checks_json
+  main_checks_json=$(gh api "repos/${REPO}/commits/${main_latest_sha}/check-runs" \
+    --jq '.check_runs | map(select(.status == "completed")) | map(.conclusion) | unique' 2>/dev/null || echo "[]")
+
+  if [ -z "$main_checks_json" ] || [ "$main_checks_json" = "[]" ]; then
+    echo "[PR checks] Could not find check status for main"
+    return 1  # Assume main is OK if we can't check
+  fi
+
+  # Check if main has any failures
+  if echo "$main_checks_json" | grep -q "failure"; then
+    echo "[PR checks] Main branch CI is failing"
+    return 0  # Yes, main is broken
+  fi
+
+  echo "[PR checks] Main branch CI is passing"
+  return 1  # No, main is OK
+}
+
 # --- Auth gh CLI ---
 CURRENT_STAGE="authenticate GitHub CLI"
 echo "Setting up GitHub CLI authentication..."
@@ -923,9 +1015,71 @@ while [ -z "${RUN_STATUS}" ] && [ "${ATTEMPT}" -lt "${MAX_ATTEMPTS}" ]; do
   sleep 5
 
   if [ "${IS_PR}" = "true" ]; then
-    RUN_STATUS="succeeded"
+    # For PR reviews, poll CI status
+    echo "Polling CI status for PR #${ISSUE_NUMBER}..."
+    poll_pr_checks "${ISSUE_NUMBER}" || POLL_RESULT=$?
+    POLL_RESULT=${POLL_RESULT:-0}
+
+    case "$POLL_RESULT" in
+      0)  # CI passed
+        echo "CI checks passed for PR #${ISSUE_NUMBER}"
+        RUN_STATUS="succeeded"
+        ;;
+      1)  # CI failed - agent's fault
+        echo "CI checks failed for PR #${ISSUE_NUMBER} - PR has issues"
+        RUN_STATUS="failed"
+        ;;
+      2)  # CI failed - pre-existing on main
+        echo "CI failed but pre-existing issue on main - treating as success"
+        RUN_STATUS="succeeded"
+        ;;
+      3)  # Timeout
+        echo "CI check polling timed out - treating as success with warning"
+        RUN_STATUS="succeeded"
+        ;;
+      *)
+        echo "Unknown status from poll_pr_checks: $POLL_RESULT"
+        RUN_STATUS="succeeded"
+        ;;
+    esac
   elif PR_URL="$(find_created_pr_url)" && [ -n "${PR_URL}" ]; then
-    RUN_STATUS="succeeded"
+    # Extract PR number from URL for polling
+    PR_NUMBER=$(echo "$PR_URL" | grep -oE '[0-9]+$')
+    if [ -n "$PR_NUMBER" ]; then
+      echo "Polling CI status for newly created PR #${PR_NUMBER}..."
+      poll_pr_checks "$PR_NUMBER" || POLL_RESULT=$?
+      POLL_RESULT=${POLL_RESULT:-0}
+
+      case "$POLL_RESULT" in
+        0)  # CI passed
+          echo "CI checks passed for new PR #${PR_NUMBER}"
+          RUN_STATUS="succeeded"
+          ;;
+        1)  # CI failed - agent's fault
+          echo "CI checks failed for new PR #${PR_NUMBER} - retrying or failing"
+          if [ "${ATTEMPT}" -lt "${MAX_ATTEMPTS}" ]; then
+            echo "Attempt ${ATTEMPT}: CI failed — retrying..." >&2
+            # Don't set RUN_STATUS, will retry in next loop
+          else
+            RUN_STATUS="failed"
+          fi
+          ;;
+        2)  # CI failed - pre-existing on main
+          echo "CI failed but pre-existing issue on main - treating as success"
+          RUN_STATUS="succeeded"
+          ;;
+        3)  # Timeout
+          echo "CI check polling timed out - treating as success with warning"
+          RUN_STATUS="succeeded"
+          ;;
+        *)
+          echo "Unknown status from poll_pr_checks: $POLL_RESULT"
+          RUN_STATUS="succeeded"
+          ;;
+      esac
+    else
+      RUN_STATUS="succeeded"
+    fi
   elif issue_was_closed; then
     RUN_STATUS="succeeded"
   elif has_agent_question_comment; then
