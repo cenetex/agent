@@ -251,6 +251,10 @@ DIFF=$(gh pr diff "${PR_NUMBER}" -R "${REPO}" 2>&1 | tee -a "${REVIEW_LOG}")
 # Get linked issues from PR body
 LINKED_ISSUES=$(echo "$PR_JSON" | jq -r '.body // ""' | grep -oE '#[0-9]+' | sort -u | tr '\n' ' ' || echo "")
 
+# Fetch CI check status
+echo "Fetching CI check status..."
+CI_CHECKS=$(gh pr checks "${PR_NUMBER}" -R "${REPO}" 2>/dev/null || echo "unavailable")
+
 echo "PR context fetched. Linked issues: ${LINKED_ISSUES:-none}"
 
 # --- Build the review prompt ---
@@ -269,15 +273,26 @@ REVIEW_MISSION="You are an automated code review agent for PR #${PR_NUMBER} in $
 ## PR Context
 ${PR_JSON}
 
+## CI Status (Real Data)
+${CI_CHECKS}
+
+### How to Interpret CI Status
+- If all checks are passing or not yet run: Proceed with code review
+- If checks are failing: Determine if failures are in files changed by this PR
+  - If YES (failures in changed files): Request changes and explain what's broken
+  - If NO (pre-existing failures): Note this but don't block approval
+- If CI hasn't completed: Note in your review that CI is still pending
+
 ## Review Criteria
 You must evaluate this PR against the following criteria and provide structured findings:
 
-1. **Compilation/Linting**: Does the code compile and pass basic linting?
+1. **Compilation/Linting**: Does the code compile and pass basic linting? Factor in CI results.
 2. **Security**: Are there any security issues (secret exposure, injection vulnerabilities, unsafe patterns)?
 3. **Issue Alignment**: Does this PR actually address the linked issue(s)?
-4. **Logic**: Are there obvious logic errors or bugs?
+4. **Logic**: Are there obvious logic errors or bugs? Factor in CI results for test failures.
 5. **Complexity**: Does it introduce unnecessary complexity or scope creep?
 6. **Cost Impact**: Are there concerning cost implications (new infrastructure, expensive dependencies)?
+7. **CI Status**: Are there CI failures in changed files? Pre-existing failures should not block approval.
 
 ## Your Tasks
 1. **Examine the codebase**: Use your tools to read relevant files and understand the changes
@@ -299,7 +314,8 @@ review_complete(
     \"issue_alignment\": {\"status\": \"pass/fail/unknown\", \"details\": \"...\"},
     \"logic\": {\"status\": \"pass/fail/unknown\", \"issues\": [...]},
     \"complexity\": {\"status\": \"pass/fail/unknown\", \"details\": \"...\"},
-    \"cost_impact\": {\"status\": \"pass/fail/unknown\", \"details\": \"...\"}
+    \"cost_impact\": {\"status\": \"pass/fail/unknown\", \"details\": \"...\"},
+    \"ci_status\": {\"status\": \"pass/fail/unknown/pending\", \"details\": \"...\"}
   }
 )
 \`\`\`
@@ -362,6 +378,7 @@ if echo "$REVIEW_OUTPUT" | grep -q "review_complete"; then
     "logic": {"status": "unknown", "issues": []},
     "complexity": {"status": "unknown", "details": "See full review log"},
     "cost_impact": {"status": "unknown", "details": "See full review log"},
+    "ci_status": {"status": "unknown", "details": "See full review log"},
     "summary": "${FINDINGS_SUMMARY}"
   },
   "completed_at": "$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
