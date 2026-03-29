@@ -475,6 +475,108 @@ fi
 
 echo "Successfully checked out commit $RESOLVED_COMMIT_SHA"
 
+# --- CI polling helpers ---
+
+# poll_pr_checks <pr_number> <repo>
+# Polls CI status for a PR for up to 10 minutes (600s), checking every 10 seconds.
+# Returns: 0=passed, 1=PR-introduced failure, 2=pre-existing on main, 3=timeout
+poll_pr_checks() {
+  local pr_number="$1"
+  local repo="$2"
+  local max_wait=600
+  local interval=10
+  local elapsed=0
+
+  echo "Polling CI checks for PR #${pr_number} (up to ${max_wait}s)..."
+
+  while [ "$elapsed" -lt "$max_wait" ]; do
+    sleep "$interval"
+    elapsed=$((elapsed + interval))
+
+    # Fetch combined status via the checks API
+    local checks_json
+    checks_json=$(gh api "repos/${repo}/pulls/${pr_number}/commits" --jq '.[0].sha' 2>/dev/null) || continue
+    local head_sha="$checks_json"
+
+    if [ -z "$head_sha" ]; then
+      echo "[CI poll] Could not determine head SHA, retrying..." >&2
+      continue
+    fi
+
+    local status_json
+    status_json=$(gh api "repos/${repo}/commits/${head_sha}/check-runs" 2>/dev/null) || continue
+
+    local total_count in_progress_count success_count failure_count
+    total_count=$(echo "$status_json" | jq '.total_count // 0')
+    in_progress_count=$(echo "$status_json" | jq '[.check_runs[] | select(.status != "completed")] | length')
+    success_count=$(echo "$status_json" | jq '[.check_runs[] | select(.conclusion == "success")] | length')
+    failure_count=$(echo "$status_json" | jq '[.check_runs[] | select(.conclusion == "failure")] | length')
+
+    echo "[CI poll] ${elapsed}s: total=${total_count} success=${success_count} failed=${failure_count} in_progress=${in_progress_count}"
+
+    # If no checks registered yet, keep waiting
+    if [ "$total_count" -eq 0 ]; then
+      continue
+    fi
+
+    # Still in progress
+    if [ "$in_progress_count" -gt 0 ]; then
+      continue
+    fi
+
+    # All checks completed
+    if [ "$failure_count" -eq 0 ]; then
+      echo "[CI poll] All checks passed."
+      return 0
+    fi
+
+    # Checks failed — determine if pre-existing on main
+    echo "[CI poll] CI failed on PR. Checking if main is also broken..."
+    if is_main_also_broken "$repo"; then
+      echo "[CI poll] Main branch is also broken — pre-existing failure."
+      return 2
+    else
+      echo "[CI poll] Failure is specific to this PR."
+      return 1
+    fi
+  done
+
+  echo "[CI poll] Timed out after ${max_wait}s waiting for CI."
+  return 3
+}
+
+# is_main_also_broken <repo>
+# Checks if CI is also failing on the main branch to distinguish pre-existing failures.
+# Returns: 0 if main is broken, 1 if main is healthy
+is_main_also_broken() {
+  local repo="$1"
+
+  # Get the default branch
+  local default_branch
+  default_branch=$(gh api "repos/${repo}" --jq '.default_branch' 2>/dev/null) || default_branch="main"
+
+  # Get the latest commit on the default branch
+  local main_sha
+  main_sha=$(gh api "repos/${repo}/commits/${default_branch}" --jq '.sha' 2>/dev/null) || return 1
+
+  if [ -z "$main_sha" ]; then
+    return 1
+  fi
+
+  # Fetch check runs for main
+  local main_checks
+  main_checks=$(gh api "repos/${repo}/commits/${main_sha}/check-runs" 2>/dev/null) || return 1
+
+  local main_failures
+  main_failures=$(echo "$main_checks" | jq '[.check_runs[] | select(.conclusion == "failure")] | length')
+
+  if [ "$main_failures" -gt 0 ]; then
+    return 0  # main is also broken
+  fi
+
+  return 1  # main is healthy
+}
+
 # --- Fetch issue/PR context ---
 CURRENT_STAGE="fetch issue context"
 echo "Fetching context for #${ISSUE_NUMBER}..."
@@ -957,9 +1059,46 @@ ${ERROR_MESSAGE}
   sleep 5
 
   if [ "${IS_PR}" = "true" ]; then
-    RUN_STATUS="succeeded"
+    # For PR reviews, poll CI to verify the review/changes pass
+    CI_RESULT=0
+    poll_pr_checks "${ISSUE_NUMBER}" "${REPO}" || CI_RESULT=$?
+
+    case "$CI_RESULT" in
+      0) RUN_STATUS="succeeded" ;;               # CI passed
+      1)                                           # PR-introduced failure
+        if [ "${ATTEMPT}" -lt "${MAX_ATTEMPTS}" ]; then
+          echo "CI failed on PR #${ISSUE_NUMBER} — retrying (attempt ${ATTEMPT}/${MAX_ATTEMPTS})..." >&2
+          continue
+        fi
+        echo "CI failed on PR #${ISSUE_NUMBER} after ${MAX_ATTEMPTS} attempts" >&2
+        exit 1
+        ;;
+      2) RUN_STATUS="succeeded" ;;               # Pre-existing failure on main
+      3) RUN_STATUS="succeeded" ;;               # Timeout — treat as success, CI may be slow
+    esac
   elif PR_URL="$(find_created_pr_url "${ISSUE_NUMBER}" "${REPO}" "${RUN_STARTED_AT}")" && [ -n "${PR_URL}" ]; then
-    RUN_STATUS="succeeded"
+    # For newly created PRs, extract PR number and poll CI
+    PR_NUM=$(echo "${PR_URL}" | grep -oE '[0-9]+$')
+    if [ -n "$PR_NUM" ]; then
+      CI_RESULT=0
+      poll_pr_checks "${PR_NUM}" "${REPO}" || CI_RESULT=$?
+
+      case "$CI_RESULT" in
+        0) RUN_STATUS="succeeded" ;;             # CI passed
+        1)                                         # PR-introduced failure
+          if [ "${ATTEMPT}" -lt "${MAX_ATTEMPTS}" ]; then
+            echo "CI failed on created PR #${PR_NUM} — retrying (attempt ${ATTEMPT}/${MAX_ATTEMPTS})..." >&2
+            continue
+          fi
+          echo "CI failed on created PR #${PR_NUM} after ${MAX_ATTEMPTS} attempts" >&2
+          exit 1
+          ;;
+        2) RUN_STATUS="succeeded" ;;             # Pre-existing failure on main
+        3) RUN_STATUS="succeeded" ;;             # Timeout — treat as success
+      esac
+    else
+      RUN_STATUS="succeeded"
+    fi
   elif issue_was_closed "${ISSUE_NUMBER}" "${REPO}"; then
     RUN_STATUS="succeeded"
   elif has_agent_question_comment "${ISSUE_NUMBER}" "${REPO}" "${RUN_STARTED_AT}"; then
