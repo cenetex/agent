@@ -162,6 +162,39 @@ function bumpVersion(currentVersion: string): string {
   return `v${major}.${minor}.${patch + 1}`;
 }
 
+async function getDraftReleaseByTag(
+  repoOwner: string,
+  repoName: string,
+  token: string,
+  tagName: string
+): Promise<{ id: number; html_url: string } | null> {
+  try {
+    const response = await githubRequest(
+      `/repos/${repoOwner}/${repoName}/releases`,
+      token,
+      { method: "GET" },
+      [200]
+    );
+
+    const releases = await response.json() as any[];
+    const draftRelease = releases.find(
+      (release: any) => release.draft && release.tag_name === tagName
+    );
+
+    if (draftRelease) {
+      return { id: draftRelease.id, html_url: draftRelease.html_url };
+    }
+
+    return null;
+  } catch (error) {
+    console.error(
+      `Failed to fetch releases for ${repoOwner}/${repoName}:`,
+      error
+    );
+    return null;
+  }
+}
+
 async function createDraftRelease(
   repoOwner: string,
   repoName: string,
@@ -177,6 +210,40 @@ async function createDraftRelease(
       .map((pr) => `- ${pr.sha.substring(0, 7)}`)
       .join("\n")}`;
 
+    // Check if a draft release with this tag already exists
+    const existingDraft = await getDraftReleaseByTag(
+      repoOwner,
+      repoName,
+      token,
+      nextVersion
+    );
+
+    if (existingDraft) {
+      console.log(
+        `Draft release ${nextVersion} already exists, updating it instead`
+      );
+
+      // Update the existing draft release
+      const response = await githubRequest(
+        `/repos/${repoOwner}/${repoName}/releases/${existingDraft.id}`,
+        token,
+        {
+          method: "PATCH",
+          body: JSON.stringify({
+            body: releaseNotes,
+            draft: true,
+            prerelease: false,
+          }),
+        },
+        [200]
+      );
+
+      const release = await response.json() as any;
+      console.log(`Updated draft release ${nextVersion} with ${mergedPRs.length} PRs`);
+      return release.html_url;
+    }
+
+    // Create new draft release if one doesn't exist
     const response = await githubRequest(
       `/repos/${repoOwner}/${repoName}/releases`,
       token,
