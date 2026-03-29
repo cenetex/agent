@@ -372,8 +372,24 @@ categorize_failure() {
     echo "credit_exhaustion|true|Top up OpenRouter credits via your account dashboard"
   elif echo "$error_message" | grep -qi "timeout\|60 minute"; then
     echo "timeout|true|The task will be retried automatically; you can also retry manually"
-  elif echo "$error_message" | grep -qi "openrouter\|connection"; then
+  elif echo "$error_message" | grep -qi "openrouter\|connection\|network"; then
     echo "external_service|true|External service is temporarily unavailable; will retry automatically"
+  elif echo "$error_message" | grep -qi "rate.limit\|too.many.requests"; then
+    echo "rate_limit|true|GitHub or external API rate limit hit; task will be retried"
+  elif echo "$error_message" | grep -qi "temporary\|transient\|unavailable"; then
+    echo "transient_failure|true|Transient condition detected; task will be retried"
+
+  # Compilation and test failures (can be transient, but typically need fixing)
+  elif echo "$error_message" | grep -qi "compilation\|compile error\|build failed"; then
+    echo "compilation_error|false|Check build logs and fix compilation errors"
+  elif echo "$error_message" | grep -qi "test.*fail\|assertion.*fail"; then
+    echo "test_failure|false|Check test output; some failures may be environment-dependent"
+
+  # Push-related failures (often transient or branch protection)
+  elif echo "$error_message" | grep -qi "push.*rejected\|pre-commit hook\|commit.*failed"; then
+    echo "push_rejected|false|Check branch protection rules, merge conflicts, or commit hooks"
+  elif echo "$error_message" | grep -qi "branch.*protection\|protected.*branch"; then
+    echo "branch_protection|false|Branch is protected; check protection rules in repository settings"
 
   # Permanent (non-retryable) failures
   elif echo "$error_message" | grep -qi "authentication\|auth failed"; then

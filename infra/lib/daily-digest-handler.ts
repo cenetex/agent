@@ -27,10 +27,29 @@ const ARTIFACTS_BUCKET = process.env.ARTIFACTS_BUCKET!;
 const GITHUB_APP_ID_PARAM = process.env.GITHUB_APP_ID_PARAM!;
 const GITHUB_APP_PRIVATE_KEY_PARAM = process.env.GITHUB_APP_PRIVATE_KEY_PARAM!;
 
+interface FailureByCategory {
+  category: string;
+  count: number;
+  isRetryable: boolean;
+  issues: Array<{
+    issue_number: number;
+    repo: string;
+    error_message?: string;
+    task_id: string;
+  }>;
+}
+
 interface DigestStats {
   succeeded: number;
   failed: number;
   timed_out: number;
+  failuresByCategory: FailureByCategory[];
+  repeatedFailures: Array<{
+    issue_number: number;
+    repo: string;
+    count: number;
+    categories: string[];
+  }>;
   mergedPRs: Array<{ title: string; number: number; repo: string }>;
   draftReleases: Array<{ repo: string; version: string; url: string }>;
   reviewWaitingPRs: Array<{ title: string; number: number; repo: string; url: string }>;
@@ -316,6 +335,8 @@ async function collectTaskMetadata(since: Date): Promise<DigestStats> {
     succeeded: 0,
     failed: 0,
     timed_out: 0,
+    failuresByCategory: [],
+    repeatedFailures: [],
     mergedPRs: [],
     draftReleases: [],
     reviewWaitingPRs: [],
@@ -324,6 +345,16 @@ async function collectTaskMetadata(since: Date): Promise<DigestStats> {
     lowBalanceRepos: [],
     errors: [],
   };
+
+  // Track failures by issue for repeated failure detection
+  const failuresByIssue = new Map<string, Array<{
+    category?: string;
+    error_message?: string;
+    task_id: string;
+  }>>();
+
+  // Track failures by category
+  const failuresByCategory = new Map<string, FailureByCategory>();
 
   try {
     let continuationToken: string | undefined;
@@ -356,6 +387,39 @@ async function collectTaskMetadata(since: Date): Promise<DigestStats> {
                 break;
               case "failed":
                 stats.failed++;
+
+                // Track failures by category
+                const category = metadata.failure_category || "unknown";
+                if (!failuresByCategory.has(category)) {
+                  failuresByCategory.set(category, {
+                    category,
+                    count: 0,
+                    isRetryable: category === "timeout" || category === "transient_failure" ||
+                                 category === "external_service" || category === "rate_limit" ||
+                                 category === "credit_exhaustion",
+                    issues: [],
+                  });
+                }
+
+                const catData = failuresByCategory.get(category)!;
+                catData.count++;
+                catData.issues.push({
+                  issue_number: metadata.issue_number,
+                  repo: metadata.repo_slug,
+                  error_message: metadata.error_message,
+                  task_id: metadata.task_id,
+                });
+
+                // Track failures by issue for repeated failure detection
+                const issueKey = `${metadata.repo_slug}#${metadata.issue_number}`;
+                if (!failuresByIssue.has(issueKey)) {
+                  failuresByIssue.set(issueKey, []);
+                }
+                failuresByIssue.get(issueKey)!.push({
+                  category,
+                  error_message: metadata.error_message,
+                  task_id: metadata.task_id,
+                });
                 break;
               case "timed_out":
                 stats.timed_out++;
@@ -367,6 +431,22 @@ async function collectTaskMetadata(since: Date): Promise<DigestStats> {
 
       continuationToken = listResult.NextContinuationToken;
     } while (continuationToken);
+
+    // Convert failure maps to arrays
+    stats.failuresByCategory = Array.from(failuresByCategory.values());
+
+    // Detect repeated failures (3+ failures on same issue)
+    for (const [issueKey, failures] of failuresByIssue.entries()) {
+      if (failures.length >= 3) {
+        const [repo, issueStr] = issueKey.split('#');
+        stats.repeatedFailures.push({
+          issue_number: parseInt(issueStr),
+          repo,
+          count: failures.length,
+          categories: [...new Set(failures.map(f => f.category || "unknown"))],
+        });
+      }
+    }
   } catch (error) {
     const errorMsg = `Failed to collect task metadata: ${error}`;
     console.error(errorMsg);
@@ -506,6 +586,47 @@ async function createDigestIssue(
     }
   }
 
+  // Build failure analysis section
+  let failureSection = "";
+  if (stats.failed > 0 || stats.timed_out > 0) {
+    failureSection = "\n**❌ Failure Analysis**\n";
+
+    // Group failures by category
+    if (stats.failuresByCategory.length > 0) {
+      failureSection += "\n**Failures by Category:**\n";
+      const sortedByCount = [...stats.failuresByCategory].sort((a, b) => b.count - a.count);
+      for (const failure of sortedByCount) {
+        const retryableIcon = failure.isRetryable ? "🔄" : "🔒";
+        failureSection += `- ${retryableIcon} **${failure.category}** (${failure.count} failure${failure.count > 1 ? 's' : ''}): `;
+
+        // Show unique repos affected
+        const uniqueRepos = [...new Set(failure.issues.map(i => i.repo))];
+        failureSection += uniqueRepos.join(", ");
+
+        // Show individual issues
+        failureSection += "\n";
+        for (const issue of failure.issues.slice(0, 3)) {
+          failureSection += `  - [${issue.repo}#${issue.issue_number}](https://github.com/${issue.repo}/issues/${issue.issue_number})`;
+          if (issue.error_message) {
+            failureSection += ` — ${issue.error_message}`;
+          }
+          failureSection += "\n";
+        }
+        if (failure.issues.length > 3) {
+          failureSection += `  - ... and ${failure.issues.length - 3} more\n`;
+        }
+      }
+    }
+
+    // Flag repeated failures for triage
+    if (stats.repeatedFailures.length > 0) {
+      failureSection += "\n**🚨 Repeated Failures Requiring Triage:**\n";
+      for (const repeated of stats.repeatedFailures) {
+        failureSection += `- [${repeated.repo}#${repeated.issue_number}](https://github.com/${repeated.repo}/issues/${repeated.issue_number}) — ${repeated.count} failures (${repeated.categories.join(", ")})\n`;
+      }
+    }
+  }
+
   const body = `## Agent Activity Summary: ${digestDate}
 
 **Task Outcomes**
@@ -515,6 +636,7 @@ async function createDigestIssue(
 - **Total: ${total}**
 ${total > 0 ? `- **Success Rate: ${successRate}%**` : ""}
 ${prSection}
+${failureSection}
 ${releaseSection}
 ${reviewSection}
 ${creditSection}
