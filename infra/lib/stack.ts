@@ -349,6 +349,7 @@ export class GitHubAgentStack extends cdk.Stack {
         GITHUB_APP_PRIVATE_KEY_PARAM: PARAM_GITHUB_APP_PRIVATE_KEY,
         OPENROUTER_API_KEY_PARAM: PARAM_OPENROUTER_KEY,
         ARTIFACTS_BUCKET: artifactsBucket.bucketName,
+        MONITORED_REPOS: "cenetex/aws-swarm,cenetex/kyro,cenetex/raticross,cenetex/ratibot,cenetex/litigation,cenetex/agent,cenetex/governance",
       },
     });
 

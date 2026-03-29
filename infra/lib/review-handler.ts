@@ -36,6 +36,9 @@ const GITHUB_APP_PRIVATE_KEY_PARAM = process.env.GITHUB_APP_PRIVATE_KEY_PARAM!;
 const OPENROUTER_API_KEY_PARAM = process.env.OPENROUTER_API_KEY_PARAM!;
 const ARTIFACTS_BUCKET = process.env.ARTIFACTS_BUCKET!;
 
+// Monitored repositories for automated review (comma-separated)
+const MONITORED_REPOS = (process.env.MONITORED_REPOS || "").split(",").filter(r => r.trim());
+
 // Bot username for filtering PRs created by the coding agent
 const CODING_AGENT_BOT_LOGIN = "cenetex-coding-agent[bot]";
 
@@ -92,17 +95,9 @@ async function githubRequest(
 async function discoverReviewablePRs(token: string): Promise<any[]> {
   console.log("Discovering reviewable PRs...");
 
-  // Get all open PRs across all repositories where the app is installed
-  // For now, focusing on the current repository pattern
-  // In full implementation, this would iterate over all installations
-
-  // This is a simplified implementation - in reality we'd need to:
-  // 1. List all app installations
-  // 2. For each installation, list open PRs
-  // 3. Filter by author (coding agent bot)
-
-  // For this PR, we'll focus on a single repo pattern
-  const repos = [
+  // Get all open PRs across monitored repositories
+  // The repo list is configured via MONITORED_REPOS environment variable
+  const repos = MONITORED_REPOS.length > 0 ? MONITORED_REPOS : [
     "cenetex/aws-swarm",
     "cenetex/kyro",
     "cenetex/raticross",
@@ -237,6 +232,15 @@ async function startReviewTask(
   };
 
   const artifactPrefix = createArtifactPrefix(repoSlug, taskId);
+  const reviewPayloadS3Key = `${artifactPrefix}/review-payload.json`;
+
+  // Upload review payload to S3 (avoids ECS env var size limit)
+  await s3.send(new PutObjectCommand({
+    Bucket: ARTIFACTS_BUCKET,
+    Key: reviewPayloadS3Key,
+    Body: JSON.stringify(reviewPayload, null, 2),
+    ContentType: "application/json",
+  }));
 
   const reviewCriteria = {
     check_compilation: true,
@@ -249,7 +253,7 @@ async function startReviewTask(
   };
 
   const reviewEnvironment: ReviewEnvironment = {
-    REVIEW_PAYLOAD: JSON.stringify(reviewPayload),
+    REVIEW_PAYLOAD_S3_KEY: reviewPayloadS3Key,
     GITHUB_TOKEN: githubToken,
     OPENROUTER_API_KEY: openrouterApiKey,
     ARTIFACTS_BUCKET,
@@ -326,7 +330,7 @@ async function startReviewTask(
 async function mergeApprovedPRs(token: string): Promise<void> {
   console.log("Checking for PRs ready for auto-merge...");
 
-  const repos = [
+  const repos = MONITORED_REPOS.length > 0 ? MONITORED_REPOS : [
     "cenetex/aws-swarm",
     "cenetex/kyro",
     "cenetex/raticross",
