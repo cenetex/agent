@@ -51,3 +51,12 @@ jobs:
           docker tag ${{ env.ECR_REPO }}:latest ${{ steps.ecr-login.outputs.registry }}/${{ env.ECR_REPO }}:${{ github.sha }}
           docker push ${{ steps.ecr-login.outputs.registry }}/${{ env.ECR_REPO }}:latest
           docker push ${{ steps.ecr-login.outputs.registry }}/${{ env.ECR_REPO }}:${{ github.sha }}
+
+      - name: Build and push review agent image
+        run: |
+          cd agent
+          docker build --platform linux/amd64 -f Dockerfile.review -t github-agent-review .
+          docker tag github-agent-review:latest ${{ steps.ecr-login.outputs.registry }}/github-agent-review:latest
+          docker tag github-agent-review:latest ${{ steps.ecr-login.outputs.registry }}/github-agent-review:${{ github.sha }}
+          docker push ${{ steps.ecr-login.outputs.registry }}/github-agent-review:latest
+          docker push ${{ steps.ecr-login.outputs.registry }}/github-agent-review:${{ github.sha }}
