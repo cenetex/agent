@@ -294,7 +294,9 @@ export interface TaskResult {
 }
 
 export interface TaskEnvironment {
-  /** The complete task payload as JSON string */
+  /** S3 key for the task payload (preferred for large payloads) */
+  TASK_PAYLOAD_S3_KEY?: string;
+  /** The complete task payload as JSON string (backwards compat fallback) */
   TASK_PAYLOAD: string;
   /** GitHub installation token for API access */
   GITHUB_TOKEN: string;

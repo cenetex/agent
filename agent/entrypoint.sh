@@ -4,7 +4,6 @@ set -Eeuo pipefail
 # --- Required env vars (passed by Lambda via Fargate overrides) ---
 : "${GITHUB_TOKEN:?Missing GITHUB_TOKEN}"
 : "${OPENROUTER_API_KEY:?Missing OPENROUTER_API_KEY}"
-: "${TASK_PAYLOAD:?Missing TASK_PAYLOAD}"
 : "${ARTIFACTS_BUCKET:?Missing ARTIFACTS_BUCKET}"
 : "${ARTIFACT_PREFIX:?Missing ARTIFACT_PREFIX}"
 : "${TRIGGER_LABEL:=agent}"
@@ -13,6 +12,20 @@ set -Eeuo pipefail
 : "${SIGNAL_LABEL_FAILED:=agent:failed}"
 : "${SIGNAL_LABEL_SUCCEEDED:=agent:succeeded}"
 : "${AWS_REGION:=us-east-1}"  # Optional, used for diagnostic tasks
+
+# --- Fetch task payload from S3 if S3 key provided (avoids ECS override limit) ---
+if [ -n "${TASK_PAYLOAD_S3_KEY:-}" ]; then
+  echo "Fetching task payload from S3: s3://${ARTIFACTS_BUCKET}/${TASK_PAYLOAD_S3_KEY}"
+  TASK_PAYLOAD=$(aws s3 cp "s3://${ARTIFACTS_BUCKET}/${TASK_PAYLOAD_S3_KEY}" - 2>&1) || {
+    echo "ERROR: Failed to fetch task payload from S3" >&2
+    echo "$TASK_PAYLOAD" >&2
+    exit 1
+  }
+  echo "Successfully fetched task payload from S3"
+fi
+
+# Fall back to env var if TASK_PAYLOAD_S3_KEY not set (backwards compatibility)
+: "${TASK_PAYLOAD:?Missing TASK_PAYLOAD and TASK_PAYLOAD_S3_KEY}"
 
 # --- Parse task payload ---
 echo "Parsing task payload..."

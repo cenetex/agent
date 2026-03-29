@@ -3009,7 +3009,19 @@ Add the \`agent\` label again after purchasing credits. Credits can be purchased
   try {
     // --- Run Fargate task ---
     const taskMetadata = createInitialTaskMetadata(taskPayload);
+
+    // Store task payload in S3 to avoid ECS container override size limit (8KB)
+    const payloadS3Key = `${taskMetadata.artifact_prefix}/payload.json`;
+    await s3.send(new PutObjectCommand({
+      Bucket: ARTIFACTS_BUCKET,
+      Key: payloadS3Key,
+      Body: JSON.stringify(taskPayload, null, 2),
+      ContentType: "application/json",
+    }));
+    console.log(`Stored task payload at s3://${ARTIFACTS_BUCKET}/${payloadS3Key}`);
+
     const taskEnvironment: TaskEnvironment = {
+      TASK_PAYLOAD_S3_KEY: payloadS3Key,
       TASK_PAYLOAD: JSON.stringify(taskPayload),
       GITHUB_TOKEN: githubToken,
       OPENROUTER_API_KEY: openrouterKey,
