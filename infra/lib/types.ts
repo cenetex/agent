@@ -679,3 +679,29 @@ export function createEscalationHistoryPath(repoSlug: string): string {
   const date = new Date().toISOString().split("T")[0];
   return `escalations/${repoSlug}/history/${date}/events.jsonl`;
 }
+
+/**
+ * Bot usernames for the coding agent — used to identify bot-created PRs
+ */
+export const CODING_AGENT_BOT_LOGINS = [
+  "cenetex-coding-agent[bot]",
+  "github-agent[bot]",
+];
+
+/**
+ * Protected file patterns that should never be auto-merged.
+ * Single source of truth — imported by both webhook-handler and review-handler.
+ */
+export const PROTECTED_PATHS = [
+  ".github/workflows/",
+  "infra/lib/stack.ts",
+  "infra/bin/",
+  "infra/cdk.json",
+  "Dockerfile",
+  "deploy.sh",
+  ".env",
+  "credentials",
+  "secrets",
+  "*.key",
+  "*.pem",
+];

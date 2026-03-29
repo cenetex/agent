@@ -38,6 +38,8 @@ import {
   type EscalationConfig,
   createEscalationConfigPath,
   createEscalationQueuePath,
+  PROTECTED_PATHS,
+  CODING_AGENT_BOT_LOGINS,
 } from "./types";
 import { publishDigestToSocialMedia } from "./digest-publisher";
 
@@ -477,6 +479,61 @@ async function findPRCreatedBySucceededTask(
 }
 
 /**
+ * Discovers and launches reviews for any unreviewed bot PRs in the repo.
+ * Called before launching new agent tasks to prioritize reviews over new work.
+ */
+async function reviewPendingBotPRs(
+  repoOwner: string,
+  repoName: string,
+  token: string,
+  openrouterKey: string
+): Promise<number> {
+  try {
+    const response = await githubRequest(
+      `/repos/${repoOwner}/${repoName}/pulls?state=open&per_page=100`,
+      token,
+      { method: "GET" },
+      [200]
+    );
+
+    const prs = await response.json() as any[];
+
+    const needsReview = prs.filter((pr: any) => {
+      const isBotPR = CODING_AGENT_BOT_LOGINS.some(
+        login => pr.user.login === login || pr.user.login.includes(login.replace("[bot]", ""))
+      );
+      const hasReviewLabel = pr.labels.some((label: any) =>
+        label.name.startsWith("review:")
+      );
+      const hasPauseLabel = pr.labels.some((label: any) =>
+        label.name === "pause-agent"
+      );
+      return isBotPR && !hasReviewLabel && !hasPauseLabel;
+    });
+
+    if (needsReview.length === 0) {
+      return 0;
+    }
+
+    console.log(`Found ${needsReview.length} unreviewed bot PR(s) in ${repoOwner}/${repoName}, launching reviews first`);
+
+    let reviewsTriggered = 0;
+    for (const pr of needsReview) {
+      const taskArn = await triggerReviewForPR(repoOwner, repoName, pr.number, token, openrouterKey);
+      if (taskArn) {
+        reviewsTriggered++;
+        console.log(`Triggered priority review for PR #${pr.number}`);
+      }
+    }
+
+    return reviewsTriggered;
+  } catch (error) {
+    console.error(`Failed to check for pending reviews:`, error);
+    return 0;
+  }
+}
+
+/**
  * Triggers a review task for a specific PR
  */
 async function triggerReviewForPR(
@@ -519,19 +576,6 @@ async function triggerReviewForPR(
       },
       created_at: new Date().toISOString(),
     };
-
-    // Protected file patterns that should never be auto-merged
-    const PROTECTED_PATHS = [
-      ".github/workflows/",
-      "infra/lib/stack.ts",
-      "Dockerfile",
-      "infra/",
-      ".env",
-      "credentials",
-      "secrets",
-      "*.key",
-      "*.pem",
-    ];
 
     const reviewCriteria = {
       check_compilation: true,
@@ -3341,6 +3385,91 @@ export async function handler(event: {
         }),
       };
     }
+  } else if (ghEvent === "pull_request" && payload.action === "opened") {
+    // Immediate review trigger for bot-created PRs
+    const prAuthor = payload.pull_request.user.login;
+    const isBotPR = CODING_AGENT_BOT_LOGINS.some(
+      login => prAuthor === login || prAuthor.includes(login.replace("[bot]", ""))
+    );
+
+    if (!isBotPR) {
+      console.log(`PR opened by ${prAuthor}, not a bot PR, skipping`);
+      return { statusCode: 200, body: "Ignored: not a bot PR" };
+    }
+
+    const repoOwner = payload.repository.owner.login;
+    const repoName = payload.repository.name;
+    const prNumber = payload.pull_request.number;
+
+    console.log(`Bot PR #${prNumber} opened by ${prAuthor}, triggering immediate review`);
+
+    try {
+      const [appId, privateKey, openrouterKey] = await Promise.all([
+        getParameter(GITHUB_APP_ID_PARAM),
+        getParameter(GITHUB_APP_PRIVATE_KEY_PARAM),
+        getParameter(OPENROUTER_API_KEY_PARAM),
+      ]);
+
+      const appConfig: GitHubAppConfig = { appId, privateKey };
+      const githubToken = await getInstallationToken(repoOwner, repoName, appConfig);
+
+      // Check if PR touches protected paths
+      const filesResponse = await githubRequest(
+        `/repos/${repoOwner}/${repoName}/pulls/${prNumber}/files`,
+        githubToken,
+        { method: "GET" },
+        [200]
+      );
+      const files = await filesResponse.json() as any[];
+      const protectedFiles = files
+        .map((f: any) => f.filename)
+        .filter((filename: string) =>
+          PROTECTED_PATHS.some(pattern => {
+            if (pattern.includes("/") && filename.includes(pattern)) return true;
+            if (pattern.includes("*")) return new RegExp(pattern.replace("*", ".*")).test(filename);
+            return filename === pattern || filename.endsWith(`/${pattern}`);
+          })
+        );
+
+      if (protectedFiles.length > 0) {
+        console.log(`PR #${prNumber} touches protected paths: ${protectedFiles.join(", ")}`);
+
+        await githubRequest(
+          `/repos/${repoOwner}/${repoName}/issues/${prNumber}/labels`,
+          githubToken,
+          { method: "POST", body: JSON.stringify({ labels: ["review:human-required"] }) },
+          [200]
+        );
+
+        await addIssueComment(
+          repoOwner, repoName, prNumber, githubToken,
+          `🛡️ **Protected files detected**\n\nThis PR modifies files that require human review:\n${protectedFiles.map(f => `- \`${f}\``).join("\n")}\n\nThis PR will not be auto-merged and needs manual review.`
+        );
+
+        return {
+          statusCode: 200,
+          body: JSON.stringify({ message: "Bot PR touches protected paths", prNumber, protectedFiles }),
+        };
+      }
+
+      // Trigger automated review immediately
+      const taskArn = await triggerReviewForPR(repoOwner, repoName, prNumber, githubToken, openrouterKey);
+
+      if (taskArn) {
+        await addIssueComment(
+          repoOwner, repoName, prNumber, githubToken,
+          `🔍 **Automated PR Review Started**\n\nThis PR was opened by the coding agent and is now being automatically reviewed.`
+        );
+      }
+
+      return {
+        statusCode: 200,
+        body: JSON.stringify({ message: taskArn ? "Review triggered for bot PR" : "Review launch failed", prNumber }),
+      };
+    } catch (error) {
+      console.error(`Failed to handle bot PR opened #${prNumber}:`, error);
+      return { statusCode: 500, body: JSON.stringify({ error: "Failed to process bot PR opened event" }) };
+    }
   } else if (ghEvent === "pull_request" && payload.action === "labeled") {
     const labelName = payload.label?.name;
 
@@ -3605,6 +3734,14 @@ export async function handler(event: {
   } catch (error) {
     console.error(`Failed to get installation token for ${repoOwner}/${repoName}:`, error);
     throw new Error(`Failed to mint GitHub App installation token: ${error instanceof Error ? error.message : 'Unknown error'}`);
+  }
+
+  // --- Prioritize reviews: launch pending bot PR reviews before new work ---
+  if (!isPR) {
+    const reviewsTriggered = await reviewPendingBotPRs(repoOwner, repoName, githubToken, openrouterKey);
+    if (reviewsTriggered > 0) {
+      console.log(`Launched ${reviewsTriggered} priority review(s) before new task for issue #${issueNumber}`);
+    }
   }
 
   // --- Check for concurrency guard ---
