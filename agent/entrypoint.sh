@@ -345,6 +345,143 @@ find_created_pr_url() {
     '
 }
 
+poll_pr_checks() {
+  local pr_number="$1"
+  local timeout_seconds="${2:-600}"  # Default 10 minutes
+  local poll_interval=5  # Poll every 5 seconds
+  local elapsed=0
+  local all_passed=false
+  local all_failed=false
+  local all_skipped=false
+
+  echo "[pr-checks] Starting CI status poll for PR #${pr_number} (timeout: ${timeout_seconds}s)..."
+
+  while [ ${elapsed} -lt ${timeout_seconds} ]; do
+    # Fetch check runs for this PR
+    local checks_json
+    checks_json=$(gh api "repos/${REPO}/pulls/${pr_number}/commits" --jq '.[-1].commit.check_suites[].check_runs[]' 2>/dev/null || echo "[]")
+
+    if [ -z "$checks_json" ] || [ "$checks_json" = "[]" ]; then
+      # No checks yet or API issue, wait and retry
+      echo "[pr-checks] No checks found yet (elapsed: ${elapsed}s)..."
+      sleep ${poll_interval}
+      elapsed=$((elapsed + poll_interval))
+      continue
+    fi
+
+    # Parse check statuses
+    local statuses
+    statuses=$(echo "$checks_json" | jq -r '.status // empty' | sort | uniq -c)
+
+    local completed_count
+    completed_count=$(echo "$checks_json" | jq -c "[.status == \"completed\"] | length" 2>/dev/null)
+    local total_count
+    total_count=$(echo "$checks_json" | jq 'length')
+
+    if [ -z "$total_count" ] || [ "$total_count" -eq 0 ]; then
+      echo "[pr-checks] Checks not yet available (elapsed: ${elapsed}s)..."
+      sleep ${poll_interval}
+      elapsed=$((elapsed + poll_interval))
+      continue
+    fi
+
+    echo "[pr-checks] Status: ${completed_count}/${total_count} checks completed (elapsed: ${elapsed}s)"
+    echo "$statuses" | while read count status; do
+      echo "[pr-checks]   - ${status}: ${count}"
+    done
+
+    # Check if all checks are completed
+    if echo "$checks_json" | jq -e 'all(.status == "completed")' >/dev/null 2>&1; then
+      # All checks completed, check their conclusions
+      local conclusions
+      conclusions=$(echo "$checks_json" | jq -r '.conclusion // empty' | sort | uniq -c)
+
+      echo "[pr-checks] All checks completed:"
+      echo "$conclusions" | while read count conclusion; do
+        echo "[pr-checks]   - ${conclusion}: ${count}"
+      done
+
+      # Check if all passed
+      if echo "$checks_json" | jq -e 'all(.conclusion == "success")' >/dev/null 2>&1; then
+        echo "[pr-checks] ✅ All checks passed!"
+        return 0
+      fi
+
+      # Check if all skipped (no blocking failures)
+      if echo "$checks_json" | jq -e '(.[] | select(.conclusion != "success" and .conclusion != "skipped" and .conclusion != "neutral")) | length == 0' >/dev/null 2>&1; then
+        echo "[pr-checks] ⚠️  All checks skipped or neutral (no failures)"
+        return 0
+      fi
+
+      # Some checks failed — check if we should fail or warn
+      local failed_checks
+      failed_checks=$(echo "$checks_json" | jq -r 'map(select(.conclusion == "failure")) | length')
+
+      if [ "$failed_checks" -gt 0 ]; then
+        echo "[pr-checks] ❌ ${failed_checks} checks failed"
+
+        # Check if main is also broken (pre-existing issue)
+        if check_if_main_broken; then
+          echo "[pr-checks] ⚠️  Main branch is also broken — treating as pre-existing failure"
+          echo "[pr-checks] Setting status: succeeded (with warning)"
+          return 2  # Success with warning
+        else
+          echo "[pr-checks] 🔴 Failing the run — PR introduced test failures"
+          return 1  # Failure
+        fi
+      fi
+
+      break
+    fi
+
+    sleep ${poll_interval}
+    elapsed=$((elapsed + poll_interval))
+  done
+
+  # Timeout reached
+  echo "[pr-checks] ⏱️  Polling timed out after ${elapsed}s — checks still not complete"
+  echo "[pr-checks] Setting status: succeeded (with timeout note)"
+  return 2  # Success with warning
+}
+
+check_if_main_broken() {
+  local main_branch="$1"
+  main_branch="${main_branch:-main}"
+
+  echo "[pr-checks] Checking if ${main_branch} is also broken..."
+
+  # Get the latest commit on main
+  local main_sha
+  main_sha=$(gh api "repos/${REPO}/git/refs/heads/${main_branch}" --jq '.object.sha' 2>/dev/null) || {
+    echo "[pr-checks] Could not fetch ${main_branch} ref"
+    return 1
+  }
+
+  echo "[pr-checks] Main branch latest commit: ${main_sha}"
+
+  # Find check runs for main's latest commit
+  local main_checks
+  main_checks=$(gh api "repos/${REPO}/commits/${main_sha}/check-runs" --jq '.check_runs[]' 2>/dev/null || echo "[]")
+
+  if [ -z "$main_checks" ] || [ "$main_checks" = "[]" ]; then
+    echo "[pr-checks] No checks found for main branch"
+    return 1
+  fi
+
+  # Check if main has failures
+  local main_failed_count
+  main_failed_count=$(echo "$main_checks" | jq 'map(select(.conclusion == "failure")) | length')
+
+  if [ "$main_failed_count" -gt 0 ]; then
+    echo "[pr-checks] Main branch has ${main_failed_count} failing checks — treating as pre-existing"
+    return 0
+  fi
+
+  echo "[pr-checks] Main branch is not broken"
+  return 1
+}
+
+
 has_agent_question_comment() {
   local comments_json
 
@@ -923,9 +1060,46 @@ while [ -z "${RUN_STATUS}" ] && [ "${ATTEMPT}" -lt "${MAX_ATTEMPTS}" ]; do
   sleep 5
 
   if [ "${IS_PR}" = "true" ]; then
-    RUN_STATUS="succeeded"
+    # For PR reviews: poll CI checks before marking succeeded
+    echo "[verify] PR mode: polling CI checks for PR #${ISSUE_NUMBER}..."
+    poll_pr_checks "${ISSUE_NUMBER}" 600
+    local poll_result=$?
+
+    if [ ${poll_result} -eq 0 ]; then
+      echo "[verify] ✅ CI passed"
+      RUN_STATUS="succeeded"
+    elif [ ${poll_result} -eq 2 ]; then
+      echo "[verify] ⚠️  CI timeout or pre-existing failure — marking as succeeded with warning"
+      RUN_STATUS="succeeded"
+    else
+      echo "[verify] ❌ CI failed — marking as failed"
+      exit 1
+    fi
   elif PR_URL="$(find_created_pr_url)" && [ -n "${PR_URL}" ]; then
-    RUN_STATUS="succeeded"
+    # For issue resolution: extract PR number and poll CI
+    echo "[verify] Issue resolution: PR created at ${PR_URL}"
+    local pr_number
+    pr_number=$(echo "${PR_URL}" | grep -oE '[0-9]+$')
+
+    if [ -n "$pr_number" ]; then
+      echo "[verify] Polling CI checks for PR #${pr_number}..."
+      poll_pr_checks "${pr_number}" 600
+      local poll_result=$?
+
+      if [ ${poll_result} -eq 0 ]; then
+        echo "[verify] ✅ CI passed"
+        RUN_STATUS="succeeded"
+      elif [ ${poll_result} -eq 2 ]; then
+        echo "[verify] ⚠️  CI timeout or pre-existing failure — marking as succeeded with warning"
+        RUN_STATUS="succeeded"
+      else
+        echo "[verify] ❌ CI failed — marking as failed"
+        exit 1
+      fi
+    else
+      echo "[verify] Could not extract PR number from URL, proceeding without CI check"
+      RUN_STATUS="succeeded"
+    fi
   elif issue_was_closed; then
     RUN_STATUS="succeeded"
   elif has_agent_question_comment; then
