@@ -38,6 +38,7 @@ import {
   type EscalationConfig,
   createEscalationConfigPath,
   createEscalationQueuePath,
+  type MergeHoldConfig,
 } from "./types";
 import { publishDigestToSocialMedia } from "./digest-publisher";
 
@@ -357,15 +358,16 @@ async function scheduleAutoMerge(
   repoOwner: string,
   repoName: string,
   prNumber: number,
-  token: string
+  token: string,
+  holdPeriodMinutes: number = MERGE_HOLD_PERIOD_MINUTES
 ): Promise<void> {
   // The actual auto-merge is handled by the review handler Lambda which runs every 15 minutes
   // This function just posts an informational comment about the scheduled merge
 
-  const mergeTime = new Date(Date.now() + MERGE_HOLD_PERIOD_MINUTES * 60 * 1000);
+  const mergeTime = new Date(Date.now() + holdPeriodMinutes * 60 * 1000);
   const messageBody = `⏱️ **Auto-merge scheduled**
 
-This PR is approved and will be automatically merged at **${mergeTime.toISOString()}** (in ${MERGE_HOLD_PERIOD_MINUTES} minutes) unless:
+This PR is approved and will be automatically merged at **${mergeTime.toISOString()}** (in ${holdPeriodMinutes} minutes) unless:
 
 - The \`${REVIEW_APPROVED_LABEL}\` label is removed
 - A \`pause-agent\` label is added
@@ -750,6 +752,104 @@ async function getDispatchConfig(
     console.log(`Failed to fetch dispatch config from .github/AGENT.md: ${error}`);
     return { auto_dispatch: true, auto_dispatch_labels: ["ready"], wip_cap: 0 };
   }
+}
+
+/**
+ * Reads merge hold configuration from repo's .github/AGENT.md
+ * Returns config with defaults if file doesn't exist
+ */
+async function getMergeHoldConfig(
+  repoOwner: string,
+  repoName: string,
+  token: string
+): Promise<MergeHoldConfig> {
+  try {
+    const response = await githubRequest(
+      `/repos/${repoOwner}/${repoName}/contents/.github/AGENT.md`,
+      token,
+      { method: "GET" },
+      [200, 404]
+    );
+
+    if (response.status === 404) {
+      return { merge_hold_minutes: 60, merge_hold_minutes_infra: 60 };
+    }
+
+    const content = await response.json() as any;
+    if (content.type !== "file" || !content.content) {
+      return { merge_hold_minutes: 60, merge_hold_minutes_infra: 60 };
+    }
+
+    // Decode base64 content
+    const decoded = Buffer.from(content.content as string, "base64").toString("utf8");
+
+    // Extract configuration lines
+    const mergeHoldMatch = decoded.match(/^merge_hold_minutes:\s*(\d+)$/m);
+    const mergeHoldInfraMatch = decoded.match(/^merge_hold_minutes_infra:\s*(\d+)$/m);
+
+    const merge_hold_minutes = mergeHoldMatch ? parseInt(mergeHoldMatch[1], 10) : 60;
+    const merge_hold_minutes_infra = mergeHoldInfraMatch ? parseInt(mergeHoldInfraMatch[1], 10) : merge_hold_minutes;
+
+    return { merge_hold_minutes, merge_hold_minutes_infra };
+  } catch (error) {
+    console.log(`Failed to fetch merge hold config from .github/AGENT.md: ${error}`);
+    return { merge_hold_minutes: 60, merge_hold_minutes_infra: 60 };
+  }
+}
+
+/**
+ * Fetches the list of changed files for a PR from the GitHub API
+ */
+async function getPRChangedFiles(
+  repoOwner: string,
+  repoName: string,
+  prNumber: number,
+  token: string
+): Promise<string[]> {
+  try {
+    const response = await githubRequest(
+      `/repos/${repoOwner}/${repoName}/pulls/${prNumber}/files`,
+      token,
+      { method: "GET" },
+      [200]
+    );
+
+    const files = await response.json() as any[];
+    return files.map(f => f.filename);
+  } catch (error) {
+    console.log(`Failed to fetch PR files: ${error}`);
+    return [];
+  }
+}
+
+/**
+ * Calculates the merge hold period for a PR based on priority order:
+ * 1. PR-level override: `fast-track` label → 5 minutes
+ * 2. Path-based: if PR touches protected paths → use `merge_hold_minutes_infra`
+ * 3. Repo-level: `.github/AGENT.md` setting
+ * 4. Default: 60 minutes
+ */
+async function calculateMergeHoldPeriod(
+  prLabels: string[],
+  prFiles: string[] | undefined,
+  config: MergeHoldConfig
+): Promise<number> {
+  // Priority 1: Check for fast-track label
+  if (prLabels.includes("fast-track")) {
+    console.log("Using fast-track override: 5 minutes");
+    return 5;
+  }
+
+  // Priority 2: Check if PR touches infra paths
+  const infraPaths = ["infra/"];
+  if (prFiles && prFiles.some(file => infraPaths.some(path => file.startsWith(path)))) {
+    console.log(`PR touches infra paths, using merge_hold_minutes_infra: ${config.merge_hold_minutes_infra}`);
+    return config.merge_hold_minutes_infra;
+  }
+
+  // Priority 3 & 4: Use repo-level config or default
+  console.log(`Using repo-level merge_hold_minutes: ${config.merge_hold_minutes}`);
+  return config.merge_hold_minutes;
 }
 
 /**
@@ -2639,15 +2739,27 @@ export async function handler(event: {
         const appConfig: GitHubAppConfig = { appId, privateKey };
         const githubToken = await getInstallationToken(repoOwner, repoName, appConfig);
 
-        // Schedule the auto-merge
-        await scheduleAutoMerge(repoOwner, repoName, prNumber, githubToken);
+        // Get merge hold configuration and PR files in parallel
+        const [mergeHoldConfig, prFiles] = await Promise.all([
+          getMergeHoldConfig(repoOwner, repoName, githubToken),
+          getPRChangedFiles(repoOwner, repoName, prNumber, githubToken),
+        ]);
+
+        // Get PR labels from payload
+        const prLabels = (payload.pull_request.labels || []).map((label: any) => label.name);
+
+        // Calculate the hold period based on priority order
+        const holdPeriodMinutes = await calculateMergeHoldPeriod(prLabels, prFiles, mergeHoldConfig);
+
+        // Schedule the auto-merge with calculated hold period
+        await scheduleAutoMerge(repoOwner, repoName, prNumber, githubToken, holdPeriodMinutes);
 
         return {
           statusCode: 200,
           body: JSON.stringify({
             message: "Auto-merge scheduled",
             prNumber,
-            holdPeriodMinutes: MERGE_HOLD_PERIOD_MINUTES
+            holdPeriodMinutes
           }),
         };
       } catch (error) {

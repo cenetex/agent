@@ -17,6 +17,13 @@ export interface InstallationTokenResponse {
   expires_at: string;
 }
 
+export interface MergeHoldConfig {
+  /** Default merge hold period in minutes */
+  merge_hold_minutes: number;
+  /** Merge hold period for PRs touching infrastructure paths in minutes */
+  merge_hold_minutes_infra: number;
+}
+
 /**
  * Creates a JWT for GitHub App authentication
  */
