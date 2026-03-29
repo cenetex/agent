@@ -64,6 +64,7 @@ const SIGNAL_LABEL_WAITING = "agent:waiting";
 const SIGNAL_LABEL_FAILED = "agent:failed";
 const SIGNAL_LABEL_SUCCEEDED = "agent:succeeded";
 const REVIEW_APPROVED_LABEL = "review:approved";
+const BLOCKED_MAIN_BROKEN_LABEL = "blocked:main-broken";
 
 // Auto-merge hold period (1 hour)
 const MERGE_HOLD_PERIOD_MINUTES = 60;
@@ -621,6 +622,99 @@ async function triggerReviewForPR(
   } catch (error) {
     console.error(`Failed to trigger review for PR #${prNumber}:`, error);
     return null;
+  }
+}
+
+/**
+ * Gets the CI check status for a PR
+ * Returns { conclusion, failures } where conclusion is "success", "failure", etc., and failures is list of failed checks
+ */
+async function getPRCheckStatus(
+  repoOwner: string,
+  repoName: string,
+  prNumber: number,
+  token: string
+): Promise<{ conclusion: string; failures: string[] } | null> {
+  try {
+    // Get PR details to find the head SHA
+    const prResponse = await githubRequest(
+      `/repos/${repoOwner}/${repoName}/pulls/${prNumber}`,
+      token,
+      { method: "GET" },
+      [200]
+    );
+
+    const pr = await prResponse.json() as any;
+    const headSha = pr.head.sha;
+
+    // Get combined check status for the commit
+    const statusResponse = await githubRequest(
+      `/repos/${repoOwner}/${repoName}/commits/${headSha}/status`,
+      token,
+      { method: "GET" },
+      [200]
+    );
+
+    const statusData = await statusResponse.json() as any;
+    const conclusion = statusData.state; // "success", "failure", "pending", "error"
+
+    // Extract failed check names
+    const failures = statusData.statuses
+      .filter((status: any) => status.state === "failure" || status.state === "error")
+      .map((status: any) => status.context);
+
+    return { conclusion, failures };
+  } catch (error) {
+    console.error(`Failed to get PR check status for #${prNumber}:`, error);
+    return null;
+  }
+}
+
+/**
+ * Checks if the main branch CI is healthy
+ * Returns true if main's checks are all passing, false otherwise
+ */
+async function getMainCIHealth(
+  repoOwner: string,
+  repoName: string,
+  token: string
+): Promise<boolean> {
+  try {
+    // Get the default branch (usually main) commit SHA
+    const repoResponse = await githubRequest(
+      `/repos/${repoOwner}/${repoName}`,
+      token,
+      { method: "GET" },
+      [200]
+    );
+
+    const repoData = await repoResponse.json() as any;
+    const defaultBranch = repoData.default_branch;
+
+    // Get the latest commit on the default branch
+    const branchResponse = await githubRequest(
+      `/repos/${repoOwner}/${repoName}/branches/${defaultBranch}`,
+      token,
+      { method: "GET" },
+      [200]
+    );
+
+    const branchData = await branchResponse.json() as any;
+    const mainSha = branchData.commit.sha;
+
+    // Get combined check status for main
+    const statusResponse = await githubRequest(
+      `/repos/${repoOwner}/${repoName}/commits/${mainSha}/status`,
+      token,
+      { method: "GET" },
+      [200]
+    );
+
+    const statusData = await statusResponse.json() as any;
+    return statusData.state === "success";
+  } catch (error) {
+    console.error(`Failed to check main CI health for ${repoOwner}/${repoName}:`, error);
+    return true; // Assume healthy on error to avoid false negatives
   }
 }
 
@@ -2372,7 +2466,69 @@ export async function handler(event: {
         if (pr) {
           console.log(`Found PR #${pr.pr_number} created by issue #${issueNumber}`);
 
-          // Trigger review for this PR
+          // Check CI status before triggering review
+          const checkStatus = await getPRCheckStatus(repoOwner, repoName, pr.pr_number, githubToken);
+          console.log(`PR #${pr.pr_number} check status:`, checkStatus);
+
+          if (checkStatus && checkStatus.conclusion !== "success") {
+            // CI failed - need to determine if it's agent's fault or pre-existing main issue
+            console.log(`CI failed for PR #${pr.pr_number}. Failures:`, checkStatus.failures);
+
+            const mainIsHealthy = await getMainCIHealth(repoOwner, repoName, githubToken);
+            console.log(`Main branch CI health: ${mainIsHealthy ? "healthy" : "broken"}`);
+
+            if (mainIsHealthy) {
+              // CI failed and main is healthy - this is the agent's fault, re-trigger agent
+              console.log(`Main is healthy but PR checks failed. Re-triggering agent for PR #${pr.pr_number}`);
+
+              // Remove agent:succeeded label and add agent label to re-trigger
+              await setSignalLabel(repoOwner, repoName, issueNumber, githubToken, TRIGGER_LABEL);
+
+              // Add informational comment
+              await addIssueComment(
+                repoOwner,
+                repoName,
+                pr.pr_number,
+                githubToken,
+                `⚠️ **CI Check Failed - Re-triggering Agent**\n\nThe CI checks failed for this PR:\n${checkStatus.failures.map((f) => `- ${f}`).join("\n")}\n\nSince the main branch is healthy, this appears to be the agent's fault. The agent is being re-triggered to fix the issues.`
+              );
+
+              return {
+                statusCode: 200,
+                body: JSON.stringify({
+                  message: "CI failed - re-triggering agent",
+                  issueNumber,
+                  prNumber: pr.pr_number,
+                  failures: checkStatus.failures,
+                }),
+              };
+            } else {
+              // CI failed but main is also broken - escalate with label, but still proceed with review
+              console.log(`Main is also broken, escalating with blocked:main-broken label`);
+
+              // Add the escalation label to the issue
+              await githubRequest(
+                `/repos/${repoOwner}/${repoName}/issues/${issueNumber}/labels`,
+                githubToken,
+                {
+                  method: "POST",
+                  body: JSON.stringify({ labels: [BLOCKED_MAIN_BROKEN_LABEL] }),
+                },
+                [200]
+              );
+
+              // Add informational comment on PR
+              await addIssueComment(
+                repoOwner,
+                repoName,
+                pr.pr_number,
+                githubToken,
+                `⚠️ **CI Check Failed - But Main Branch Also Broken**\n\nThe CI checks failed for this PR:\n${checkStatus.failures.map((f) => `- ${f}`).join("\n")}\n\nHowever, the main branch is also experiencing CI failures. The issue has been escalated with \`blocked:main-broken\` label. Proceeding with automated review anyway.`
+              );
+            }
+          }
+
+          // Proceed with review (either CI passed, or main is broken so we proceed anyway)
           const taskArn = await triggerReviewForPR(
             repoOwner,
             repoName,
