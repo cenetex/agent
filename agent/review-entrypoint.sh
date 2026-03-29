@@ -27,6 +27,8 @@ TASK_ID=$(echo "$REVIEW_PAYLOAD" | jq -r '.task_id')
 REPO_SLUG=$(echo "$REVIEW_PAYLOAD" | jq -r '.repo_slug')
 HEAD_SHA=$(echo "$REVIEW_PAYLOAD" | jq -r '.head_sha')
 BASE_SHA=$(echo "$REVIEW_PAYLOAD" | jq -r '.base_sha')
+HEAD_REF=$(echo "$REVIEW_PAYLOAD" | jq -r '.pr_metadata.head_ref')
+BASE_REF=$(echo "$REVIEW_PAYLOAD" | jq -r '.pr_metadata.base_ref')
 PR_TITLE=$(echo "$REVIEW_PAYLOAD" | jq -r '.pr_metadata.title')
 PR_AUTHOR=$(echo "$REVIEW_PAYLOAD" | jq -r '.pr_metadata.author')
 CREATED_AT=$(echo "$REVIEW_PAYLOAD" | jq -r '.created_at')
@@ -233,6 +235,17 @@ cd repo
 
 # Fix git remote URL for authenticated access
 git remote set-url origin "https://x-access-token:${GITHUB_TOKEN}@github.com/${REPO}.git"
+
+# --- Fetch PR commits (not in shallow default-branch clone) ---
+echo "Fetching PR commits to ensure SHAs are available locally..."
+git fetch origin "pull/${PR_NUMBER}/head" --depth=50 2>&1 | tee -a "${REVIEW_LOG}" || {
+  echo "WARN: pull ref fetch failed, trying head branch ${HEAD_REF}"
+  git fetch origin "${HEAD_REF}" --depth=50 2>&1 | tee -a "${REVIEW_LOG}" || true
+}
+if ! git cat-file -e "${BASE_SHA}^{commit}" 2>/dev/null; then
+  echo "Base SHA ${BASE_SHA} not in shallow clone, fetching base branch ${BASE_REF}..."
+  git fetch origin "${BASE_REF}" --depth=50 2>&1 | tee -a "${REVIEW_LOG}" || true
+fi
 
 # --- Create worktrees for base and head ---
 CURRENT_STAGE="setup worktrees"
