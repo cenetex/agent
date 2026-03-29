@@ -34,6 +34,8 @@ interface DigestStats {
   mergedPRs: Array<{ title: string; number: number; repo: string }>;
   draftReleases: Array<{ repo: string; version: string; url: string }>;
   reviewWaitingPRs: Array<{ title: string; number: number; repo: string; url: string }>;
+  pendingChains: Array<{ repo: string; issue: number; title: string; blockedBy: string[] }>;
+  blockedIssues: Array<{ repo: string; issue: number; title: string; reason: string }>;
   creditsSpent: number;
   repoCredits: Array<{ repo: string; balance: number; spent_today: number }>;
   lowBalanceRepos: Array<{ repo: string; balance: number }>;
@@ -319,6 +321,8 @@ async function collectTaskMetadata(since: Date): Promise<DigestStats> {
     mergedPRs: [],
     draftReleases: [],
     reviewWaitingPRs: [],
+    pendingChains: [],
+    blockedIssues: [],
     creditsSpent: 0,
     repoCredits: [],
     lowBalanceRepos: [],
@@ -374,6 +378,97 @@ async function collectTaskMetadata(since: Date): Promise<DigestStats> {
   }
 
   return stats;
+}
+
+async function getPendingChains(
+  repoOwner: string,
+  repoName: string,
+  repoSlug: string,
+  token: string
+): Promise<Array<{ repo: string; issue: number; title: string; blockedBy: string[] }>> {
+  const pendingChains: Array<{ repo: string; issue: number; title: string; blockedBy: string[] }> = [];
+
+  try {
+    // Get open issues with `then:` references
+    const response = await githubRequest(
+      `/repos/${repoOwner}/${repoName}/issues?state=open&per_page=100`,
+      token,
+      { method: "GET" },
+      [200]
+    );
+
+    const issues = await response.json() as any[];
+
+    // Look for issues with `then:` and check if they're queued for dispatch
+    for (const issue of issues) {
+      if (issue.pull_request) continue; // Skip PRs
+
+      const issueBody = issue.body || "";
+      const hasThenClause = /then:\s*[#a-zA-Z0-9_\-,/#\s]+/i.test(issueBody);
+      const hasAgentLabel = issue.labels.some((l: any) => l.name === "agent");
+
+      // If issue has `then:` but hasn't been dispatched yet, it's a pending chain
+      if (hasThenClause && !hasAgentLabel) {
+        // Extract blocked issues from depends_on clause to show what's blocking it
+        const dependsOnMatch = issueBody.match(/depends_on:\s*([^\n]+)/i);
+        const blockedBy = dependsOnMatch ? dependsOnMatch[1].trim().split(/[,\s]+/).filter(x => x) : [];
+
+        pendingChains.push({
+          repo: repoSlug,
+          issue: issue.number,
+          title: issue.title,
+          blockedBy,
+        });
+      }
+    }
+  } catch (error) {
+    console.error(`Failed to get pending chains for ${repoSlug}:`, error);
+  }
+
+  return pendingChains;
+}
+
+async function getBlockedIssues(
+  repoOwner: string,
+  repoName: string,
+  repoSlug: string,
+  token: string
+): Promise<Array<{ repo: string; issue: number; title: string; reason: string }>> {
+  const blockedIssues: Array<{ repo: string; issue: number; title: string; reason: string }> = [];
+
+  try {
+    // Get open issues with `depends_on:` references
+    const response = await githubRequest(
+      `/repos/${repoOwner}/${repoName}/issues?state=open&per_page=100`,
+      token,
+      { method: "GET" },
+      [200]
+    );
+
+    const issues = await response.json() as any[];
+
+    // Look for issues with unmet `depends_on` dependencies
+    for (const issue of issues) {
+      if (issue.pull_request) continue; // Skip PRs
+
+      const issueBody = issue.body || "";
+      const dependsOnMatch = issueBody.match(/depends_on:\s*([^\n]+)/i);
+
+      if (dependsOnMatch) {
+        const dependsOnText = dependsOnMatch[1].trim();
+        blockedIssues.push({
+          repo: repoSlug,
+          issue: issue.number,
+          title: issue.title,
+          reason: `Blocked by: ${dependsOnText}`,
+        });
+      }
+    }
+  } catch (error) {
+    console.error(`Failed to get blocked issues for ${repoSlug}:`, error);
+  }
+
+  return blockedIssues;
 }
 
 async function collectCreditStats(): Promise<{
@@ -506,6 +601,30 @@ async function createDigestIssue(
     }
   }
 
+  // Build pending task chains section
+  let chainsSection = "\n**🔗 Task Chains (Pending Dispatch)**\n";
+  if (stats.pendingChains.length > 0) {
+    for (const chain of stats.pendingChains) {
+      chainsSection += `- ${chain.repo}#${chain.issue}: ${chain.title}\n`;
+      if (chain.blockedBy.length > 0) {
+        chainsSection += `  _Blocked by: ${chain.blockedBy.join(", ")}_\n`;
+      }
+    }
+  } else {
+    chainsSection = "\n**🔗 Task Chains**\nNone pending\n";
+  }
+
+  // Build blocked issues section
+  let blockedSection = "\n**⛔ Blocked Issues (Awaiting Dependencies)**\n";
+  if (stats.blockedIssues.length > 0) {
+    for (const blocked of stats.blockedIssues) {
+      blockedSection += `- ${blocked.repo}#${blocked.issue}: ${blocked.title}\n`;
+      blockedSection += `  _${blocked.reason}_\n`;
+    }
+  } else {
+    blockedSection = "\n**⛔ Blocked Issues**\nNone\n";
+  }
+
   const body = `## Agent Activity Summary: ${digestDate}
 
 **Task Outcomes**
@@ -517,6 +636,8 @@ ${total > 0 ? `- **Success Rate: ${successRate}%**` : ""}
 ${prSection}
 ${releaseSection}
 ${reviewSection}
+${chainsSection}
+${blockedSection}
 ${creditSection}
 **Artifact Bucket**
 - Artifacts available at: \`s3://${ARTIFACTS_BUCKET}/\`
@@ -602,6 +723,26 @@ export async function handler(): Promise<DigestStats> {
       stats.reviewWaitingPRs = reviewWaitingPRs;
     } catch (error) {
       console.error("Failed to fetch PRs waiting for review:", error);
+    }
+
+    // Get task chains and blocked issues from all repos
+    try {
+      // Extract all known repos from merged PRs
+      const knownRepos = new Set<string>(stats.mergedPRs.map(pr => pr.repo));
+
+      for (const repoSlug of knownRepos) {
+        try {
+          const { owner, name } = parseRepoSlug(repoSlug);
+          const pendingChains = await getPendingChains(owner, name, repoSlug, githubToken);
+          const blockedIssues = await getBlockedIssues(owner, name, repoSlug, githubToken);
+          stats.pendingChains.push(...pendingChains);
+          stats.blockedIssues.push(...blockedIssues);
+        } catch (error) {
+          console.error(`Failed to fetch task chains for ${repoSlug}:`, error);
+        }
+      }
+    } catch (error) {
+      console.error("Failed to fetch task chains and blocked issues:", error);
     }
 
     // Create digest issue in the cenetex/agent repository
