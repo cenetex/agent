@@ -507,8 +507,8 @@ export interface ReviewFindings {
 }
 
 export interface ReviewEnvironment {
-  /** The complete review payload as JSON string */
-  REVIEW_PAYLOAD: string;
+  /** S3 key containing the review payload (avoids 8KB ECS override limit) */
+  REVIEW_PAYLOAD_S3_KEY: string;
   /** GitHub installation token for API access */
   GITHUB_TOKEN: string;
   /** OpenRouter API key for model access */

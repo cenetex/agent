@@ -1,15 +1,25 @@
 #!/bin/bash
 set -Eeuo pipefail
 
+# Source common functions
+source /lib/common.sh
+
 # --- Required env vars (passed by Lambda via Fargate overrides) ---
 : "${GITHUB_TOKEN:?Missing GITHUB_TOKEN}"
 : "${OPENROUTER_API_KEY:?Missing OPENROUTER_API_KEY}"
-: "${REVIEW_PAYLOAD:?Missing REVIEW_PAYLOAD}"
+: "${REVIEW_PAYLOAD_S3_KEY:?Missing REVIEW_PAYLOAD_S3_KEY}"
 : "${ARTIFACTS_BUCKET:?Missing ARTIFACTS_BUCKET}"
 : "${ARTIFACT_PREFIX:?Missing ARTIFACT_PREFIX}"
 : "${REPO:?Missing REPO}"
 : "${PR_NUMBER:?Missing PR_NUMBER}"
 : "${REVIEW_CRITERIA:?Missing REVIEW_CRITERIA}"
+
+# --- Fetch review payload from S3 ---
+echo "Fetching review payload from S3: ${REVIEW_PAYLOAD_S3_KEY}"
+REVIEW_PAYLOAD=$(aws s3 cp "s3://${ARTIFACTS_BUCKET}/${REVIEW_PAYLOAD_S3_KEY}" - || {
+  echo "ERROR: Failed to fetch review payload from S3"
+  exit 1
+})
 
 # --- Parse review payload ---
 echo "Parsing review payload..."

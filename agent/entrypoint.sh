@@ -1,6 +1,9 @@
 #!/bin/bash
 set -Eeuo pipefail
 
+# Source common functions
+source /lib/common.sh
+
 # --- Required env vars (passed by Lambda via Fargate overrides) ---
 : "${GITHUB_TOKEN:?Missing GITHUB_TOKEN}"
 : "${OPENROUTER_API_KEY:?Missing OPENROUTER_API_KEY}"

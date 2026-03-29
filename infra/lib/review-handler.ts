@@ -39,6 +39,17 @@ const ARTIFACTS_BUCKET = process.env.ARTIFACTS_BUCKET!;
 // Bot username for filtering PRs created by the coding agent
 const CODING_AGENT_BOT_LOGIN = "cenetex-coding-agent[bot]";
 
+// Repositories monitored for automated reviews (consolidated single source of truth)
+const MONITORED_REPOS = [
+  "cenetex/aws-swarm",
+  "cenetex/kyro",
+  "cenetex/raticross",
+  "cenetex/ratibot",
+  "cenetex/litigation",
+  "cenetex/agent",
+  "cenetex/governance",
+];
+
 // Protected file patterns that should never be auto-merged
 const PROTECTED_PATHS = [
   ".github/workflows/",
@@ -101,16 +112,8 @@ async function discoverReviewablePRs(token: string): Promise<any[]> {
   // 2. For each installation, list open PRs
   // 3. Filter by author (coding agent bot)
 
-  // For this PR, we'll focus on a single repo pattern
-  const repos = [
-    "cenetex/aws-swarm",
-    "cenetex/kyro",
-    "cenetex/raticross",
-    "cenetex/ratibot",
-    "cenetex/litigation",
-    "cenetex/agent",
-    "cenetex/governance",
-  ];
+  // Use consolidated repository list
+  const repos = MONITORED_REPOS;
 
   const reviewablePRs: any[] = [];
 
@@ -248,8 +251,17 @@ async function startReviewTask(
     protected_paths: PROTECTED_PATHS,
   };
 
+  // Upload review payload to S3 (same pattern as agent task payload from #166)
+  const reviewPayloadKey = `${artifactPrefix}/review-payload.json`;
+  await s3.send(new PutObjectCommand({
+    Bucket: ARTIFACTS_BUCKET,
+    Key: reviewPayloadKey,
+    Body: JSON.stringify(reviewPayload, null, 2),
+    ContentType: "application/json",
+  }));
+
   const reviewEnvironment: ReviewEnvironment = {
-    REVIEW_PAYLOAD: JSON.stringify(reviewPayload),
+    REVIEW_PAYLOAD_S3_KEY: reviewPayloadKey,
     GITHUB_TOKEN: githubToken,
     OPENROUTER_API_KEY: openrouterApiKey,
     ARTIFACTS_BUCKET,
@@ -326,15 +338,8 @@ async function startReviewTask(
 async function mergeApprovedPRs(token: string): Promise<void> {
   console.log("Checking for PRs ready for auto-merge...");
 
-  const repos = [
-    "cenetex/aws-swarm",
-    "cenetex/kyro",
-    "cenetex/raticross",
-    "cenetex/ratibot",
-    "cenetex/litigation",
-    "cenetex/agent",
-    "cenetex/governance",
-  ];
+  // Use consolidated repository list
+  const repos = MONITORED_REPOS;
 
   for (const repo of repos) {
     try {
