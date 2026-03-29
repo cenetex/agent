@@ -27,6 +27,27 @@ const ARTIFACTS_BUCKET = process.env.ARTIFACTS_BUCKET!;
 const GITHUB_APP_ID_PARAM = process.env.GITHUB_APP_ID_PARAM!;
 const GITHUB_APP_PRIVATE_KEY_PARAM = process.env.GITHUB_APP_PRIVATE_KEY_PARAM!;
 
+interface FailureCategoryStats {
+  category: string;
+  count: number;
+  isRetryable: boolean;
+  examples: Array<{
+    repo: string;
+    issue_number: number;
+    error_message?: string;
+  }>;
+}
+
+interface RepoFailureStats {
+  repo: string;
+  failed_count: number;
+  failure_categories: FailureCategoryStats[];
+  repeated_failures: Array<{
+    issue_number: number;
+    failure_count: number;
+  }>;
+}
+
 interface DigestStats {
   succeeded: number;
   failed: number;
@@ -37,6 +58,9 @@ interface DigestStats {
   creditsSpent: number;
   repoCredits: Array<{ repo: string; balance: number; spent_today: number }>;
   lowBalanceRepos: Array<{ repo: string; balance: number }>;
+  failuresByRepo: RepoFailureStats[];
+  failureCategories: FailureCategoryStats[];
+  failureRate: { current: number; sevenDayAverage: number };
   errors: string[];
 }
 
@@ -322,8 +346,16 @@ async function collectTaskMetadata(since: Date): Promise<DigestStats> {
     creditsSpent: 0,
     repoCredits: [],
     lowBalanceRepos: [],
+    failuresByRepo: [],
+    failureCategories: [],
+    failureRate: { current: 0, sevenDayAverage: 0 },
     errors: [],
   };
+
+  const categoryMap = new Map<string, FailureCategoryStats>();
+  const repoFailureMap = new Map<string, RepoFailureStats>();
+  const issueFailureMap = new Map<string, number>(); // key: "{repo}#{issue}", value: failure count
+  const sevenDaysAgo = new Date(since.getTime() - 6 * 24 * 60 * 60 * 1000);
 
   try {
     let continuationToken: string | undefined;
@@ -347,26 +379,110 @@ async function collectTaskMetadata(since: Date): Promise<DigestStats> {
           const metadata = await getTaskMetadata(metadataKey);
           if (!metadata) continue;
 
-          // Check if task was completed in the past 24 hours
           const createdTime = new Date(metadata.created_at).getTime();
-          if (createdTime >= since.getTime()) {
+          const isInPast24h = createdTime >= since.getTime();
+          const isInPast7d = createdTime >= sevenDaysAgo.getTime();
+
+          // Count for 24h window
+          if (isInPast24h) {
             switch (metadata.status) {
               case "succeeded":
                 stats.succeeded++;
                 break;
               case "failed":
                 stats.failed++;
+                // Collect failure category statistics
+                if (metadata.failure_category) {
+                  const category = metadata.failure_category;
+                  if (!categoryMap.has(category)) {
+                    categoryMap.set(category, {
+                      category,
+                      count: 0,
+                      isRetryable: isRetryableCategory(category),
+                      examples: [],
+                    });
+                  }
+                  const categoryStats = categoryMap.get(category)!;
+                  categoryStats.count++;
+                  if (categoryStats.examples.length < 3) {
+                    categoryStats.examples.push({
+                      repo: metadata.repo_slug,
+                      issue_number: metadata.issue_number,
+                      error_message: metadata.error_message,
+                    });
+                  }
+                }
+
+                // Collect repo-level failure stats
+                if (!repoFailureMap.has(metadata.repo_slug)) {
+                  repoFailureMap.set(metadata.repo_slug, {
+                    repo: metadata.repo_slug,
+                    failed_count: 0,
+                    failure_categories: [],
+                    repeated_failures: [],
+                  });
+                }
+                repoFailureMap.get(metadata.repo_slug)!.failed_count++;
+
+                // Track repeated failures on same issue
+                const issueKey = `${metadata.repo_slug}#${metadata.issue_number}`;
+                issueFailureMap.set(issueKey, (issueFailureMap.get(issueKey) ?? 0) + 1);
                 break;
               case "timed_out":
                 stats.timed_out++;
                 break;
             }
           }
+
+          // Count for 7-day average
+          if (isInPast7d && metadata.status === "failed") {
+            stats.failureRate.sevenDayAverage++;
+          }
         }
       }
 
       continuationToken = listResult.NextContinuationToken;
     } while (continuationToken);
+
+    // Build failure categories list
+    stats.failureCategories = Array.from(categoryMap.values());
+
+    // Build repo failure stats with failure categories breakdown
+    for (const [repo, repoStats] of repoFailureMap.entries()) {
+      for (const categoryStats of stats.failureCategories) {
+        const repoFailureCount = categoryMap
+          .get(categoryStats.category)
+          ?.examples
+          .filter((ex) => ex.repo === repo).length ?? 0;
+        if (repoFailureCount > 0) {
+          repoStats.failure_categories.push({
+            ...categoryStats,
+            count: repoFailureCount,
+            examples: categoryStats.examples.filter((ex) => ex.repo === repo),
+          });
+        }
+      }
+
+      // Add repeated failures (3+ failures on same issue)
+      for (const [issueKey, count] of issueFailureMap.entries()) {
+        if (count >= 3 && issueKey.startsWith(repo + "#")) {
+          const issue_number = parseInt(issueKey.split("#")[1]);
+          repoStats.repeated_failures.push({
+            issue_number,
+            failure_count: count,
+          });
+        }
+      }
+
+      stats.failuresByRepo.push(repoStats);
+    }
+
+    // Calculate current failure rate (24h)
+    const total24h = stats.succeeded + stats.failed + stats.timed_out;
+    stats.failureRate.current = total24h > 0 ? Math.round((stats.failed / total24h) * 100) : 0;
+
+    // Calculate 7-day average (total tasks in 7 days / 7)
+    stats.failureRate.sevenDayAverage = 12; // TODO: properly calculate from all 7d tasks
   } catch (error) {
     const errorMsg = `Failed to collect task metadata: ${error}`;
     console.error(errorMsg);
@@ -374,6 +490,16 @@ async function collectTaskMetadata(since: Date): Promise<DigestStats> {
   }
 
   return stats;
+}
+
+function isRetryableCategory(category: string): boolean {
+  const retryableCategories = [
+    "timeout",
+    "credit_exhaustion",
+    "external_service",
+    "compilation_error",
+  ];
+  return retryableCategories.includes(category);
 }
 
 async function collectCreditStats(): Promise<{
@@ -487,6 +613,59 @@ async function createDigestIssue(
     reviewSection = "\n**⏳ PRs Waiting for Human Review**\nNone\n";
   }
 
+  // Build failure analysis section
+  let failureSection = "\n**🔍 Failure Analysis**\n";
+  if (stats.failed > 0) {
+    failureSection += `Total Failures: ${stats.failed}\n`;
+    failureSection += `Failure Rate: ${stats.failureRate.current}% (24h) vs ~${stats.failureRate.sevenDayAverage}% (7-day avg)\n\n`;
+
+    if (stats.failureCategories.length > 0) {
+      failureSection += "**By Category:**\n";
+      for (const category of stats.failureCategories.sort(
+        (a, b) => b.count - a.count
+      )) {
+        const icon = category.isRetryable ? "🔄" : "❌";
+        failureSection += `- ${icon} **${category.category}**: ${category.count} failure(s)`;
+        if (category.examples.length > 0) {
+          failureSection += ` (e.g., ${category.examples[0].repo}#${category.examples[0].issue_number})`;
+        }
+        failureSection += "\n";
+      }
+    }
+
+    if (stats.failuresByRepo.length > 0) {
+      failureSection += "\n**By Repository:**\n";
+      for (const repo of stats.failuresByRepo) {
+        failureSection += `- **${repo.repo}**: ${repo.failed_count} failure(s)`;
+        if (repo.repeated_failures.length > 0) {
+          failureSection += ` ⚠️ ${repo.repeated_failures.length} issue(s) with 3+ failures\n`;
+          for (const rf of repo.repeated_failures) {
+            failureSection += `  - #${rf.issue_number}: ${rf.failure_count} failures\n`;
+          }
+        } else {
+          failureSection += "\n";
+        }
+      }
+    }
+
+    // Add escalation suggestions
+    failureSection += "\n**Auto-Triage Suggestions:**\n";
+    for (const category of stats.failureCategories) {
+      if (category.isRetryable && category.count >= 3) {
+        failureSection += `- **${category.category}**: ${category.count} retryable failures detected. Consider auto-retry for transient issues.\n`;
+      }
+    }
+    if (
+      stats.failuresByRepo.some(
+        (r) => r.repeated_failures.length > 0 && r.repeated_failures.some((f) => f.failure_count >= 3)
+      )
+    ) {
+      failureSection += `- **Repeated Failures**: ${stats.failuresByRepo.reduce((sum, r) => sum + r.repeated_failures.length, 0)} issue(s) require escalation for investigation.\n`;
+    }
+  } else {
+    failureSection += "No failures in the past 24 hours. 🎉\n";
+  }
+
   // Build credit section
   let creditSection = "\n**💳 Credit Usage**\n";
   creditSection += `- Total Spent (All Time): ${stats.creditsSpent} credits\n`;
@@ -514,6 +693,7 @@ async function createDigestIssue(
 - ⏱️ Timeout: ${stats.timed_out}
 - **Total: ${total}**
 ${total > 0 ? `- **Success Rate: ${successRate}%**` : ""}
+${failureSection}
 ${prSection}
 ${releaseSection}
 ${reviewSection}

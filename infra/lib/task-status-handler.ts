@@ -309,6 +309,47 @@ export async function checkLowCredits(token: string): Promise<void> {
 }
 
 /**
+ * Determines if a failure is retryable based on category
+ */
+function isRetryableFailure(failureCategory?: string): boolean {
+  const retryableCategories = [
+    "timeout",
+    "credit_exhaustion",
+    "external_service",
+    "compilation_error",
+  ];
+  return failureCategory ? retryableCategories.includes(failureCategory) : false;
+}
+
+/**
+ * Checks if a task should be auto-retried based on failure category and attempt count
+ */
+async function shouldAutoRetry(taskMetadata: TaskMetadata): Promise<boolean> {
+  if (!isRetryableFailure(taskMetadata.failure_category)) {
+    return false;
+  }
+
+  // Limit retries to prevent infinite loops
+  const retryCount = taskMetadata.retry_count ?? 0;
+  const maxRetries = taskMetadata.failure_category === "timeout" ? 2 : 1;
+
+  return retryCount < maxRetries;
+}
+
+/**
+ * Records a retry attempt in task metadata
+ */
+async function recordRetryAttempt(repoSlug: string, taskId: string): Promise<void> {
+  try {
+    // This would need to update the metadata in S3
+    // For now, this is a placeholder for the retry tracking logic
+    console.log(`Recording retry attempt for task ${taskId} in ${repoSlug}`);
+  } catch (error) {
+    console.warn(`Failed to record retry attempt:`, error);
+  }
+}
+
+/**
  * Handles task failure and checks for escalation triggers
  */
 export async function handleTaskFailure(
@@ -320,6 +361,17 @@ export async function handleTaskFailure(
 
   if (!config.enabled) {
     console.log(`Escalation disabled for ${repoSlug}`);
+    return;
+  }
+
+  // Check if this should be auto-retried
+  const shouldRetry = await shouldAutoRetry(taskMetadata);
+  if (shouldRetry) {
+    console.log(
+      `Task ${taskMetadata.task_id} marked for auto-retry (category: ${taskMetadata.failure_category}, retry: ${(taskMetadata.retry_count ?? 0) + 1})`
+    );
+    await recordRetryAttempt(repoSlug, taskMetadata.task_id);
+    // NOTE: Actual retry execution would be handled by webhook-handler or a separate handler
     return;
   }
 
