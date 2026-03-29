@@ -361,6 +361,39 @@ has_agent_question_comment() {
   ' >/dev/null <<<"${comments_json}"
 }
 
+detect_non_retryable_error() {
+  local log_file="$1"
+
+  # Check for known non-retryable error patterns in agent output
+  if [ -f "$log_file" ] && [ -s "$log_file" ]; then
+    if grep -qi "refusing to allow a GitHub App\|protected branch\|permission denied\|organization has enabled OAuth App access\|not authorized\|insufficient permissions" "$log_file"; then
+      return 0  # Found non-retryable error
+    fi
+  fi
+  return 1  # No non-retryable error found
+}
+
+extract_permission_error_type() {
+  local log_file="$1"
+
+  # Extract specific permission error type for messaging
+  if [ -f "$log_file" ] && [ -s "$log_file" ]; then
+    if grep -qi "refusing to allow a GitHub App" "$log_file"; then
+      echo "workflow_permission_denied"
+    elif grep -qi "protected branch" "$log_file"; then
+      echo "protected_branch_violation"
+    elif grep -qi "organization has enabled OAuth App access" "$log_file"; then
+      echo "oauth_app_restrictions"
+    elif grep -qi "permission denied" "$log_file"; then
+      echo "permission_denied"
+    else
+      echo "permission_denied"
+    fi
+  else
+    echo "permission_denied"
+  fi
+}
+
 categorize_failure() {
   local stage="$1"
   local error_message="$2"
@@ -389,6 +422,35 @@ categorize_failure() {
   else
     echo "unknown|false|Review the error details and GitHub App permissions"
   fi
+}
+
+post_permission_escalation_comment() {
+  local error_type="$1"
+
+  local escalation_message="⚠️ **Agent encountered a permission error and is waiting for action**
+
+The agent attempted to make changes but encountered a permission error that prevents progress.
+
+**Error Type:** \`${error_type}\`
+
+**Possible solutions:**
+- Verify the GitHub App has the following permissions in your repository settings:
+  - \`contents\` (read/write) — required to push code
+  - \`workflows\` (read/write) — required if modifying GitHub Actions workflows
+  - \`issues\` (read/write) — required to manage issue/PR labels and comments
+  - \`pull_requests\` (read/write) — required to create and modify PRs
+- Check if your organization has OAuth App access restrictions enabled
+- Ensure the GitHub App installation is up-to-date
+
+**Task Details:**
+- Task ID: \`${TASK_ID}\`
+- Commit SHA: \`${RESOLVED_COMMIT_SHA}\`
+
+For debugging, check the agent log and CloudWatch logs at: https://console.aws.amazon.com/s3/buckets/${ARTIFACTS_BUCKET}?prefix=${ARTIFACT_PREFIX}/
+
+<!-- task_id: ${TASK_ID} -->"
+
+  gh issue comment "${ISSUE_NUMBER}" -R "${REPO}" --body "${escalation_message}" >/dev/null 2>&1 || true
 }
 
 comment_already_exists() {
@@ -915,6 +977,27 @@ while [ -z "${RUN_STATUS}" ] && [ "${ATTEMPT}" -lt "${MAX_ATTEMPTS}" ]; do
   fi
 
   echo "--- Claude Code exit status: ${CLAUDE_EXIT_CODE} ---" | tee -a "${AGENT_LOG}"
+
+  # --- Check for non-retryable errors (permission errors) ---
+  # These should be escalated immediately, not retried
+  if [ "${ATTEMPT}" -eq 1 ] && detect_non_retryable_error "${AGENT_LOG}"; then
+    echo "PERMISSION ERROR DETECTED: Non-retryable error found in agent output" | tee -a "${AGENT_LOG}"
+
+    # Extract specific error type for messaging
+    local error_type
+    error_type=$(extract_permission_error_type "${AGENT_LOG}")
+
+    echo "Permission error type: ${error_type}" | tee -a "${AGENT_LOG}"
+
+    # Post escalation comment (will be deduplicated if any retry somehow occurs)
+    post_permission_escalation_comment "${error_type}"
+
+    # Set status to waiting for human confirmation
+    RUN_STATUS="waiting"
+
+    echo "Escalation comment posted and status set to waiting" | tee -a "${AGENT_LOG}"
+    break  # Exit retry loop immediately
+  fi
 
   # --- Verify outputs ---
   CURRENT_STAGE="verify outputs"
