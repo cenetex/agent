@@ -1,17 +1,27 @@
 #!/bin/bash
 set -Eeuo pipefail
 
+# Source common functions
+. /lib/common.sh
+
 # --- Required env vars (passed by Lambda via Fargate overrides) ---
 : "${GITHUB_TOKEN:?Missing GITHUB_TOKEN}"
 : "${OPENROUTER_API_KEY:?Missing OPENROUTER_API_KEY}"
-: "${REVIEW_PAYLOAD:?Missing REVIEW_PAYLOAD}"
+: "${REVIEW_PAYLOAD_S3_KEY:?Missing REVIEW_PAYLOAD_S3_KEY}"
 : "${ARTIFACTS_BUCKET:?Missing ARTIFACTS_BUCKET}"
 : "${ARTIFACT_PREFIX:?Missing ARTIFACT_PREFIX}"
 : "${REPO:?Missing REPO}"
 : "${PR_NUMBER:?Missing PR_NUMBER}"
 : "${REVIEW_CRITERIA:?Missing REVIEW_CRITERIA}"
+: "${AWS_REGION:=us-east-1}"
 
-# --- Parse review payload ---
+# --- Fetch and parse review payload from S3 ---
+echo "Fetching review payload from S3: ${REVIEW_PAYLOAD_S3_KEY}"
+REVIEW_PAYLOAD=$(aws s3 cp "s3://${ARTIFACTS_BUCKET}/${REVIEW_PAYLOAD_S3_KEY}" - --region "${AWS_REGION}" 2>/dev/null) || {
+  echo "ERROR: Failed to fetch review payload from S3"
+  exit 1
+}
+
 echo "Parsing review payload..."
 TASK_ID=$(echo "$REVIEW_PAYLOAD" | jq -r '.task_id')
 REPO_SLUG=$(echo "$REVIEW_PAYLOAD" | jq -r '.repo_slug')
@@ -73,20 +83,18 @@ update_review_status() {
 EOF
 )
 
-  # Upload metadata to S3
-  echo "$metadata_json" | aws s3 cp - "s3://${ARTIFACTS_BUCKET}/${METADATA_KEY}" --content-type "application/json" || true
+  # Upload metadata and findings to S3 using common helpers
+  upload_artifact_from_stdin "$metadata_json" "${METADATA_KEY}" "application/json"
 
   # Upload findings if provided
   if [ -n "$findings" ]; then
-    echo "$findings" | aws s3 cp - "s3://${ARTIFACTS_BUCKET}/${RESULT_KEY}" --content-type "application/json" || true
+    upload_artifact_from_stdin "$findings" "${RESULT_KEY}" "application/json"
   fi
 }
 
 upload_review_artifacts() {
-  # Upload review log if it exists
-  if [ -f "${REVIEW_LOG}" ] && [ -s "${REVIEW_LOG}" ]; then
-    aws s3 cp "${REVIEW_LOG}" "s3://${ARTIFACTS_BUCKET}/${LOG_KEY}" --content-type "text/plain" || true
-  fi
+  # Upload review log using common helper
+  upload_artifact "${REVIEW_LOG}" "${LOG_KEY}" "text/plain"
 }
 
 format_review_findings() {
@@ -94,7 +102,7 @@ format_review_findings() {
 
   # Use jq to format the findings as markdown
   echo "$findings_json" | jq -r '
-    def status_icon: if . == "pass" then "✅" elif . == "fail" then "❌" else "❓" end;
+    def status_icon: if . == "pass" then "\u2705" elif . == "fail" then "\u274c" else "\u2753" end;
 
     "### Compilation/Linting: \(.findings.compilation.status | status_icon)\n\(.findings.compilation.details // "")\n" +
     "\n### Security: \(.findings.security.status | status_icon)\n" +
@@ -118,7 +126,7 @@ post_review_comment() {
   local comment_body=""
   case "$decision" in
     "approved")
-      comment_body="✅ **Automated Review: APPROVED**
+      comment_body="\u2705 **Automated Review: APPROVED**
 
 This PR has been reviewed by the agent and is approved for merging.
 
@@ -127,15 +135,15 @@ $findings
 
 The PR will be automatically merged after a 1-hour hold period unless manually intervened.
 
-🔄 **Labels Applied:** \`review:approved\`
-⏱️ **Auto-merge:** Scheduled for $(date -d '+1 hour' '+%Y-%m-%d %H:%M UTC')
+\ud83d\udd04 **Labels Applied:** \`review:approved\`
+\u23f1\ufe0f **Auto-merge:** Scheduled for $(date -d '+1 hour' '+%Y-%m-%d %H:%M UTC')
 
 To prevent auto-merge, remove the \`review:approved\` label or close this PR.
 
 *Task ID: \`${TASK_ID}\`*"
       ;;
     "changes_requested")
-      comment_body="❌ **Automated Review: CHANGES REQUESTED**
+      comment_body="\u274c **Automated Review: CHANGES REQUESTED**
 
 The automated review has identified issues that need to be addressed before this PR can be merged.
 
@@ -144,12 +152,12 @@ $findings
 
 Please address these issues and push new commits. The review will run again automatically.
 
-🔄 **Labels Applied:** \`review:changes-requested\`
+\ud83d\udd04 **Labels Applied:** \`review:changes-requested\`
 
 *Task ID: \`${TASK_ID}\`*"
       ;;
     "error")
-      comment_body="🔧 **Automated Review: ERROR**
+      comment_body="\ud83d\udd27 **Automated Review: ERROR**
 
 The automated review encountered an error and could not complete.
 
@@ -158,14 +166,14 @@ $findings
 
 This PR will require manual review.
 
-🔄 **Labels Applied:** \`review:error\`
+\ud83d\udd04 **Labels Applied:** \`review:error\`
 
 *Task ID: \`${TASK_ID}\`*"
       ;;
   esac
 
-  # Post the review comment
-  gh issue comment "${PR_NUMBER}" -R "${REPO}" --body "$comment_body" 2>&1 | tee -a "${REVIEW_LOG}" || true
+  # Post the review comment using common helper
+  post_comment "${PR_NUMBER}" "${REPO}" "$comment_body" 2>&1 | tee -a "${REVIEW_LOG}" || true
 }
 
 apply_review_labels() {
@@ -196,6 +204,18 @@ on_exit() {
 
   set +e
 
+  # Check if timeout occurred (exit code 124 is the timeout command's exit code)
+  if [ "${exit_code}" -eq 124 ]; then
+    local error_message="Review execution exceeded 30-minute timeout"
+    update_review_status "failed" "error" "" "$error_message"
+    upload_review_artifacts
+    apply_review_labels "error"
+    post_review_comment "error" "Review analysis timed out after 30 minutes. This may indicate the PR is too large or the review criteria are too complex. Please try again or simplify the review scope."
+
+    echo "=== Review timeout ==="
+    exit "${exit_code}"
+  fi
+
   if [ "${REVIEW_STATUS}" = "error" ] || [ "${exit_code}" -ne 0 ]; then
     local error_message="Review failed during ${CURRENT_STAGE}"
     update_review_status "failed" "error" "" "$error_message"
@@ -215,27 +235,9 @@ trap on_exit EXIT
 
 # --- Auth gh CLI ---
 CURRENT_STAGE="authenticate GitHub CLI"
-echo "Setting up GitHub CLI authentication..."
-
-# Clear any existing gh auth state to avoid conflicts
-gh auth logout --hostname github.com >/dev/null 2>&1 || true
-
-# Use environment-based auth
-export GH_TOKEN="${GITHUB_TOKEN}"
-
-# Validate authentication
-echo "Validating GitHub App installation token..."
-if ! gh repo view "${REPO}" --json nameWithOwner >/dev/null 2>&1; then
-  echo "ERROR: Cannot access repository ${REPO}"
+if ! setup_github_auth "${REPO}"; then
   exit 1
 fi
-echo "Repository access confirmed for ${REPO}"
-
-# Configure git identity for potential commits
-git config --global user.name "github-agent-review[bot]"
-git config --global user.email "github-agent-review[bot]@users.noreply.github.com"
-
-echo "GitHub CLI authentication successful"
 
 # --- Clone repo and set up worktree ---
 CURRENT_STAGE="clone repository"
@@ -273,6 +275,10 @@ DIFF=$(gh pr diff "${PR_NUMBER}" -R "${REPO}" 2>&1 | tee -a "${REVIEW_LOG}")
 # Get linked issues from PR body
 LINKED_ISSUES=$(echo "$PR_JSON" | jq -r '.body // ""' | grep -oE '#[0-9]+' | sort -u | tr '\n' ' ' || echo "")
 
+# Fetch CI check status
+echo "Fetching CI check status..."
+CI_CHECKS=$(gh pr checks "${PR_NUMBER}" -R "${REPO}" 2>/dev/null || echo "unavailable")
+
 echo "PR context fetched. Linked issues: ${LINKED_ISSUES:-none}"
 
 # --- Build the review prompt ---
@@ -293,15 +299,26 @@ REVIEW_MISSION="You are an automated code review agent for PR #${PR_NUMBER} in $
 ## PR Context
 ${PR_JSON}
 
+## CI Status (Real Data)
+${CI_CHECKS}
+
+### How to Interpret CI Status
+- If all checks are passing or not yet run: Proceed with code review
+- If checks are failing: Determine if failures are in files changed by this PR
+  - If YES (failures in changed files): Request changes and explain what's broken
+  - If NO (pre-existing failures): Note this but don't block approval
+- If CI hasn't completed: Note in your review that CI is still pending
+
 ## Review Criteria
 You must evaluate this PR against the following criteria and provide structured findings:
 
-1. **Compilation/Linting**: Does the code compile and pass basic linting?
+1. **Compilation/Linting**: Does the code compile and pass basic linting? Factor in CI results.
 2. **Security**: Are there any security issues (secret exposure, injection vulnerabilities, unsafe patterns)?
 3. **Issue Alignment**: Does this PR actually address the linked issue(s)?
-4. **Logic**: Are there obvious logic errors or bugs?
+4. **Logic**: Are there obvious logic errors or bugs? Factor in CI results for test failures.
 5. **Complexity**: Does it introduce unnecessary complexity or scope creep?
 6. **Cost Impact**: Are there concerning cost implications (new infrastructure, expensive dependencies)?
+7. **CI Status**: Are there CI failures in changed files? Pre-existing failures should not block approval.
 
 ## Your Tasks
 1. **Examine the codebase**: Use your tools to read relevant files and understand the changes
@@ -371,10 +388,12 @@ export ANTHROPIC_API_KEY=""
 cd ../pr-worktree
 
 # Run Claude Code with the review mission
-claude --dangerously-skip-permissions \
+# Add 30-minute (1800 second) hard timeout to prevent stuck reviews from burning credits
+CLAUDE_EXIT_CODE=0
+timeout 1800 claude --dangerously-skip-permissions \
   --model "anthropic/claude-opus-4-6" \
   --print \
-  "${REVIEW_MISSION}" 2>&1 | tee "${REVIEW_LOG}"
+  "${REVIEW_MISSION}" 2>&1 | tee "${REVIEW_LOG}" || CLAUDE_EXIT_CODE=$?
 
 # Check if the findings file exists and was written by Claude
 if [ ! -f "${REVIEW_FINDINGS_FILE}" ]; then
