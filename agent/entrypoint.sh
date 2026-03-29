@@ -221,8 +221,13 @@ on_exit() {
     update_task_metadata "waiting" "" ""
     upload_artifacts "$exit_code" ""
 
-    local summary=$(create_completion_summary "waiting" "" "")
-    gh issue comment "${ISSUE_NUMBER}" -R "${REPO}" --body "$summary" >/dev/null 2>&1 || true
+    # Only post waiting summary if it was waiting for a user question (not for permission escalation)
+    if ! grep -q "Permission Error - Agent Escalation" <(gh api "repos/${REPO}/issues/${ISSUE_NUMBER}/comments?per_page=10" \
+      --jq '.[] | select(.user.type == "Bot" or .user.login == "github-agent[bot]") | .body' \
+      2>/dev/null | head -1); then
+      local summary=$(create_completion_summary "waiting" "" "")
+      gh issue comment "${ISSUE_NUMBER}" -R "${REPO}" --body "$summary" >/dev/null 2>&1 || true
+    fi
 
     echo "=== Agent waiting for confirmation ==="
     exit 0
@@ -343,6 +348,62 @@ find_created_pr_url() {
       | last
       | .source.issue.html_url // empty
     '
+}
+
+detect_non_retryable_error() {
+  local log_file="$1"
+
+  # Check log for non-retryable error patterns
+  if grep -qi "refusing to allow a GitHub App to create or update workflow" "$log_file"; then
+    echo "non_retryable_permission|workflow_files|The GitHub App lacks permission to create or update workflow files. Ask the repository owner to grant the 'workflows' permission."
+    return 0
+  elif grep -qi "protected branch hook declined" "$log_file"; then
+    echo "non_retryable_permission|protected_branch|Push to protected branch was declined by repository rules. Changes require manual intervention or branch rule adjustments."
+    return 0
+  elif grep -qi "permission denied.*push\|refused.*push\|You do not have permission" "$log_file"; then
+    echo "non_retryable_permission|push_denied|Permission denied when pushing. The GitHub App may lack required permissions for this repository."
+    return 0
+  elif grep -qi "organization has enabled OAuth App access restrictions" "$log_file"; then
+    echo "non_retryable_permission|oauth_restrictions|Organization has OAuth App access restrictions enabled. Permission must be granted by an org admin."
+    return 0
+  elif grep -qi "required status checks did not pass" "$log_file"; then
+    echo "non_retryable_permission|branch_protection|Required status checks failed. The branch requires these checks to pass before pushing."
+    return 0
+  fi
+
+  echo ""
+  return 1
+}
+
+last_comment_from_bot() {
+  local repo="$1"
+  local issue="$2"
+
+  # Get the last comment from the bot (within the last 24 hours)
+  gh api "repos/${repo}/issues/${issue}/comments?per_page=100" \
+    --jq ".[] | select(.user.type == \"Bot\" or .user.login == \"github-agent[bot]\") | .body" \
+    2>/dev/null | head -1
+}
+
+should_post_comment() {
+  local repo="$1"
+  local issue="$2"
+  local error_pattern="$3"
+
+  # Get last bot comment
+  local last_comment
+  last_comment=$(last_comment_from_bot "$repo" "$issue")
+
+  # If last comment already mentions this error pattern, don't post again
+  if [ -n "$last_comment" ]; then
+    if echo "$last_comment" | grep -qi "$error_pattern"; then
+      echo "false"
+      return 0
+    fi
+  fi
+
+  echo "true"
+  return 0
 }
 
 has_agent_question_comment() {
@@ -915,6 +976,54 @@ while [ -z "${RUN_STATUS}" ] && [ "${ATTEMPT}" -lt "${MAX_ATTEMPTS}" ]; do
   fi
 
   echo "--- Claude Code exit status: ${CLAUDE_EXIT_CODE} ---" | tee -a "${AGENT_LOG}"
+
+  # --- Check for non-retryable errors (permission, workflows, branch protection) ---
+  CURRENT_STAGE="check for non-retryable errors"
+  NON_RETRYABLE_ERROR=$(detect_non_retryable_error "${AGENT_LOG}")
+
+  if [ -n "$NON_RETRYABLE_ERROR" ]; then
+    ERROR_TYPE=$(echo "$NON_RETRYABLE_ERROR" | cut -d'|' -f1)
+    ERROR_CODE=$(echo "$NON_RETRYABLE_ERROR" | cut -d'|' -f2)
+    ERROR_MSG=$(echo "$NON_RETRYABLE_ERROR" | cut -d'|' -f3-)
+
+    echo "DETECTED NON-RETRYABLE ERROR: ${ERROR_CODE}"
+    echo "Error message: ${ERROR_MSG}"
+
+    # Check if we should post a comment (deduplicate)
+    SHOULD_POST=$(should_post_comment "${REPO}" "${ISSUE_NUMBER}" "${ERROR_CODE}")
+
+    if [ "${SHOULD_POST}" = "true" ]; then
+      echo "Posting escalation comment for ${ERROR_CODE}..."
+
+      ESCALATION_COMMENT="⚠️ **Permission Error - Agent Escalation**
+
+The agent encountered a non-retryable permission error and is escalating this task:
+
+**Error Type:** \`${ERROR_CODE}\`
+
+**Details:** ${ERROR_MSG}
+
+**Next Steps:**
+1. Review the error and ensure the GitHub App has the required permissions
+2. Update the repository GitHub App installation if needed
+3. Re-run this task by re-adding the \`agent\` label
+
+The agent will not retry this task automatically to avoid posting duplicate comments.
+
+[View agents logs](https://console.aws.amazon.com/s3/buckets/${ARTIFACTS_BUCKET}?prefix=${ARTIFACT_PREFIX}/)
+
+*Task ID: \`${TASK_ID}\`*"
+
+      gh issue comment "${ISSUE_NUMBER}" -R "${REPO}" --body "$ESCALATION_COMMENT" >/dev/null 2>&1 || true
+    else
+      echo "Deduplicating: Comment with ${ERROR_CODE} already posted, skipping duplicate"
+    fi
+
+    # Set waiting label for human intervention
+    set_signal_label "${SIGNAL_LABEL_WAITING}"
+    RUN_STATUS="waiting"
+    break
+  fi
 
   # --- Verify outputs ---
   CURRENT_STAGE="verify outputs"
