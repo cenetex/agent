@@ -235,8 +235,13 @@ on_exit() {
     update_task_metadata "waiting" "" ""
     upload_artifacts "$exit_code" ""
 
-    local summary=$(create_completion_summary "waiting" "" "")
-    post_comment "${ISSUE_NUMBER}" "${REPO}" "$summary"
+    # Only post waiting summary if it was waiting for a user question (not for permission escalation)
+    if ! grep -q "Permission Error - Agent Escalation" <(gh api "repos/${REPO}/issues/${ISSUE_NUMBER}/comments?per_page=10" \
+      --jq '.[] | select(.user.type == "Bot" or .user.login == "github-agent[bot]") | .body' \
+      2>/dev/null | head -1); then
+      local summary=$(create_completion_summary "waiting" "" "")
+      post_comment "${ISSUE_NUMBER}" "${REPO}" "$summary"
+    fi
 
     echo "=== Agent waiting for confirmation ==="
     exit 0
@@ -349,6 +354,73 @@ trap on_exit EXIT
 # - categorize_failure(stage, error_message, exit_code)
 # - comment_already_exists(task_id, issue_number, repo)
 # - issue_was_closed(issue_number, repo)
+
+# --- Permission error detection and escalation ---
+
+detect_non_retryable_error() {
+  local log_file="$1"
+
+  if [ ! -f "$log_file" ] || [ ! -s "$log_file" ]; then
+    return 1
+  fi
+
+  # Check for workflow/action permission errors
+  if grep -qiE "refusing to allow.*to create or update.*workflow|cannot modify workflow|\.github/workflows.*permission denied|action.*permission.*denied" "$log_file"; then
+    echo "WORKFLOW_PERMISSION|workflow_write_denied|The GitHub token does not have permission to create or modify workflow files (.github/workflows/). This requires the 'workflows' permission scope which is not granted to the agent."
+    return 0
+  fi
+
+  # Check for protected branch push failures
+  if grep -qiE "protected branch hook declined|push declined due to.*branch protection|required status check|changes must be made through a pull request" "$log_file"; then
+    echo "PROTECTED_BRANCH|push_to_protected_branch|Cannot push directly to this branch because it has branch protection rules. The agent needs to create a PR instead of pushing directly."
+    return 0
+  fi
+
+  # Check for general push permission denied
+  if grep -qiE "permission to.*denied|remote:.*permission denied|fatal:.*unable to access.*403|The requested URL returned error: 403" "$log_file"; then
+    echo "PUSH_DENIED|push_permission_denied|The GitHub token does not have sufficient permissions to push to this repository. Check the GitHub App installation permissions."
+    return 0
+  fi
+
+  # Check for fine-grained token / OAuth app restrictions
+  if grep -qiE "Resource not accessible by integration|OAuth App.*restrictions|organization.*has enabled.*OAuth App access restrictions" "$log_file"; then
+    echo "OAUTH_RESTRICTED|oauth_app_restricted|The repository's organization has OAuth/App access restrictions that prevent the agent from performing this operation. An org admin needs to approve the GitHub App."
+    return 0
+  fi
+
+  # Check for required status checks preventing merge/push
+  if grep -qiE "required status checks? (are|is) (not satisfied|expected|pending)|At least \\d+ approving review is required" "$log_file"; then
+    echo "STATUS_CHECK|status_checks_required|Required status checks or reviews must pass before this operation can complete. This is expected for repositories with strict branch protection."
+    return 0
+  fi
+
+  return 1
+}
+
+last_comment_from_bot() {
+  local issue_number="$1"
+  local repo="$2"
+
+  gh api "repos/${repo}/issues/${issue_number}/comments?per_page=10" \
+    --jq '[.[] | select(.user.type == "Bot" or .user.login == "github-agent[bot]")] | last | .body // ""' \
+    2>/dev/null || echo ""
+}
+
+should_post_comment() {
+  local issue_number="$1"
+  local repo="$2"
+  local error_code="$3"
+
+  local last_bot_comment
+  last_bot_comment=$(last_comment_from_bot "$issue_number" "$repo")
+
+  # If the last bot comment already contains this error code, skip posting
+  if echo "$last_bot_comment" | grep -q "$error_code"; then
+    return 1  # Should NOT post (duplicate)
+  fi
+
+  return 0  # Should post
+}
 
 # --- Auth gh CLI ---
 CURRENT_STAGE="authenticate GitHub CLI"
@@ -837,6 +909,46 @@ while [ -z "${RUN_STATUS}" ] && [ "${ATTEMPT}" -lt "${MAX_ATTEMPTS}" ]; do
   fi
 
   echo "--- Claude Code exit status: ${CLAUDE_EXIT_CODE} ---" | tee -a "${AGENT_LOG}"
+
+  # --- Check for non-retryable permission errors ---
+  if NON_RETRYABLE_INFO=$(detect_non_retryable_error "${AGENT_LOG}"); then
+    ERROR_TYPE=$(echo "$NON_RETRYABLE_INFO" | cut -d'|' -f1)
+    ERROR_CODE=$(echo "$NON_RETRYABLE_INFO" | cut -d'|' -f2)
+    ERROR_MESSAGE=$(echo "$NON_RETRYABLE_INFO" | cut -d'|' -f3)
+
+    echo "Detected non-retryable error: ${ERROR_TYPE} (${ERROR_CODE})" | tee -a "${AGENT_LOG}"
+
+    if should_post_comment "${ISSUE_NUMBER}" "${REPO}" "${ERROR_CODE}"; then
+      local escalation_comment="<!-- task_id: ${TASK_ID} -->
+## ⚠️ Permission Error - Agent Escalation
+
+**Error Type:** \`${ERROR_TYPE}\`
+**Error Code:** \`${ERROR_CODE}\`
+
+${ERROR_MESSAGE}
+
+---
+
+**What to do:**
+- A repository admin or organization owner needs to address this permission issue.
+- Once resolved, re-label this issue with \`${TRIGGER_LABEL}\` to retry.
+
+**Task Details:**
+- Task ID: \`${TASK_ID}\`
+- Repository: \`${REPO}\`
+- Issue/PR: #${ISSUE_NUMBER}
+
+[View artifacts](https://console.aws.amazon.com/s3/buckets/${ARTIFACTS_BUCKET}?prefix=${ARTIFACT_PREFIX}/)"
+
+      post_comment "${ISSUE_NUMBER}" "${REPO}" "${escalation_comment}"
+    else
+      echo "Skipping duplicate escalation comment for ${ERROR_CODE}" | tee -a "${AGENT_LOG}"
+    fi
+
+    # Set waiting label and break out of retry loop
+    RUN_STATUS="waiting"
+    break
+  fi
 
   # --- Verify outputs ---
   CURRENT_STAGE="verify outputs"
