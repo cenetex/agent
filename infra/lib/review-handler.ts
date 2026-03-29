@@ -137,11 +137,15 @@ async function discoverReviewablePRs(token: string): Promise<any[]> {
           label.name.startsWith("review:")
         );
 
+        const hasInProgressLabel = pr.labels.some((label: any) =>
+          label.name === "review:in-progress"
+        );
+
         const hasPauseLabel = pr.labels.some((label: any) =>
           label.name === "pause-agent"
         );
 
-        return isFromBot && !hasReviewLabel && !hasPauseLabel;
+        return isFromBot && !hasReviewLabel && !hasInProgressLabel && !hasPauseLabel;
       });
 
       reviewablePRs.push(...needsReview.map(pr => ({ ...pr, repo })));
@@ -153,6 +157,97 @@ async function discoverReviewablePRs(token: string): Promise<any[]> {
 
   console.log(`Found ${reviewablePRs.length} PRs needing review`);
   return reviewablePRs;
+}
+
+/**
+ * Checks for and cleans up stale review:in-progress labels
+ * If a review has been in-progress for >90 minutes, something likely crashed
+ */
+async function cleanupStaleReviewLabels(token: string): Promise<void> {
+  console.log("Cleaning up stale review:in-progress labels...");
+
+  const repos = [
+    "cenetex/aws-swarm",
+    "cenetex/kyro",
+    "cenetex/raticross",
+    "cenetex/ratibot",
+    "cenetex/litigation",
+    "cenetex/agent",
+    "cenetex/governance",
+  ];
+
+  const STALE_THRESHOLD_MINUTES = 90;
+
+  for (const repo of repos) {
+    try {
+      // Find all PRs with review:in-progress label
+      const response = await githubRequest(
+        `/repos/${repo}/issues?labels=review:in-progress&state=open&per_page=100`,
+        token,
+        { method: "GET" },
+        [200]
+      );
+
+      const prs = await response.json() as any[];
+
+      for (const pr of prs) {
+        // Check when the label was added by looking at recent label events
+        const eventsResponse = await githubRequest(
+          `/repos/${repo}/issues/${pr.number}/events`,
+          token,
+          { method: "GET" },
+          [200]
+        );
+
+        const events = await eventsResponse.json() as any[];
+        const labelEvent = events
+          .filter((event: any) =>
+            event.event === "labeled" &&
+            event.label?.name === "review:in-progress"
+          )
+          .sort((a: any, b: any) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime())[0];
+
+        if (!labelEvent) {
+          console.log(`PR #${pr.number}: No label event found, skipping`);
+          continue;
+        }
+
+        const labeledAt = new Date(labelEvent.created_at);
+        const now = new Date();
+        const minutesSinceLabeled = (now.getTime() - labeledAt.getTime()) / (1000 * 60);
+
+        if (minutesSinceLabeled > STALE_THRESHOLD_MINUTES) {
+          console.log(
+            `PR #${pr.number}: review:in-progress label is stale (${minutesSinceLabeled.toFixed(0)} minutes old), removing...`
+          );
+
+          // Remove the stale label
+          await githubRequest(
+            `/repos/${repo}/issues/${pr.number}/labels/${encodeURIComponent("review:in-progress")}`,
+            token,
+            { method: "DELETE" },
+            [200, 204, 404]
+          );
+
+          // Post a comment about the stale marker
+          await githubRequest(
+            `/repos/${repo}/issues/${pr.number}/comments`,
+            token,
+            {
+              method: "POST",
+              body: JSON.stringify({
+                body: `⚠️ **Stale review marker detected and removed**\n\nThe \`review:in-progress\` label was older than 90 minutes, indicating the review task may have crashed. The label has been removed.`
+              }),
+            },
+            [201]
+          );
+        }
+      }
+    } catch (error) {
+      console.error(`Error cleaning up stale labels for ${repo}:`, error);
+      // Continue with other repos
+    }
+  }
 }
 
 /**
@@ -296,6 +391,24 @@ async function startReviewTask(
         ? `Review task launch failed: ${failureDetails.join(", ")}`
         : "Review task launch did not return a task ARN"
     );
+  }
+
+  // Add review:in-progress label to prevent duplicate review launches
+  const [repoOwner, repoName] = repoSlug.split("/");
+  try {
+    await githubRequest(
+      `/repos/${repoOwner}/${repoName}/issues/${pr.number}/labels`,
+      githubToken,
+      {
+        method: "POST",
+        body: JSON.stringify({ labels: ["review:in-progress"] }),
+      },
+      [200]
+    );
+    console.log(`Added review:in-progress label to PR ${pr.number}`);
+  } catch (labelError) {
+    console.warn(`Failed to add review:in-progress label to PR ${pr.number}: ${labelError}`);
+    // Don't fail task launch if label addition fails
   }
 
   // Store initial review metadata
@@ -482,6 +595,9 @@ export async function handler() {
     // For simplicity, we'll get a token for a known repo
     // In full implementation, this would iterate over all installations
     const githubToken = await getInstallationToken("cenetex", "agent", appConfig);
+
+    // Clean up stale review:in-progress labels from crashed reviews
+    await cleanupStaleReviewLabels(githubToken);
 
     // Discover reviewable PRs
     const reviewablePRs = await discoverReviewablePRs(githubToken);
