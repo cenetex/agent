@@ -97,6 +97,28 @@ upload_review_artifacts() {
   upload_artifact "${REVIEW_LOG}" "${LOG_KEY}" "text/plain"
 }
 
+format_review_findings() {
+  local findings_json="$1"
+
+  # Use jq to format the findings as markdown
+  echo "$findings_json" | jq -r '
+    def status_icon: if . == "pass" then "✅" elif . == "fail" then "❌" else "❓" end;
+
+    "### Compilation/Linting: \(.findings.compilation.status | status_icon)\n\(.findings.compilation.details // "")\n" +
+    "\n### Security: \(.findings.security.status | status_icon)\n" +
+    (if (.findings.security.issues | length) > 0 then
+      "Issues found:\n" + (.findings.security.issues | map("- \(.)") | join("\n")) + "\n"
+    else "" end) +
+    "\n### Issue Alignment: \(.findings.issue_alignment.status | status_icon)\n\(.findings.issue_alignment.details // "")\n" +
+    "\n### Logic: \(.findings.logic.status | status_icon)\n" +
+    (if (.findings.logic.issues | length) > 0 then
+      "Issues found:\n" + (.findings.logic.issues | map("- \(.)") | join("\n")) + "\n"
+    else "" end) +
+    "\n### Complexity: \(.findings.complexity.status | status_icon)\n\(.findings.complexity.details // "")\n" +
+    "\n### Cost Impact: \(.findings.cost_impact.status | status_icon)\n\(.findings.cost_impact.details // "")\n"
+  '
+}
+
 post_review_comment() {
   local decision="$1"
   local findings="$2"
@@ -108,7 +130,7 @@ post_review_comment() {
 
 This PR has been reviewed by the agent and is approved for merging.
 
-**Review Summary:**
+**Review Details:**
 $findings
 
 The PR will be automatically merged after a 1-hour hold period unless manually intervened.
@@ -125,7 +147,7 @@ To prevent auto-merge, remove the \`review:approved\` label or close this PR.
 
 The automated review has identified issues that need to be addressed before this PR can be merged.
 
-**Review Findings:**
+**Review Details:**
 $findings
 
 Please address these issues and push new commits. The review will run again automatically.
@@ -263,6 +285,8 @@ echo "PR context fetched. Linked issues: ${LINKED_ISSUES:-none}"
 CURRENT_STAGE="run review analysis"
 echo "Starting automated review analysis..."
 
+REVIEW_FINDINGS_FILE="/tmp/review-findings.json"
+
 REVIEW_MISSION="You are an automated code review agent for PR #${PR_NUMBER} in ${REPO}.
 
 ## PR Details
@@ -301,25 +325,43 @@ You must evaluate this PR against the following criteria and provide structured 
 2. **Analyze the diff**: Review the actual changes being made
 3. **Check for issues**: Look for the problems listed in the review criteria
 4. **Make a decision**: Determine if this should be APPROVED or if CHANGES ARE REQUESTED
-5. **Document findings**: Create a structured summary of your analysis
+5. **Document findings**: Write findings to a structured JSON file
 
 ## Output Format
-End your analysis by calling the special review function with your findings:
+After completing your review, write your findings to a JSON file at: /tmp/review-findings.json
 
-\`\`\`
-review_complete(
-  decision=\"approved\" or \"changes_requested\",
-  summary=\"Brief summary of the review\",
-  findings={
-    \"compilation\": {\"status\": \"pass/fail/unknown\", \"details\": \"...\"},
-    \"security\": {\"status\": \"pass/fail/unknown\", \"issues\": [...]},
-    \"issue_alignment\": {\"status\": \"pass/fail/unknown\", \"details\": \"...\"},
-    \"logic\": {\"status\": \"pass/fail/unknown\", \"issues\": [...]},
-    \"complexity\": {\"status\": \"pass/fail/unknown\", \"details\": \"...\"},
-    \"cost_impact\": {\"status\": \"pass/fail/unknown\", \"details\": \"...\"},
-    \"ci_status\": {\"status\": \"pass/fail/unknown/pending\", \"details\": \"...\"}
+The file must have exactly this structure:
+\`\`\`json
+{
+  \"decision\": \"approved\" or \"changes_requested\",
+  \"summary\": \"Brief summary of the review\",
+  \"findings\": {
+    \"compilation\": {
+      \"status\": \"pass\" or \"fail\" or \"unknown\",
+      \"details\": \"Details about compilation/linting\"
+    },
+    \"security\": {
+      \"status\": \"pass\" or \"fail\" or \"unknown\",
+      \"issues\": [\"Issue 1\", \"Issue 2\"]
+    },
+    \"issue_alignment\": {
+      \"status\": \"pass\" or \"fail\" or \"unknown\",
+      \"details\": \"Details about issue alignment\"
+    },
+    \"logic\": {
+      \"status\": \"pass\" or \"fail\" or \"unknown\",
+      \"issues\": [\"Logic issue 1\", \"Logic issue 2\"]
+    },
+    \"complexity\": {
+      \"status\": \"pass\" or \"fail\" or \"unknown\",
+      \"details\": \"Details about complexity\"
+    },
+    \"cost_impact\": {
+      \"status\": \"pass\" or \"fail\" or \"unknown\",
+      \"details\": \"Details about cost impact\"
+    }
   }
-)
+}
 \`\`\`
 
 ## Working Directory
@@ -331,6 +373,8 @@ You are in the PR head worktree (${HEAD_SHA}). The base version is available at 
 - If unsure about something critical, request changes rather than approve
 - Consider the impact and scope of changes
 - Check that tests pass if there are any
+- Always provide accurate status values (pass/fail/unknown), not placeholder text
+- Provide actual details and issues, not generic \"See full review log\" messages
 
 Begin your review now."
 
@@ -351,58 +395,55 @@ timeout 1800 claude --dangerously-skip-permissions \
   --print \
   "${REVIEW_MISSION}" 2>&1 | tee "${REVIEW_LOG}" || CLAUDE_EXIT_CODE=$?
 
-# Parse the review output for the decision and findings
-REVIEW_OUTPUT=$(cat "${REVIEW_LOG}")
+# Check if the findings file exists and was written by Claude
+if [ ! -f "${REVIEW_FINDINGS_FILE}" ]; then
+  echo "ERROR: Review analysis did not write findings file to ${REVIEW_FINDINGS_FILE}"
+  REVIEW_STATUS="error"
+  exit 1
+fi
 
-# Look for the review_complete call in the output
-if echo "$REVIEW_OUTPUT" | grep -q "review_complete"; then
-  # Extract the decision and create findings JSON
-  # This is a simplified parser - in production you'd want more robust parsing
-  if echo "$REVIEW_OUTPUT" | grep -q 'decision="approved"'; then
-    REVIEW_DECISION="approved"
-  elif echo "$REVIEW_OUTPUT" | grep -q 'decision="changes_requested"'; then
-    REVIEW_DECISION="changes_requested"
-  else
-    REVIEW_DECISION="error"
-  fi
+# Parse the findings JSON file
+echo "Parsing review findings from ${REVIEW_FINDINGS_FILE}..."
+FINDINGS_DATA=$(cat "${REVIEW_FINDINGS_FILE}")
 
-  # Create a structured findings summary from the review output
-  FINDINGS_SUMMARY=$(echo "$REVIEW_OUTPUT" | tail -100 | head -50)
+# Extract decision and key data from the findings
+REVIEW_DECISION=$(echo "$FINDINGS_DATA" | jq -r '.decision // "error"')
+FINDINGS_SUMMARY=$(echo "$FINDINGS_DATA" | jq -r '.summary // "No summary provided"')
 
-  # Create structured findings JSON
-  FINDINGS_JSON=$(cat <<EOF
+# Validate decision value
+if [ "$REVIEW_DECISION" != "approved" ] && [ "$REVIEW_DECISION" != "changes_requested" ]; then
+  echo "ERROR: Invalid decision value in findings: $REVIEW_DECISION"
+  REVIEW_DECISION="error"
+  REVIEW_STATUS="error"
+  exit 1
+fi
+
+# Create structured findings JSON for upload to S3
+FINDINGS_JSON=$(cat <<EOF
 {
   "task_id": "${TASK_ID}",
   "pr_number": ${PR_NUMBER},
   "decision": "${REVIEW_DECISION}",
-  "findings": {
-    "compilation": {"status": "unknown", "details": "See full review log"},
-    "security": {"status": "unknown", "issues": []},
-    "issue_alignment": {"status": "unknown", "details": "See full review log"},
-    "logic": {"status": "unknown", "issues": []},
-    "complexity": {"status": "unknown", "details": "See full review log"},
-    "cost_impact": {"status": "unknown", "details": "See full review log"},
-    "ci_status": {"status": "unknown", "details": "See full review log"},
-    "summary": "${FINDINGS_SUMMARY}"
-  },
+  "findings": $(echo "$FINDINGS_DATA" | jq '.findings'),
+  "summary": $(echo "$FINDINGS_DATA" | jq -r '.summary // "No summary"'),
   "completed_at": "$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
 }
 EOF
 )
 
-  echo "=== Review Analysis Complete ==="
-  echo "Decision: ${REVIEW_DECISION}"
-  echo "Findings: ${FINDINGS_SUMMARY}"
+echo "=== Review Analysis Complete ==="
+echo "Decision: ${REVIEW_DECISION}"
+echo "Summary: ${FINDINGS_SUMMARY}"
+echo "Full findings:"
+echo "$FINDINGS_DATA" | jq '.'
 
-  # Update status and post results
-  update_review_status "completed" "$REVIEW_DECISION" "$FINDINGS_JSON" ""
-  upload_review_artifacts
-  apply_review_labels "$REVIEW_DECISION"
-  post_review_comment "$REVIEW_DECISION" "$FINDINGS_SUMMARY"
+# Update status and post results
+update_review_status "completed" "$REVIEW_DECISION" "$FINDINGS_JSON" ""
+upload_review_artifacts
+apply_review_labels "$REVIEW_DECISION"
 
-  REVIEW_STATUS="completed"
-else
-  echo "ERROR: Review analysis did not complete properly"
-  REVIEW_STATUS="error"
-  exit 1
-fi
+# Format findings for the review comment
+FORMATTED_FINDINGS=$(format_review_findings "$FINDINGS_DATA")
+post_review_comment "$REVIEW_DECISION" "$FORMATTED_FINDINGS"
+
+REVIEW_STATUS="completed"
