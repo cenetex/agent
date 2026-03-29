@@ -697,6 +697,156 @@ function parseBlockerReferences(issueBody: string, issueRepoOwner: string): Arra
 }
 
 /**
+ * Parses issue body for task chaining dependencies like "depends_on: #98, #99" or "depends_on: owner/repo#98"
+ * Returns array of { issue_number, repo_owner, repo_name, is_same_repo }
+ */
+function parseDependsOn(issueBody: string, issueRepoOwner: string): Array<{ issue_number: number; repo_owner: string; repo_name: string; is_same_repo: boolean }> {
+  if (!issueBody) return [];
+
+  const references: Array<{ issue_number: number; repo_owner: string; repo_name: string; is_same_repo: boolean }> = [];
+
+  // Find the depends_on line: "depends_on: #123, #456" or "depends_on: owner/repo#123"
+  const dependsOnMatch = issueBody.match(/^depends_on:\s*(.+)$/m);
+  if (!dependsOnMatch) return [];
+
+  const dependsOnStr = dependsOnMatch[1];
+
+  // Match same-repo references: #123
+  const sameRepoMatches = dependsOnStr.matchAll(/#(\d+)/g);
+  for (const match of sameRepoMatches) {
+    references.push({
+      issue_number: parseInt(match[1], 10),
+      repo_owner: issueRepoOwner,
+      repo_name: "",
+      is_same_repo: true,
+    });
+  }
+
+  // Match cross-repo references: owner/repo#123
+  const crossRepoMatches = dependsOnStr.matchAll(/([a-zA-Z0-9_-]+)\/([a-zA-Z0-9_-]+)#(\d+)/g);
+  for (const match of crossRepoMatches) {
+    references.push({
+      issue_number: parseInt(match[3], 10),
+      repo_owner: match[1],
+      repo_name: match[2],
+      is_same_repo: false,
+    });
+  }
+
+  return references;
+}
+
+/**
+ * Parses issue body for follow-up chaining like "then: #101, #102" or "then: owner/repo#101"
+ * Returns array of { issue_number, repo_owner, repo_name, is_same_repo }
+ */
+function parseThen(issueBody: string, issueRepoOwner: string): Array<{ issue_number: number; repo_owner: string; repo_name: string; is_same_repo: boolean }> {
+  if (!issueBody) return [];
+
+  const references: Array<{ issue_number: number; repo_owner: string; repo_name: string; is_same_repo: boolean }> = [];
+
+  // Find the then line: "then: #101, #102" or "then: owner/repo#101"
+  const thenMatch = issueBody.match(/^then:\s*(.+)$/m);
+  if (!thenMatch) return [];
+
+  const thenStr = thenMatch[1];
+
+  // Match same-repo references: #123
+  const sameRepoMatches = thenStr.matchAll(/#(\d+)/g);
+  for (const match of sameRepoMatches) {
+    references.push({
+      issue_number: parseInt(match[1], 10),
+      repo_owner: issueRepoOwner,
+      repo_name: "",
+      is_same_repo: true,
+    });
+  }
+
+  // Match cross-repo references: owner/repo#123
+  const crossRepoMatches = thenStr.matchAll(/([a-zA-Z0-9_-]+)\/([a-zA-Z0-9_-]+)#(\d+)/g);
+  for (const match of crossRepoMatches) {
+    references.push({
+      issue_number: parseInt(match[3], 10),
+      repo_owner: match[1],
+      repo_name: match[2],
+      is_same_repo: false,
+    });
+  }
+
+  return references;
+}
+
+/**
+ * Checks if all dependencies for an issue are satisfied (merged/closed)
+ */
+async function areAllDependenciesSatisfied(
+  repoOwner: string,
+  repoName: string,
+  issueNumber: number,
+  issueBody: string,
+  token: string
+): Promise<boolean> {
+  const dependencies = parseDependsOn(issueBody, repoOwner);
+
+  if (dependencies.length === 0) {
+    return true; // No dependencies means satisfied
+  }
+
+  for (const dep of dependencies) {
+    try {
+      const response = await githubRequest(
+        `/repos/${dep.repo_owner}/${dep.repo_name || repoName}/issues/${dep.issue_number}`,
+        token,
+        { method: "GET" },
+        [200]
+      );
+      const depIssueData = await response.json() as any;
+
+      // If dependency is still open, not all deps are satisfied
+      if (depIssueData.state === "open") {
+        console.log(
+          `Issue #${issueNumber} dependency ${dep.repo_owner}/${dep.repo_name || repoName}#${dep.issue_number} is still open`
+        );
+        return false;
+      }
+    } catch (error) {
+      console.log(`Failed to check dependency ${dep.repo_owner}/${dep.repo_name || repoName}#${dep.issue_number}: ${error}`);
+      return false;
+    }
+  }
+
+  return true;
+}
+
+/**
+ * Checks for circular dependencies to prevent infinite loops
+ */
+function detectCircularDependency(
+  issueNumber: number,
+  issueBody: string,
+  issueRepoOwner: string,
+  visited: Set<string> = new Set()
+): boolean {
+  const currentKey = `${issueRepoOwner}#${issueNumber}`;
+
+  if (visited.has(currentKey)) {
+    return true; // Circular dependency detected
+  }
+
+  visited.add(currentKey);
+  const dependencies = parseDependsOn(issueBody, issueRepoOwner);
+
+  for (const dep of dependencies) {
+    const depKey = `${dep.repo_owner}#${dep.issue_number}`;
+    if (visited.has(depKey)) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
+/**
  * Configuration for issue dispatch (read from .github/AGENT.md)
  */
 interface DispatchConfig {
@@ -879,6 +1029,264 @@ async function handleBlockerUnblock(
   } catch (error) {
     console.error(`Error during blocker unblock handling:`, error);
     // Don't throw - this is a side effect, shouldn't block PR merge
+  }
+}
+
+/**
+ * Handles task chaining: when a PR merges, dispatch follow-up issues listed in "then:"
+ * if all their dependencies are satisfied
+ */
+async function handleTaskChainingOnMerge(
+  repoOwner: string,
+  repoName: string,
+  mergedPrNumber: number,
+  prBody: string,
+  token: string
+): Promise<void> {
+  try {
+    // Parse "then:" syntax from PR body
+    const followUpIssues = parseThen(prBody, repoOwner);
+
+    if (followUpIssues.length === 0) {
+      console.log(`No follow-up issues found in PR #${mergedPrNumber}`);
+      return;
+    }
+
+    console.log(`Found ${followUpIssues.length} follow-up issue(s) in PR #${mergedPrNumber}`);
+
+    for (const followUp of followUpIssues) {
+      const targetRepoName = followUp.repo_name || repoName;
+      const targetRepoOwner = followUp.repo_owner;
+
+      try {
+        // Fetch the follow-up issue to get its body
+        const response = await githubRequest(
+          `/repos/${targetRepoOwner}/${targetRepoName}/issues/${followUp.issue_number}`,
+          token,
+          { method: "GET" },
+          [200, 404]
+        );
+
+        if (response.status === 404) {
+          console.log(
+            `Follow-up issue ${targetRepoOwner}/${targetRepoName}#${followUp.issue_number} not found`
+          );
+          continue;
+        }
+
+        const followUpData = await response.json() as any;
+        const followUpBody = followUpData.body || "";
+
+        // Check if all dependencies of the follow-up issue are satisfied
+        const allDepsSatisfied = await areAllDependenciesSatisfied(
+          targetRepoOwner,
+          targetRepoName,
+          followUp.issue_number,
+          followUpBody,
+          token
+        );
+
+        if (!allDepsSatisfied) {
+          console.log(
+            `Follow-up issue #${followUp.issue_number} has unsatisfied dependencies, skipping dispatch`
+          );
+          continue;
+        }
+
+        // Check for circular dependencies
+        if (detectCircularDependency(followUp.issue_number, followUpBody, targetRepoOwner)) {
+          console.log(
+            `Circular dependency detected for follow-up issue #${followUp.issue_number}, skipping dispatch`
+          );
+          await addIssueComment(
+            targetRepoOwner,
+            targetRepoName,
+            followUp.issue_number,
+            token,
+            `⚠️ **Circular Dependency Detected**\n\nThis issue has circular dependencies and cannot be dispatched automatically. Please review the \`depends_on:\` and \`then:\` references.`
+          );
+          continue;
+        }
+
+        // Dispatch the follow-up issue
+        console.log(`Dispatching follow-up issue #${followUp.issue_number}`);
+        await githubRequest(
+          `/repos/${targetRepoOwner}/${targetRepoName}/issues/${followUp.issue_number}/labels`,
+          token,
+          {
+            method: "POST",
+            body: JSON.stringify({ labels: [TRIGGER_LABEL] }),
+          },
+          [200]
+        );
+
+        // Post comment on follow-up issue
+        const followUpComment = `✅ **Dependencies Satisfied** — PR #${mergedPrNumber} in ${repoOwner}/${repoName} merged!\n\nAll dependencies for this issue are now met and it has been queued for dispatch.`;
+        await addIssueComment(
+          targetRepoOwner,
+          targetRepoName,
+          followUp.issue_number,
+          token,
+          followUpComment
+        );
+      } catch (error) {
+        console.error(
+          `Failed to dispatch follow-up issue #${followUp.issue_number}: ${error}`
+        );
+      }
+    }
+
+    console.log(`Task chaining complete for merged PR #${mergedPrNumber}`);
+  } catch (error) {
+    console.error(`Error during task chaining on merge:`, error);
+    // Don't throw - this is a side effect, shouldn't block PR merge
+  }
+}
+
+/**
+ * Handles task chaining when an issue closes: dispatch issues that depend on this one
+ * using the "depends_on:" syntax, if all their dependencies are now met
+ */
+async function handleTaskChainingOnIssueClose(
+  repoOwner: string,
+  repoName: string,
+  closedIssueNumber: number,
+  token: string
+): Promise<void> {
+  try {
+    const repoSlug = createRepoSlug(repoOwner, repoName);
+    const config = await getDispatchConfig(repoOwner, repoName, token);
+
+    // Fetch open issues
+    const listIssuesResponse = await githubRequest(
+      `/repos/${repoOwner}/${repoName}/issues?state=open&per_page=100`,
+      token,
+      { method: "GET" },
+      [200]
+    );
+
+    const openIssues = await listIssuesResponse.json() as any[];
+    console.log(`Scanning ${openIssues.length} open issues for depends_on references to #${closedIssueNumber}`);
+
+    let checkedCount = 0;
+    let dispatchedCount = 0;
+
+    for (const issue of openIssues) {
+      // Skip PRs (they have pull_request field)
+      if (issue.pull_request) continue;
+
+      const issueNumber = issue.number;
+      const issueBody = issue.body || "";
+      const issueLabels = issue.labels.map((l: any) => l.name);
+
+      // Check if this issue has a depends_on reference that includes the closed issue
+      const dependencies = parseDependsOn(issueBody, repoOwner);
+      const dependsOnClosed = dependencies.some(
+        ref => ref.issue_number === closedIssueNumber && ref.is_same_repo
+      );
+
+      if (!dependsOnClosed) continue;
+
+      checkedCount++;
+      console.log(`Issue #${issueNumber} depends on closed issue #${closedIssueNumber}`);
+
+      // Check if all dependencies are now satisfied
+      const allDepsSatisfied = await areAllDependenciesSatisfied(
+        repoOwner,
+        repoName,
+        issueNumber,
+        issueBody,
+        token
+      );
+
+      if (!allDepsSatisfied) {
+        console.log(`Issue #${issueNumber} still has unsatisfied dependencies, skipping dispatch`);
+        const pendingComment = `ℹ️ **Dependency Progress** — Issue #${closedIssueNumber} is resolved.\n\nOther dependencies still pending. This issue will be dispatched once all dependencies are met.`;
+        await addIssueComment(repoOwner, repoName, issueNumber, token, pendingComment);
+        continue;
+      }
+
+      // Post notification comment
+      const satisfiedComment = `🎉 **All Dependencies Satisfied** — Issue #${closedIssueNumber} is resolved!\n\nAll dependencies for this issue are now met and it has been queued for dispatch.`;
+      await addIssueComment(repoOwner, repoName, issueNumber, token, satisfiedComment);
+
+      // Check if we should auto-dispatch
+      if (!config.auto_dispatch) {
+        console.log(`Issue #${issueNumber}: auto_dispatch disabled, skipping dispatch`);
+        continue;
+      }
+
+      // Check for required labels
+      const hasRequiredLabels = config.auto_dispatch_labels.length === 0 ||
+        config.auto_dispatch_labels.some(label => issueLabels.includes(label));
+
+      if (!hasRequiredLabels) {
+        console.log(
+          `Issue #${issueNumber}: missing required labels (need one of: ${config.auto_dispatch_labels.join(", ")}), skipping dispatch`
+        );
+        continue;
+      }
+
+      // Check for acceptance criteria
+      if (!hasAcceptanceCriteria(issueBody)) {
+        console.log(`Issue #${issueNumber}: missing acceptance criteria, skipping dispatch`);
+        continue;
+      }
+
+      // Check WIP cap if configured
+      if (config.wip_cap > 0) {
+        const listRunningResponse = await githubRequest(
+          `/repos/${repoOwner}/${repoName}/issues?state=open&labels=${encodeURIComponent(SIGNAL_LABEL_RUNNING)}&per_page=100`,
+          token,
+          { method: "GET" },
+          [200]
+        );
+        const runningIssues = await listRunningResponse.json() as any[];
+        const runningCount = runningIssues.length;
+
+        if (runningCount >= config.wip_cap) {
+          const wipMessage = `ℹ️ **Dispatch queued** — WIP cap reached (${runningCount}/${config.wip_cap})\n\nThis issue will be dispatched when capacity becomes available.`;
+          await addIssueComment(repoOwner, repoName, issueNumber, token, wipMessage);
+          console.log(
+            `Issue #${issueNumber}: WIP cap reached (${runningCount}/${config.wip_cap}), skipping dispatch for now`
+          );
+          continue;
+        }
+      }
+
+      // Check for circular dependencies
+      if (detectCircularDependency(issueNumber, issueBody, repoOwner)) {
+        console.log(`Circular dependency detected for issue #${issueNumber}, skipping dispatch`);
+        await addIssueComment(
+          repoOwner,
+          repoName,
+          issueNumber,
+          token,
+          `⚠️ **Circular Dependency Detected**\n\nThis issue has circular dependencies and cannot be dispatched automatically. Please review the \`depends_on:\` and \`then:\` references.`
+        );
+        continue;
+      }
+
+      // All checks passed, add agent label
+      console.log(`Dispatching issue #${issueNumber} (depends_on satisfied)`);
+      await githubRequest(
+        `/repos/${repoOwner}/${repoName}/issues/${issueNumber}/labels`,
+        token,
+        {
+          method: "POST",
+          body: JSON.stringify({ labels: [TRIGGER_LABEL] }),
+        },
+        [200]
+      );
+      dispatchedCount++;
+    }
+
+    console.log(
+      `Task chaining complete for closed issue #${closedIssueNumber}: checked ${checkedCount} issues, dispatched ${dispatchedCount}`
+    );
+  } catch (error) {
+    console.error(`Error during task chaining on issue close:`, error);
+    // Don't throw - this is a side effect, shouldn't block issue close
   }
 }
 
@@ -2445,6 +2853,15 @@ export async function handler(event: {
         }
       }
 
+      // Handle task chaining: dispatch follow-up issues listed in "then:"
+      await handleTaskChainingOnMerge(
+        repoOwner,
+        repoName,
+        prNumber,
+        prBody,
+        githubToken
+      );
+
       // Look up if this PR was created by an agent task
       const taskMetadata = await lookupTaskMetadataForPR(repoSlug, prNumber);
 
@@ -2693,6 +3110,14 @@ export async function handler(event: {
 
       // Scan for dependent issues and dispatch unblocked ones
       await handleBlockerUnblock(
+        repoOwner,
+        repoName,
+        closedIssueNumber,
+        githubToken
+      );
+
+      // Handle task chaining: dispatch issues that depend on this one
+      await handleTaskChainingOnIssueClose(
         repoOwner,
         repoName,
         closedIssueNumber,
