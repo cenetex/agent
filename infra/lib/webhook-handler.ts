@@ -2873,11 +2873,54 @@ export async function handler(event: {
     throw new Error(`Failed to mint GitHub App installation token: ${error instanceof Error ? error.message : 'Unknown error'}`);
   }
 
-  // --- Check for concurrency guard ---
+  // --- Check for concurrency guard: both labels and S3 metadata ---
   const issueLabels = await getIssueLabels(repoOwner, repoName, issueNumber, githubToken);
   if (issueLabels.includes(SIGNAL_LABEL_RUNNING)) {
-    console.log(`Issue #${issueNumber} already has agent:running, skipping`);
+    console.log(`Issue #${issueNumber} already has agent:running label, skipping`);
     return { statusCode: 200, body: "Already running" };
+  }
+
+  // Also check S3 metadata for active tasks on the same issue (backup deduplication)
+  try {
+    const prefix = `tasks/${repoSlug}/`;
+    const listResult = await s3.send(new ListObjectsV2Command({
+      Bucket: ARTIFACTS_BUCKET,
+      Prefix: prefix,
+      MaxKeys: 1000,
+    }));
+
+    if (listResult.Contents) {
+      const metadataKeys = listResult.Contents
+        .filter((obj: any) => obj.Key?.endsWith('/metadata.json'))
+        .map((obj: any) => obj.Key!);
+
+      for (const metadataKey of metadataKeys) {
+        const result = await s3.send(new GetObjectCommand({
+          Bucket: ARTIFACTS_BUCKET,
+          Key: metadataKey,
+        }));
+
+        if (!result.Body) continue;
+
+        try {
+          const content = await result.Body.transformToString() as string;
+          const metadata = JSON.parse(content) as TaskMetadata;
+
+          // Check if there's an active task for this issue
+          if (metadata.issue_number === issueNumber &&
+              metadata.status === "running") {
+            console.log(`Found active task ${metadata.task_id} for issue #${issueNumber} in S3 metadata, skipping launch`);
+            return { statusCode: 200, body: "Task already running" };
+          }
+        } catch {
+          // Skip malformed metadata files
+          continue;
+        }
+      }
+    }
+  } catch (error) {
+    console.warn(`Failed to check S3 metadata for active tasks: ${error}`);
+    // Continue anyway - label check is primary protection
   }
 
   await ensureSignalLabels(repoOwner, repoName, githubToken);

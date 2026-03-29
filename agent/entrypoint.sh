@@ -400,6 +400,40 @@ comment_already_exists() {
     2>/dev/null | grep -q .
 }
 
+find_existing_agent_pr() {
+  # Search for open PRs that reference this issue with "Fixes #N" or similar patterns
+  # and were created by the bot
+  local prs_json
+  prs_json=$(gh api "repos/${REPO}/pulls?state=open&per_page=100" 2>/dev/null)
+
+  if [ -z "$prs_json" ]; then
+    return 1
+  fi
+
+  # Look for PRs created by the bot that reference this issue
+  echo "$prs_json" | jq -r --arg issue "$ISSUE_NUMBER" '.[] |
+    select(.user.login == "github-agent[bot]" and (.body | contains("Fixes #" + $issue) or contains("Closes #" + $issue) or contains("Resolves #" + $issue))) |
+    .html_url' | head -1
+}
+
+pr_exists_for_issue() {
+  # Check if a PR already exists for this issue
+  if [ "${IS_PR}" = "true" ]; then
+    # For PR tasks, we don't need to check - we're reviewing an existing PR
+    return 1
+  fi
+
+  local existing_pr
+  existing_pr=$(find_existing_agent_pr)
+
+  if [ -n "$existing_pr" ]; then
+    echo "$existing_pr"
+    return 0
+  fi
+
+  return 1
+}
+
 issue_was_closed() {
   local state
   state=$(gh api "repos/${REPO}/issues/${ISSUE_NUMBER}" --jq '.state' 2>/dev/null)
@@ -763,7 +797,46 @@ Your mission:
 
 When you close the issue, the system will detect this and mark your work as complete."
 else
-  MISSION="${SYSTEM_INSTRUCTIONS}${FEEDBACK_SECTION}
+  # Check if a PR already exists for this issue before building the mission
+  EXISTING_PR=""
+  if existing_pr=$(pr_exists_for_issue); then
+    EXISTING_PR="$existing_pr"
+    echo "Found existing agent PR for issue #${ISSUE_NUMBER}: ${EXISTING_PR}"
+  fi
+
+  if [ -n "$EXISTING_PR" ]; then
+    # A PR already exists - tell Claude to push to that PR instead
+    MISSION="${SYSTEM_INSTRUCTIONS}${FEEDBACK_SECTION}
+
+---
+
+TASK (from issue #${ISSUE_NUMBER}):
+
+You have been triggered by the 'agent' label on issue #${ISSUE_NUMBER} in ${REPO}.
+
+⚠️ **IMPORTANT: A PR already exists for this issue. Do NOT create another PR.**
+
+**Existing PR:** ${EXISTING_PR}
+
+Here is the issue context:
+${CONTEXT}
+
+Your mission:
+- Understand the issue and explore the codebase to find the relevant files
+- Make the code changes needed to resolve the issue
+- Create a new branch or use the existing PR branch to add your changes
+- Push your changes to the existing PR branch (or create a branch with your changes)
+- If the existing PR branch needs updates, push to it directly
+- If you need to create a new commit on a different branch, name it distinctly and push, then comment on the existing PR to coordinate
+- Post a comment on the existing PR documenting your work
+- If your task does NOT require code changes (e.g., creating issues, analysis, planning), post your results as a comment and close this issue when done using: gh issue close ${ISSUE_NUMBER}
+- If you need more information to proceed, post a comment asking for clarification using: gh issue comment ${ISSUE_NUMBER} --body '<your question>'
+- Be concise. Make minimal, focused changes. Don't refactor unrelated code.
+
+IMPORTANT: Do not ask for confirmation or approval. Do not say 'Ready to implement?' or 'Shall I proceed?'. Execute immediately. Make your changes and push."
+  else
+    # No existing PR - proceed with normal flow
+    MISSION="${SYSTEM_INSTRUCTIONS}${FEEDBACK_SECTION}
 
 ---
 
@@ -784,6 +857,7 @@ Your mission:
 - Be concise. Make minimal, focused changes. Don't refactor unrelated code.
 
 IMPORTANT: Do not ask for confirmation or approval. Do not say 'Ready to implement?' or 'Shall I proceed?'. Execute immediately. Create the branch, commit, push, and open the PR."
+  fi
 fi
 
 # =============================================================
