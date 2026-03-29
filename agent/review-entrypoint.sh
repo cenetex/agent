@@ -251,6 +251,10 @@ DIFF=$(gh pr diff "${PR_NUMBER}" -R "${REPO}" 2>&1 | tee -a "${REVIEW_LOG}")
 # Get linked issues from PR body
 LINKED_ISSUES=$(echo "$PR_JSON" | jq -r '.body // ""' | grep -oE '#[0-9]+' | sort -u | tr '\n' ' ' || echo "")
 
+# Fetch CI check status
+echo "Getting CI check status..."
+CI_CHECKS=$(gh pr checks "${PR_NUMBER}" --repo "${REPO}" 2>/dev/null || echo "unavailable")
+
 echo "PR context fetched. Linked issues: ${LINKED_ISSUES:-none}"
 
 # --- Build the review prompt ---
@@ -268,6 +272,10 @@ REVIEW_MISSION="You are an automated code review agent for PR #${PR_NUMBER} in $
 
 ## PR Context
 ${PR_JSON}
+
+## CI Status (real data, not a guess)
+
+${CI_CHECKS}
 
 ## Review Criteria
 You must evaluate this PR against the following criteria and provide structured findings:
@@ -313,6 +321,11 @@ You are in the PR head worktree (${HEAD_SHA}). The base version is available at 
 - If unsure about something critical, request changes rather than approve
 - Consider the impact and scope of changes
 - Check that tests pass if there are any
+- **CI Status**: If any checks are failing:
+  - Determine if failures are in files changed by this PR
+  - If yes: request changes and explain what's broken
+  - If no: note as pre-existing but don't block approval
+- **CI Pending**: If CI hasn't completed yet, note this in your review and suggest waiting
 
 Begin your review now."
 
