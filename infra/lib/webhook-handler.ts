@@ -2729,6 +2729,65 @@ This production deployment failure has been automatically escalated. The agent w
   }
 }
 
+/**
+ * Check if there is already an active (running) task for a given issue.
+ * Returns true if an active task is found, false otherwise.
+ * On error, returns false so we don't block launches.
+ */
+async function checkForActiveTasks(
+  repoSlug: string,
+  issueNumber: number
+): Promise<boolean> {
+  try {
+    const prefix = `tasks/${repoSlug}/`;
+    const listResult = await s3.send(
+      new ListObjectsV2Command({
+        Bucket: ARTIFACTS_BUCKET,
+        Prefix: prefix,
+        MaxKeys: 200,
+      })
+    );
+
+    const contents = listResult.Contents || [];
+    const metadataKeys = contents
+      .map((obj) => obj.Key!)
+      .filter((key) => key.endsWith("/metadata.json"));
+
+    for (const key of metadataKeys) {
+      try {
+        const result = await s3.send(
+          new GetObjectCommand({
+            Bucket: ARTIFACTS_BUCKET,
+            Key: key,
+          })
+        );
+        const body = await result.Body!.transformToString();
+        const metadata = JSON.parse(body);
+
+        if (
+          metadata.issue_number === issueNumber &&
+          metadata.status === "running"
+        ) {
+          console.log(
+            `Found active task for issue #${issueNumber}: ${key}`
+          );
+          return true;
+        }
+      } catch {
+        // Skip unreadable metadata files
+        continue;
+      }
+    }
+
+    return false;
+  } catch (error) {
+    console.error(
+      `Error checking for active tasks (non-blocking): ${error}`
+    );
+    return false;
+  }
+}
+
 export async function handler(event: {
   headers: Record<string, string | undefined>;
   body?: string;
@@ -3555,6 +3614,13 @@ export async function handler(event: {
     return { statusCode: 200, body: "Already running" };
   }
 
+  // --- Check for active tasks in S3 metadata ---
+  const repoSlug = createRepoSlug(repoOwner, repoName);
+  if (await checkForActiveTasks(repoSlug, issueNumber)) {
+    console.log(`Issue #${issueNumber} has an active task in S3, skipping`);
+    return { statusCode: 200, body: "Already running (active task found)" };
+  }
+
   await ensureSignalLabels(repoOwner, repoName, githubToken);
   await setSignalLabel(
     repoOwner,
@@ -3578,7 +3644,6 @@ export async function handler(event: {
 
   // --- Create task payload ---
   const taskId = generateTaskId();
-  const repoSlug = createRepoSlug(repoOwner, repoName);
 
   // Extract label names from the webhook payload
   const labels = isPR

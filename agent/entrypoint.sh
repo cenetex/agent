@@ -422,6 +422,22 @@ should_post_comment() {
   return 0  # Should post
 }
 
+# Check if there is already an open PR created by the agent for this issue
+check_for_existing_agent_pr() {
+  # Only relevant for issue tasks — PRs don't create new PRs
+  if [ "${IS_PR}" = "true" ]; then
+    return
+  fi
+
+  local pr_number
+  pr_number=$(gh api "repos/${REPO}/pulls?state=open&per_page=100" \
+    --jq "[.[] | select(.body != null) | select(.body | test(\"(Fixes|Closes|Resolves) #${ISSUE_NUMBER}(\\\\b|$)\")) | .number] | first // empty" 2>/dev/null) || true
+
+  if [ -n "${pr_number}" ]; then
+    echo "${pr_number}"
+  fi
+}
+
 # --- Auth gh CLI ---
 CURRENT_STAGE="authenticate GitHub CLI"
 if ! setup_github_auth "${REPO}"; then
@@ -859,6 +875,21 @@ Your mission:
 
 When you close the issue, the system will detect this and mark your work as complete."
 else
+  # Check for an existing agent PR that already references this issue
+  EXISTING_PR_NUMBER=$(check_for_existing_agent_pr || true)
+  EXISTING_PR_NOTE=""
+  if [ -n "${EXISTING_PR_NUMBER}" ]; then
+    echo "WARNING: Found existing open PR #${EXISTING_PR_NUMBER} referencing issue #${ISSUE_NUMBER}"
+    EXISTING_PR_NOTE="
+
+IMPORTANT — EXISTING PR DETECTED:
+There is already an open PR #${EXISTING_PR_NUMBER} that references this issue.
+Before creating a new PR, review PR #${EXISTING_PR_NUMBER} to understand what has already been done.
+If the existing PR adequately addresses the issue, do NOT create a duplicate.
+Instead, post a comment on this issue explaining that PR #${EXISTING_PR_NUMBER} already addresses it.
+Only create a new PR if the existing one is fundamentally broken or takes a wrong approach."
+  fi
+
   MISSION="${SYSTEM_INSTRUCTIONS}${FEEDBACK_SECTION}
 
 ---
@@ -868,7 +899,7 @@ TASK (from issue #${ISSUE_NUMBER}):
 You have been triggered by the 'agent' label on issue #${ISSUE_NUMBER} in ${REPO}.
 
 Here is the issue context:
-${CONTEXT}
+${CONTEXT}${EXISTING_PR_NOTE}
 
 Your mission:
 - Understand the issue and explore the codebase to find the relevant files
