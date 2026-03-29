@@ -1807,13 +1807,10 @@ function createTaskEnvironmentForDiagnostic(
   issueData: any,
   artifactPrefix: string,
   githubToken: string,
-  openrouterKey: string
+  openrouterKey: string,
+  taskPayloadS3Key?: string
 ): Record<string, string> {
-  return {
-    TASK_PAYLOAD: JSON.stringify({
-      ...taskPayload,
-      task_arn: undefined, // Will be filled in after task is created
-    }),
+  const env: Record<string, string> = {
     GITHUB_TOKEN: githubToken,
     OPENROUTER_API_KEY: openrouterKey,
     ARTIFACTS_BUCKET,
@@ -1824,6 +1821,18 @@ function createTaskEnvironmentForDiagnostic(
     SIGNAL_LABEL_FAILED: "diagnose:failed",
     SIGNAL_LABEL_SUCCEEDED: "diagnose:succeeded",
   };
+
+  // Use S3 key if provided, otherwise fall back to inline payload (backwards compat)
+  if (taskPayloadS3Key) {
+    env.TASK_PAYLOAD_S3_KEY = taskPayloadS3Key;
+  } else {
+    env.TASK_PAYLOAD = JSON.stringify({
+      ...taskPayload,
+      task_arn: undefined, // Will be filled in after task is created
+    });
+  }
+
+  return env;
 }
 
 async function launchDiagnosticFargateTask(
@@ -3009,8 +3018,19 @@ Add the \`agent\` label again after purchasing credits. Credits can be purchased
   try {
     // --- Run Fargate task ---
     const taskMetadata = createInitialTaskMetadata(taskPayload);
-    const taskEnvironment: TaskEnvironment = {
-      TASK_PAYLOAD: JSON.stringify(taskPayload),
+
+    // --- Write task payload to S3 to avoid ECS container override size limit ---
+    const taskPayloadKey = `tasks/${repoOwner}/${repoName}/${taskId}/payload.json`;
+    await s3.send(new PutObjectCommand({
+      Bucket: ARTIFACTS_BUCKET,
+      Key: taskPayloadKey,
+      Body: JSON.stringify(taskPayload),
+      ContentType: "application/json",
+    }));
+    console.log(`Stored task payload at s3://${ARTIFACTS_BUCKET}/${taskPayloadKey}`);
+
+    const taskEnvironment: TaskEnvironment & { TASK_PAYLOAD_S3_KEY?: string } = {
+      TASK_PAYLOAD_S3_KEY: taskPayloadKey,
       GITHUB_TOKEN: githubToken,
       OPENROUTER_API_KEY: openrouterKey,
       ARTIFACTS_BUCKET,
