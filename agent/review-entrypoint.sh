@@ -1,17 +1,27 @@
 #!/bin/bash
 set -Eeuo pipefail
 
+# Source common functions
+. /lib/common.sh
+
 # --- Required env vars (passed by Lambda via Fargate overrides) ---
 : "${GITHUB_TOKEN:?Missing GITHUB_TOKEN}"
 : "${OPENROUTER_API_KEY:?Missing OPENROUTER_API_KEY}"
-: "${REVIEW_PAYLOAD:?Missing REVIEW_PAYLOAD}"
+: "${REVIEW_PAYLOAD_S3_KEY:?Missing REVIEW_PAYLOAD_S3_KEY}"
 : "${ARTIFACTS_BUCKET:?Missing ARTIFACTS_BUCKET}"
 : "${ARTIFACT_PREFIX:?Missing ARTIFACT_PREFIX}"
 : "${REPO:?Missing REPO}"
 : "${PR_NUMBER:?Missing PR_NUMBER}"
 : "${REVIEW_CRITERIA:?Missing REVIEW_CRITERIA}"
+: "${AWS_REGION:=us-east-1}"
 
-# --- Parse review payload ---
+# --- Fetch and parse review payload from S3 ---
+echo "Fetching review payload from S3: ${REVIEW_PAYLOAD_S3_KEY}"
+REVIEW_PAYLOAD=$(aws s3 cp "s3://${ARTIFACTS_BUCKET}/${REVIEW_PAYLOAD_S3_KEY}" - --region "${AWS_REGION}" 2>/dev/null) || {
+  echo "ERROR: Failed to fetch review payload from S3"
+  exit 1
+}
+
 echo "Parsing review payload..."
 TASK_ID=$(echo "$REVIEW_PAYLOAD" | jq -r '.task_id')
 REPO_SLUG=$(echo "$REVIEW_PAYLOAD" | jq -r '.repo_slug')
@@ -73,20 +83,18 @@ update_review_status() {
 EOF
 )
 
-  # Upload metadata to S3
-  echo "$metadata_json" | aws s3 cp - "s3://${ARTIFACTS_BUCKET}/${METADATA_KEY}" --content-type "application/json" || true
+  # Upload metadata and findings to S3 using common helpers
+  upload_artifact_from_stdin "$metadata_json" "${METADATA_KEY}" "application/json"
 
   # Upload findings if provided
   if [ -n "$findings" ]; then
-    echo "$findings" | aws s3 cp - "s3://${ARTIFACTS_BUCKET}/${RESULT_KEY}" --content-type "application/json" || true
+    upload_artifact_from_stdin "$findings" "${RESULT_KEY}" "application/json"
   fi
 }
 
 upload_review_artifacts() {
-  # Upload review log if it exists
-  if [ -f "${REVIEW_LOG}" ] && [ -s "${REVIEW_LOG}" ]; then
-    aws s3 cp "${REVIEW_LOG}" "s3://${ARTIFACTS_BUCKET}/${LOG_KEY}" --content-type "text/plain" || true
-  fi
+  # Upload review log using common helper
+  upload_artifact "${REVIEW_LOG}" "${LOG_KEY}" "text/plain"
 }
 
 post_review_comment() {
@@ -142,8 +150,8 @@ This PR will require manual review.
       ;;
   esac
 
-  # Post the review comment
-  gh issue comment "${PR_NUMBER}" -R "${REPO}" --body "$comment_body" 2>&1 | tee -a "${REVIEW_LOG}" || true
+  # Post the review comment using common helper
+  post_comment "${PR_NUMBER}" "${REPO}" "$comment_body" 2>&1 | tee -a "${REVIEW_LOG}" || true
 }
 
 apply_review_labels() {
@@ -193,27 +201,9 @@ trap on_exit EXIT
 
 # --- Auth gh CLI ---
 CURRENT_STAGE="authenticate GitHub CLI"
-echo "Setting up GitHub CLI authentication..."
-
-# Clear any existing gh auth state to avoid conflicts
-gh auth logout --hostname github.com >/dev/null 2>&1 || true
-
-# Use environment-based auth
-export GH_TOKEN="${GITHUB_TOKEN}"
-
-# Validate authentication
-echo "Validating GitHub App installation token..."
-if ! gh repo view "${REPO}" --json nameWithOwner >/dev/null 2>&1; then
-  echo "ERROR: Cannot access repository ${REPO}"
+if ! setup_github_auth "${REPO}"; then
   exit 1
 fi
-echo "Repository access confirmed for ${REPO}"
-
-# Configure git identity for potential commits
-git config --global user.name "github-agent-review[bot]"
-git config --global user.email "github-agent-review[bot]@users.noreply.github.com"
-
-echo "GitHub CLI authentication successful"
 
 # --- Clone repo and set up worktree ---
 CURRENT_STAGE="clone repository"

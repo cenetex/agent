@@ -1,6 +1,9 @@
 #!/bin/bash
 set -Eeuo pipefail
 
+# Source common functions
+. /lib/common.sh
+
 # --- Required env vars (passed by Lambda via Fargate overrides) ---
 : "${GITHUB_TOKEN:?Missing GITHUB_TOKEN}"
 : "${OPENROUTER_API_KEY:?Missing OPENROUTER_API_KEY}"
@@ -115,10 +118,8 @@ upload_artifacts() {
   local exit_code="$1"
   local pr_url="$2"
 
-  # Upload agent log if it exists
-  if [ -f "${AGENT_LOG}" ] && [ -s "${AGENT_LOG}" ]; then
-    aws s3 cp "${AGENT_LOG}" "s3://${ARTIFACTS_BUCKET}/${LOG_KEY}" --content-type "text/plain" || true
-  fi
+  # Upload agent log using common helper
+  upload_artifact "${AGENT_LOG}" "${LOG_KEY}" "text/plain"
 
   # Create and upload task manifest
   local manifest_json
@@ -129,13 +130,13 @@ upload_artifacts() {
   "log_key": "$(if [ -f "${AGENT_LOG}" ] && [ -s "${AGENT_LOG}" ]; then echo "${LOG_KEY}"; else echo "null"; fi)",
   "summary_key": null,
   "exit_code": ${exit_code},
-  "total_size_bytes": $(if [ -f "${AGENT_LOG}" ]; then wc -c < "${AGENT_LOG}"; else echo "0"; fi),
+  "total_size_bytes": $(if [ -f "${AGENT_LOG}" ]; then wc -c < "${AGENT_LOG}"; else echo "0"; fi)",
   "created_at": "$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
 }
 EOF
 )
 
-  echo "$manifest_json" | aws s3 cp - "s3://${ARTIFACTS_BUCKET}/${MANIFEST_KEY}" --content-type "application/json" || true
+  upload_artifact_from_stdin "$manifest_json" "${MANIFEST_KEY}" "application/json"
 }
 
 create_completion_summary() {
@@ -222,7 +223,7 @@ on_exit() {
     upload_artifacts "$exit_code" ""
 
     local summary=$(create_completion_summary "waiting" "" "")
-    gh issue comment "${ISSUE_NUMBER}" -R "${REPO}" --body "$summary" >/dev/null 2>&1 || true
+    post_comment "${ISSUE_NUMBER}" "${REPO}" "$summary"
 
     echo "=== Agent waiting for confirmation ==="
     exit 0
@@ -233,14 +234,14 @@ on_exit() {
 
     # Find created PR URL if this was an issue
     if [ "${IS_PR}" = "false" ]; then
-      pr_url="$(find_created_pr_url)"
+      pr_url="$(find_created_pr_url "${ISSUE_NUMBER}" "${REPO}" "${RUN_STARTED_AT}")"
     fi
 
     update_task_metadata "succeeded" "" "$pr_url"
     upload_artifacts "$exit_code" "$pr_url"
 
     local summary=$(create_completion_summary "succeeded" "$pr_url" "")
-    gh issue comment "${ISSUE_NUMBER}" -R "${REPO}" --body "$summary" >/dev/null 2>&1 || true
+    post_comment "${ISSUE_NUMBER}" "${REPO}" "$summary"
 
     echo "=== Agent finished ==="
     echo "Task ID: ${TASK_ID}"
@@ -270,7 +271,7 @@ on_exit() {
   esac
 
   # Check if comment already exists to prevent duplicates
-  if comment_already_exists "${TASK_ID}"; then
+  if comment_already_exists "${TASK_ID}" "${ISSUE_NUMBER}" "${REPO}"; then
     echo "Comment for task ${TASK_ID} already exists, skipping duplicate"
     upload_artifacts "$exit_code" ""
     echo "=== Agent failed (duplicate comment prevented) ==="
@@ -321,7 +322,7 @@ ${summary}
 - **Exit Code:** ${exit_code}
 ${log_tail}"
 
-  gh issue comment "${ISSUE_NUMBER}" -R "${REPO}" --body "${failure_comment}" >/dev/null 2>&1 || true
+  post_comment "${ISSUE_NUMBER}" "${REPO}" "${failure_comment}"
 
   echo "=== Agent failed ==="
   exit "${exit_code}"
@@ -329,110 +330,18 @@ ${log_tail}"
 
 trap on_exit EXIT
 
-find_created_pr_url() {
-  gh api "repos/${REPO}/issues/${ISSUE_NUMBER}/timeline?per_page=100" \
-    -H "Accept: application/vnd.github+json" \
-    | jq -r --arg since "${RUN_STARTED_AT}" '
-      map(
-        select(
-          .event == "cross-referenced"
-          and .created_at >= $since
-          and .source.issue.pull_request.html_url != null
-        )
-      )
-      | last
-      | .source.issue.html_url // empty
-    '
-}
-
-has_agent_question_comment() {
-  local comments_json
-
-  comments_json="$(gh api "repos/${REPO}/issues/${ISSUE_NUMBER}/comments?per_page=100")"
-
-  jq -e --arg since "${RUN_STARTED_AT}" '
-    map(
-      select(
-        .created_at >= $since
-        and (.body | test("\\?"))
-      )
-    )
-    | length > 0
-  ' >/dev/null <<<"${comments_json}"
-}
-
-categorize_failure() {
-  local stage="$1"
-  local error_message="$2"
-  local exit_code="$3"
-
-  # Returns: category|retryable|suggested_action
-  # Transient (retryable) failures
-  if echo "$error_message" | grep -qi "insufficient credits"; then
-    echo "credit_exhaustion|true|Top up OpenRouter credits via your account dashboard"
-  elif echo "$error_message" | grep -qi "timeout\|60 minute"; then
-    echo "timeout|true|The task will be retried automatically; you can also retry manually"
-  elif echo "$error_message" | grep -qi "openrouter\|connection"; then
-    echo "external_service|true|External service is temporarily unavailable; will retry automatically"
-
-  # Permanent (non-retryable) failures
-  elif echo "$error_message" | grep -qi "authentication\|auth failed"; then
-    echo "auth_failure|false|Check GitHub App installation and token permissions"
-  elif echo "$error_message" | grep -qi "permission\|forbidden\|not authorized"; then
-    echo "permission_denied|false|The GitHub App lacks required permissions for this repository"
-  elif echo "$error_message" | grep -qi "repository\|repo.*not found"; then
-    echo "repo_not_found|false|Verify the repository exists and the GitHub App is installed"
-  elif [ "$stage" = "pre-flight checks" ]; then
-    echo "pre_flight_failure|false|Check infrastructure requirements: gh CLI, aws CLI, claude CLI"
-  elif [ "$stage" = "run agent"* ]; then
-    echo "execution_failure|false|Check the agent logs and issue requirements"
-  else
-    echo "unknown|false|Review the error details and GitHub App permissions"
-  fi
-}
-
-comment_already_exists() {
-  local task_id="$1"
-
-  # Check if a comment with this task ID already exists (prevent duplicates)
-  gh api "repos/${REPO}/issues/${ISSUE_NUMBER}/comments?per_page=100" \
-    --jq ".[] | select(.body | contains(\"<!-- task_id: ${task_id} -->\")) | .id" \
-    2>/dev/null | grep -q .
-}
-
-issue_was_closed() {
-  local state
-  state=$(gh api "repos/${REPO}/issues/${ISSUE_NUMBER}" --jq '.state' 2>/dev/null)
-  [ "$state" = "closed" ]
-}
+# Use functions from common.sh
+# - find_created_pr_url(issue_number, repo, since)
+# - has_agent_question_comment(issue_number, repo, since)
+# - categorize_failure(stage, error_message, exit_code)
+# - comment_already_exists(task_id, issue_number, repo)
+# - issue_was_closed(issue_number, repo)
 
 # --- Auth gh CLI ---
 CURRENT_STAGE="authenticate GitHub CLI"
-echo "Setting up GitHub CLI authentication..."
-
-# Clear any existing gh auth state to avoid conflicts
-gh auth logout --hostname github.com >/dev/null 2>&1 || true
-
-# Use environment-based auth (preferred for headless environments)
-export GH_TOKEN="${GITHUB_TOKEN}"
-
-# Validate authentication by testing repository access directly
-# Note: gh auth status and gh api user don't work with GitHub App installation tokens
-echo "Validating GitHub App installation token..."
-if ! gh repo view "${REPO}" --json nameWithOwner >/dev/null 2>&1; then
-  echo "ERROR: Cannot access repository ${REPO}"
-  echo "GitHub App installation may not have access to this repository"
-  echo "Token test: gh api repos/${REPO} response:"
-  gh api "repos/${REPO}" 2>&1 | head -5 || true
+if ! setup_github_auth "${REPO}"; then
   exit 1
 fi
-echo "Repository access confirmed for ${REPO}"
-
-# Configure git identity for commits
-git config --global user.name "github-agent[bot]"
-git config --global user.email "github-agent[bot]@users.noreply.github.com"
-
-echo "GitHub CLI authentication successful"
 set_signal_label "${SIGNAL_LABEL_RUNNING}"
 
 # Update task status to running
@@ -924,11 +833,11 @@ while [ -z "${RUN_STATUS}" ] && [ "${ATTEMPT}" -lt "${MAX_ATTEMPTS}" ]; do
 
   if [ "${IS_PR}" = "true" ]; then
     RUN_STATUS="succeeded"
-  elif PR_URL="$(find_created_pr_url)" && [ -n "${PR_URL}" ]; then
+  elif PR_URL="$(find_created_pr_url "${ISSUE_NUMBER}" "${REPO}" "${RUN_STARTED_AT}")" && [ -n "${PR_URL}" ]; then
     RUN_STATUS="succeeded"
-  elif issue_was_closed; then
+  elif issue_was_closed "${ISSUE_NUMBER}" "${REPO}"; then
     RUN_STATUS="succeeded"
-  elif has_agent_question_comment; then
+  elif has_agent_question_comment "${ISSUE_NUMBER}" "${REPO}" "${RUN_STARTED_AT}"; then
     RUN_STATUS="waiting"
   elif [ "${ATTEMPT}" -lt "${MAX_ATTEMPTS}" ]; then
     echo "Attempt ${ATTEMPT}: no PR created and no questions asked — retrying..." >&2
