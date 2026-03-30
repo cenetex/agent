@@ -336,7 +336,7 @@ async function startReviewTask(
   };
 
   const reviewEnvironment: ReviewEnvironment = {
-    REVIEW_PAYLOAD_S3_KEY: reviewPayloadS3Key,
+    REVIEW_PAYLOAD: reviewPayloadS3Key,
     GITHUB_TOKEN: githubToken,
     OPENROUTER_API_KEY: openrouterApiKey,
     ARTIFACTS_BUCKET,
