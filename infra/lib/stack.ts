@@ -661,6 +661,46 @@ export class GitHubAgentStack extends cdk.Stack {
     taskStatusRule.addTarget(new targets.LambdaFunction(taskStatusHandler));
 
     // -------------------------------------------------------
+    // Issue Grooming Handler Lambda
+    // -------------------------------------------------------
+    const groomingHandler = new NodejsFunction(this, "GroomingHandler", {
+      entry: path.join(__dirname, "grooming-handler.ts"),
+      handler: "handler",
+      runtime: lambda.Runtime.NODEJS_20_X,
+      architecture: lambda.Architecture.ARM_64,
+      timeout: cdk.Duration.minutes(5),
+      memorySize: 256,
+      bundling: {
+        minify: true,
+        sourceMap: true,
+        target: "node20",
+        externalModules: [],
+      },
+      environment: {
+        GITHUB_APP_ID_PARAM: PARAM_GITHUB_APP_ID,
+        GITHUB_APP_PRIVATE_KEY_PARAM: PARAM_GITHUB_APP_PRIVATE_KEY,
+        MONITORED_REPOS: "cenetex/aws-swarm,cenetex/kyro,cenetex/raticross,cenetex/ratibot,cenetex/litigation,cenetex/agent,cenetex/governance",
+      },
+    });
+
+    groomingHandler.addToRolePolicy(
+      new iam.PolicyStatement({
+        actions: ["ssm:GetParameter"],
+        resources: ssmParamArns,
+      })
+    );
+
+    // -------------------------------------------------------
+    // EventBridge rule to trigger issue grooming (every 15 minutes)
+    // -------------------------------------------------------
+    const groomingRule = new events.Rule(this, "GroomingRule", {
+      description: "Trigger issue grooming scan every 15 minutes",
+      schedule: events.Schedule.rate(cdk.Duration.minutes(15)),
+    });
+
+    groomingRule.addTarget(new targets.LambdaFunction(groomingHandler));
+
+    // -------------------------------------------------------
     // API Gateway HTTP API
     // -------------------------------------------------------
     const httpApi = new apigwv2.HttpApi(this, "WebhookApi", {
