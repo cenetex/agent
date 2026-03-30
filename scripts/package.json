@@ -1,0 +1,19 @@
+{
+  "name": "github-agent-scripts",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "tsc",
+    "credits": "node dist/credits-admin.js"
+  },
+  "dependencies": {
+    "@aws-sdk/client-s3": "^3.1014.0",
+    "argparse": "^2.0.1"
+  },
+  "devDependencies": {
+    "@types/argparse": "^1.0.38",
+    "@types/node": "^22.0.0",
+    "typescript": "^5.7.0"
+  }
+}
