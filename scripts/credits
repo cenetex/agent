@@ -1,0 +1,28 @@
+#!/bin/bash
+# Credit Admin CLI Wrapper
+# Usage: ./scripts/credits balance [--repo owner/repo] [--all]
+#        ./scripts/credits topup <owner/repo> <amount> [--reason "..."]
+#        ./scripts/credits transfer <from-repo> <to-repo> <amount>
+#        ./scripts/credits history <owner/repo> [--month YYYY/MM]
+
+set -e
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# Ensure node dependencies are installed
+if [ ! -d "$SCRIPT_DIR/node_modules" ]; then
+  echo "Installing dependencies..."
+  cd "$SCRIPT_DIR"
+  npm install
+fi
+
+# Ensure built files exist
+if [ ! -f "$SCRIPT_DIR/dist/credits-admin.js" ]; then
+  echo "Building TypeScript..."
+  cd "$SCRIPT_DIR"
+  npm run build
+fi
+
+# Run the CLI
+cd "$SCRIPT_DIR"
+node dist/credits-admin.js "$@"
