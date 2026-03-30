@@ -1,6 +1,6 @@
 # GitHub Agent
 
-Fargate container that runs Claude Code on GitHub issues/PRs.
+Autonomous AI agent that automatically implements features, fixes bugs, and reviews code on GitHub. Built on Claude Code + AWS Fargate.
 
 ## Quick Start
 
@@ -12,26 +12,74 @@ To trigger the agent on an issue or PR:
 
 ## Architecture
 
-- **Webhook Handler** (`infra/lib/webhook-handler.ts`) - Listens for `agent` label events
-- **Agent Container** - Runs Claude Code in AWS Fargate
-- **Infrastructure** - AWS CDK deployment in `infra/`
+The agent system consists of multiple independently-deployed containers and scheduled handlers:
+
+- **Agent Container** - Runs Claude Code in AWS Fargate; triggered by `agent` label on issues/PRs
+- **Review Container** - Separate Fargate task definition; auto-reviews completed PRs every 15 minutes
+- **Diagnostic Container** - Same image as agent but with read-only CloudWatch access; triggered by `diagnose` label
+- **Webhook Handler Lambda** - Listens for GitHub webhook events (issues/PRs labeled `agent` or `diagnose`, PR reviews)
+- **Review Handler Lambda** - Discovers PRS with `agent:succeeded` label, evaluates quality, posts feedback
+- **Scheduled Operators** (EventBridge rules):
+  - **Review runner** (15 minutes) - Trigger review handler for completed agent PRs
+  - **Cleanup handler** (every 2 hours) - Stop stale agent tasks, remove old metadata
+  - **Daily digest** (9am UTC) - Post GitHub issue summarizing agent activity and credits
+  - **QA trigger** (2am UTC) - Run nightly end-to-end tests
+  - **Escalation checks** (every 15 minutes) - Route human-decision issues to admin
+  - **Task status monitor** (every 30 minutes) - Health checks on running tasks
+  - **Credit rescan** (hourly) - Unblock repos when credits become available
+- **Infrastructure** - AWS CDK stack (`infra/`) defining Lambda, Fargate, VPC, S3, EventBridge rules
 
 For security architecture and isolation controls, see [SECURITY.md](./SECURITY.md).
 
-## Agent Workflow
+## Full Pipeline
+
+The complete workflow from issue to merge:
+
+```
+GitHub Issue
+    ↓
+  [agent] label added
+    ↓
+  Webhook Handler
+    ↓
+  Agent Container runs in Fargate
+    ↓
+  Creates PR (or modifies existing PR)
+    ↓
+  [agent:succeeded] label applied
+    ↓
+  Review Handler (every 15 min) discovers PR
+    ↓
+  Review Container evaluates quality
+    ↓
+  Review feedback posted as comment
+    ↓
+  [review:approved] or [review:changes-requested] label
+    ↓
+  Auto-merge after 1-hour hold (if approved)
+```
 
 ### Label Semantics
 
 The agent uses a trigger + status label system:
 
-**Trigger Label:**
-- `agent` - Activates the agent (automatically removed when processing starts)
+**Trigger Labels:**
+- `agent` - Activates the agent on issues/PRs (automatically removed when processing starts)
+- `diagnose` - Triggers read-only CloudWatch log investigation (diagnostic task)
 
 **Status Labels:**
 - `agent:running` - Agent is currently processing the issue/PR
 - `agent:waiting` - Agent needs more information (re-add `agent` label to continue)
 - `agent:failed` - Agent encountered an error and could not complete
 - `agent:succeeded` - Agent completed successfully
+- `agent:blocked` - Task blocked due to insufficient credits or dependency blocker
+
+**Review Labels:**
+- `review:approved` - Review agent approved the PR quality
+- `review:changes-requested` - Review agent found issues needing fixes
+
+**Status Labels:**
+- `status:blocked` - Indicates task is blocked (credit-aware throttling)
 
 ### Expected Outputs
 
@@ -119,5 +167,104 @@ Tasks that fail or time out are not charged. Failed tasks receive a refund trans
 - **Agent Not Triggering**: Ensure the `agent` label exists in your repository
 - **Webhook Issues**: Check AWS CloudWatch logs for the webhook handler Lambda
 - **Task Failures**: Look at the `agent:failed` status comment for error details
-- **Long Running Tasks**: Agent has a 30-minute timeout for safety
+- **Long Running Tasks**: Agent has a 45-minute timeout for safety (prevents GitHub token expiration)
 - **Insufficient Credits**: The `agent:failed` comment will show your current balance and required credits
+
+## Orchestration Features
+
+The agent system includes several advanced orchestration capabilities:
+
+### Credit-Aware Throttling
+- Repositories with insufficient credits are blocked with `agent:blocked` status
+- Tasks do not consume credits if they fail or timeout
+- Hourly credit rescan automatically unblocks repos when credits become available again
+
+### Dependency-Aware Dispatch
+- Agent detects and respects GitHub dependency linking (`depends-on` comments)
+- Blocked PRs won't be processed until dependencies are resolved
+
+### Merge Conflict Detection
+- Agent automatically rebases PR branch if merge conflicts are detected
+- Prevents wasted review cycles on conflicted code
+
+### Escalation Routing
+- Complex decisions (security policies, breaking changes) route to human admins
+- Escalation checks run every 15 minutes
+- Tasks marked for escalation are removed from auto-merge queue
+
+### Task Status Monitoring
+- Health checks every 30 minutes on running tasks
+- Automatic restart of stalled tasks
+- Status metadata stored in S3 for debugging
+
+## Scheduled Operations
+
+All scheduled operations use EventBridge rules. Times listed are in UTC:
+
+| Handler | Schedule | Purpose |
+|---------|----------|---------|
+| Review Handler | Every 15 minutes | Discover and evaluate PRs with `agent:succeeded` |
+| Cleanup Handler | Every 2 hours | Stop stale tasks, remove old metadata after 30 days |
+| Daily Digest | 9am daily | Post GitHub issue summarizing agent activity |
+| QA Trigger | 2am daily | Run nightly end-to-end tests |
+| Escalation Checks | Every 15 minutes | Route decisions to human admins |
+| Task Status Monitor | Every 30 minutes | Health checks on running tasks |
+| Credit Rescan | Hourly | Unblock repos when credits available |
+
+## Per-Repo Configuration
+
+Repositories can customize agent behavior using `.github/AGENT.md`:
+
+```yaml
+# .github/AGENT.md
+model: anthropic/claude-opus-4-6  # Override model choice
+conventions: |
+  - Use PascalCase for class names
+  - Use snake_case for functions
+  - Always add tests for new features
+instructions: |
+  This repo uses async/await patterns exclusively.
+  Prefer promises over callbacks.
+  All HTTP requests must use the internal HTTP client.
+```
+
+When present, settings in `.github/AGENT.md` override repository defaults.
+
+## Model Configuration
+
+Default models by task type:
+
+| Task Type | Model | Credits |
+|-----------|-------|---------|
+| Issues | `anthropic/claude-haiku-4-5` | 4 |
+| PRs (review) | `anthropic/claude-sonnet-4-6` | 12 |
+| Planning | `anthropic/claude-haiku-4-5` | 4 |
+
+Override using `.github/AGENT.md` in target repository (see Per-Repo Configuration above).
+
+**Note:** Model names use OpenRouter format (`anthropic/claude-*`), not bare Anthropic format.
+
+## For External Repos
+
+To install the agent on your repository:
+
+1. **Install the GitHub App** - Visit the installation page for your organization
+2. **Receive Initial Credits** - New repositories automatically receive 100 free credits
+3. **Enable on an Issue** - Add the `agent` label to any issue
+4. **Monitor in CloudWatch** - View logs: `aws logs tail /aws/lambda/GitHubAgentStack-WebhookHandler --follow`
+
+The app will request these permissions:
+- Read/write to issues, PRs, comments
+- Read repository code and commits
+- Write to repository branches and create PRs
+
+## Error Handling
+
+The agent categorizes and handles different failure modes:
+
+- **Insufficient Credits**: Task blocked with `agent:blocked` label (retryable after credit purchase)
+- **Permission Denied**: Escalated to admins, file changed to use different permissions strategy
+- **Merge Conflicts**: Auto-rebased; if rebase fails, escalated for manual resolution
+- **CI Failure**: Retried up to 2 times; if persistent, flagged as PR-introduced issue
+- **Timeout (45 min)**: Fails gracefully to prevent token expiration race condition
+- **Pre-existing Main Failure**: Not counted as agent failure; PR still approved if agent changes pass CI
