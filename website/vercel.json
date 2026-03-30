@@ -1,0 +1,42 @@
+{
+  "buildCommand": "npm run build",
+  "outputDirectory": ".next",
+  "env": {
+    "NEXTAUTH_URL": {
+      "description": "Full URL of the deployed site",
+      "required": true
+    },
+    "NEXTAUTH_SECRET": {
+      "description": "Session encryption secret. Generate with: openssl rand -base64 32",
+      "required": true
+    },
+    "GITHUB_ID": {
+      "description": "GitHub OAuth App Client ID",
+      "required": true
+    },
+    "GITHUB_SECRET": {
+      "description": "GitHub OAuth App Client Secret",
+      "required": true
+    },
+    "AWS_REGION": {
+      "description": "AWS region for S3 operations",
+      "default": "us-east-1"
+    },
+    "ARTIFACTS_BUCKET": {
+      "description": "S3 bucket containing credit data",
+      "required": true
+    }
+  },
+  "redirects": [
+    {
+      "source": "/dashboard/:path*",
+      "destination": "/dashboard/:path*",
+      "permanent": false
+    },
+    {
+      "source": "/pricing",
+      "destination": "/#pricing",
+      "permanent": false
+    }
+  ]
+}
