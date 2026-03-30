@@ -1,0 +1,45 @@
+name: 🚀 Release
+description: Cut a new release
+labels: ["agent"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        # Release Checklist
+        Use this template to cut a new release. The agent will run the release script, create the tag, and verify the deploy workflow is triggered.
+
+  - type: textarea
+    id: changes
+    attributes:
+      label: Changes since last release
+      description: Summary of changes included in this release
+      placeholder: |
+        - fix(handlers): gallery service test fixes (#1189)
+        - chore(handlers): remove Moltbook (#1198)
+        - feat(ci): add Twitter/X canary (#1194)
+    validations:
+      required: true
+
+  - type: dropdown
+    id: version-bump
+    attributes:
+      label: Version bump
+      description: Which part of the version to bump?
+      options:
+        - "patch: bug fixes and minor improvements"
+        - "minor: new features"
+        - "major: breaking changes"
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: acceptance
+    attributes:
+      label: Acceptance criteria
+      options:
+        - label: Run scripts/release.sh with appropriate version bump
+          required: true
+        - label: Verify tag created and follows semantic versioning
+          required: true
+        - label: Verify deploy workflow triggered successfully
+          required: true

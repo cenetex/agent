@@ -53,7 +53,7 @@ interface DigestStats {
   failed: number;
   timed_out: number;
   mergedPRs: Array<{ title: string; number: number; repo: string }>;
-  draftReleases: Array<{ repo: string; version: string; url: string }>;
+  releaseCandidates: Array<{ repo: string; prCount: number; lastTag: string | null }>;
   reviewWaitingPRs: Array<{ title: string; number: number; repo: string; url: string }>;
   creditsSpent: number;
   repoCredits: Array<{ repo: string; balance: number; spent_today: number }>;
@@ -203,10 +203,12 @@ async function getAllMergedPRs(
   return allMergedPRs;
 }
 
-async function getDraftReleases(
-  token: string
-): Promise<Array<{ repo: string; version: string; url: string }>> {
-  const draftReleases: Array<{ repo: string; version: string; url: string }> = [];
+async function getReleaseCandidates(
+  token: string,
+  since: Date,
+  minMergedPRs: number = 5
+): Promise<Array<{ repo: string; prCount: number; lastTag: string | null }>> {
+  const releaseCandidates: Array<{ repo: string; prCount: number; lastTag: string | null }> = [];
 
   try {
     // Get list of repos from task metadata
@@ -237,36 +239,82 @@ async function getDraftReleases(
       continuationToken = listResult.NextContinuationToken;
     } while (continuationToken);
 
-    // Check each repo for draft releases
+    // Check each repo for release candidates
     for (const repoSlug of reposList) {
       try {
         const { owner, name } = parseRepoSlug(repoSlug);
-        const response = await githubRequest(
-          `/repos/${owner}/${name}/releases?per_page=10`,
+
+        // Get latest tag
+        const latestTagResponse = await githubRequest(
+          `/repos/${owner}/${name}/releases/latest`,
+          token,
+          { method: "GET" },
+          [200, 404]
+        );
+
+        let lastTag: string | null = null;
+        if (latestTagResponse.status === 200) {
+          const latestRelease = await latestTagResponse.json() as any;
+          lastTag = latestRelease.tag_name;
+        }
+
+        // Get merged PRs since tag
+        const prsResponse = await githubRequest(
+          `/repos/${owner}/${name}/pulls?state=closed&sort=updated&direction=desc&per_page=100`,
           token,
           { method: "GET" },
           [200]
         );
 
-        const releases = await response.json() as any[];
-        const drafts = releases.filter((rel: any) => rel.draft);
+        const prs = await prsResponse.json() as any[];
+        const allMerged = prs.filter((pr: any) => pr.merged_at);
 
-        for (const draft of drafts) {
-          draftReleases.push({
+        let mergedSinceTag = allMerged.length;
+
+        // If we have a tag, filter for PRs merged after tag date
+        if (lastTag && lastTag !== null) {
+          try {
+            const tagResponse = await githubRequest(
+              `/repos/${owner}/${name}/git/refs/tags/${lastTag}`,
+              token,
+              { method: "GET" },
+              [200, 404]
+            );
+
+            if (tagResponse.status === 200) {
+              const tagRef = await tagResponse.json() as any;
+              const commitResponse = await githubRequest(
+                `/repos/${owner}/${name}/git/commits/${tagRef.object.sha}`,
+                token,
+                { method: "GET" },
+                [200]
+              );
+
+              const tagCommit = await commitResponse.json() as any;
+              const tagDate = new Date(tagCommit.committer.date).getTime();
+              mergedSinceTag = allMerged.filter((pr: any) => new Date(pr.merged_at).getTime() > tagDate).length;
+            }
+          } catch (e) {
+            // Fall back to all merged PRs count
+          }
+        }
+
+        if (mergedSinceTag >= minMergedPRs) {
+          releaseCandidates.push({
             repo: repoSlug,
-            version: draft.tag_name,
-            url: `https://github.com/${owner}/${name}/releases/${draft.id}`,
+            prCount: mergedSinceTag,
+            lastTag,
           });
         }
       } catch (error) {
-        console.log(`Could not fetch draft releases for ${repoSlug}:`, error);
+        console.log(`Could not check release candidates for ${repoSlug}:`, error);
       }
     }
   } catch (error) {
-    console.error("Failed to get draft releases:", error);
+    console.error("Failed to get release candidates:", error);
   }
 
-  return draftReleases;
+  return releaseCandidates;
 }
 
 async function getPRsWaitingForReview(
@@ -341,7 +389,7 @@ async function collectTaskMetadata(since: Date): Promise<DigestStats> {
     failed: 0,
     timed_out: 0,
     mergedPRs: [],
-    draftReleases: [],
+    releaseCandidates: [],
     reviewWaitingPRs: [],
     creditsSpent: 0,
     repoCredits: [],
@@ -593,14 +641,17 @@ async function createDigestIssue(
     prSection = "\n**Merged PRs**\nNone\n";
   }
 
-  // Build draft releases section
-  let releaseSection = "\n**📦 Draft Releases Ready for Publishing**\n";
-  if (stats.draftReleases.length > 0) {
-    for (const release of stats.draftReleases) {
-      releaseSection += `- [${release.repo} ${release.version}](${release.url}) - Click to review and publish\n`;
+  // Build release candidates section
+  let releaseSection = "\n**🚀 Release Candidates (Ready to Cut)**\n";
+  if (stats.releaseCandidates.length > 0) {
+    releaseSection += "The following repos have N+ merged PRs since the last release:\n";
+    for (const candidate of stats.releaseCandidates) {
+      const lastTagStr = candidate.lastTag ? `since ${candidate.lastTag}` : "all time";
+      releaseSection += `- **${candidate.repo}**: ${candidate.prCount} merged PRs ${lastTagStr}\n`;
+      releaseSection += `  👉 [Create release issue](https://github.com/cenetex/agent/issues/new?template=release.yml)\n`;
     }
   } else {
-    releaseSection = "\n**📦 Draft Releases**\nNone\n";
+    releaseSection = "\n**🚀 Release Candidates**\nNone ready (< 5 merged PRs since last release)\n";
   }
 
   // Build PRs waiting for review section
@@ -768,12 +819,12 @@ export async function handler(): Promise<DigestStats> {
       console.error("Failed to fetch merged PRs:", error);
     }
 
-    // Get draft releases from all repos
+    // Get release candidates from all repos
     try {
-      const draftReleases = await getDraftReleases(githubToken);
-      stats.draftReleases = draftReleases;
+      const releaseCandidates = await getReleaseCandidates(githubToken, since);
+      stats.releaseCandidates = releaseCandidates;
     } catch (error) {
-      console.error("Failed to fetch draft releases:", error);
+      console.error("Failed to fetch release candidates:", error);
     }
 
     // Get PRs waiting for human review
