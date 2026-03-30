@@ -61,6 +61,7 @@ interface DigestStats {
   failuresByRepo: RepoFailureStats[];
   failureCategories: FailureCategoryStats[];
   failureRate: { current: number; sevenDayAverage: number };
+  releaseReadyRepos: Array<{ repo: string; prCount: number; version: string }>;
   errors: string[];
 }
 
@@ -349,6 +350,7 @@ async function collectTaskMetadata(since: Date): Promise<DigestStats> {
     failuresByRepo: [],
     failureCategories: [],
     failureRate: { current: 0, sevenDayAverage: 0 },
+    releaseReadyRepos: [],
     errors: [],
   };
 
@@ -502,6 +504,101 @@ function isRetryableCategory(category: string): boolean {
   return retryableCategories.includes(category);
 }
 
+async function getLatestTag(
+  repoOwner: string,
+  repoName: string,
+  token: string
+): Promise<string | null> {
+  try {
+    const response = await githubRequest(
+      `/repos/${repoOwner}/${repoName}/releases/latest`,
+      token,
+      { method: "GET" },
+      [200, 404]
+    );
+
+    if (response.status === 404) {
+      return null;
+    }
+
+    const release = await response.json() as any;
+    return release.tag_name;
+  } catch (error) {
+    console.error(`Failed to get latest tag for ${repoOwner}/${repoName}:`, error);
+    return null;
+  }
+}
+
+function bumpVersion(currentVersion: string): string {
+  const parts = currentVersion.replace(/^v/, "").split(".");
+  const major = parseInt(parts[0], 10);
+  const minor = parseInt(parts[1] || "0", 10);
+
+  // Bump minor version
+  return `v${major}.${minor + 1}.0`;
+}
+
+async function checkHighPriorityBugs(
+  repoOwner: string,
+  repoName: string,
+  token: string
+): Promise<number> {
+  try {
+    const response = await githubRequest(
+      `/repos/${repoOwner}/${repoName}/issues?state=open&labels=priority:high&per_page=1`,
+      token,
+      { method: "GET" },
+      [200]
+    );
+
+    const data = await response.json() as any;
+    return Array.isArray(data) ? data.length : 0;
+  } catch (error) {
+    console.error(`Failed to check priority:high bugs for ${repoOwner}/${repoName}:`, error);
+    return 0; // Assume no blockers on error
+  }
+}
+
+async function checkReleaseReadiness(
+  token: string,
+  mergedPRsByRepo: Map<string, Array<{ title: string; number: number }>>,
+  minPRsForRelease: number = 5
+): Promise<Array<{ repo: string; prCount: number; version: string }>> {
+  const releaseReady: Array<{ repo: string; prCount: number; version: string }> = [];
+
+  for (const [repoSlug, prs] of mergedPRsByRepo.entries()) {
+    try {
+      const { owner, name } = parseRepoSlug(repoSlug);
+
+      // Check if enough PRs merged
+      if (prs.length < minPRsForRelease) {
+        continue;
+      }
+
+      // Check for high-priority bugs
+      const highPriorityCount = await checkHighPriorityBugs(owner, name, token);
+      if (highPriorityCount > 0) {
+        console.log(`${repoSlug}: Skipping release due to ${highPriorityCount} priority:high bugs`);
+        continue;
+      }
+
+      // Get next version
+      const latestTag = await getLatestTag(owner, name, token);
+      const nextVersion = latestTag ? bumpVersion(latestTag) : "v0.1.0";
+
+      releaseReady.push({
+        repo: repoSlug,
+        prCount: prs.length,
+        version: nextVersion,
+      });
+    } catch (error) {
+      console.error(`Failed to check release readiness for ${repoSlug}:`, error);
+    }
+  }
+
+  return releaseReady;
+}
+
 async function collectCreditStats(): Promise<{
   repoCredits: Array<{ repo: string; balance: number; spent_today: number }>;
   lowBalanceRepos: Array<{ repo: string; balance: number }>;
@@ -603,6 +700,17 @@ async function createDigestIssue(
     releaseSection = "\n**📦 Draft Releases**\nNone\n";
   }
 
+  // Build release ready section
+  let releaseReadySection = "\n**🚀 Ready to Release**\n";
+  if (stats.releaseReadyRepos.length > 0) {
+    releaseReadySection += "The following repositories meet release criteria (N+ PRs, no priority:high bugs):\n";
+    for (const ready of stats.releaseReadyRepos) {
+      releaseReadySection += `- **${ready.repo}** (${ready.prCount} PRs) → [Create release issue for ${ready.version}](https://github.com/${ready.repo}/issues/new?template=release.yml&title=release:%20cut%20${ready.version})\n`;
+    }
+  } else {
+    releaseReadySection = "\n**🚀 Ready to Release**\nNone at this time\n";
+  }
+
   // Build PRs waiting for review section
   let reviewSection = "\n**⏳ PRs Waiting for Human Review**\n";
   if (stats.reviewWaitingPRs.length > 0) {
@@ -695,6 +803,7 @@ async function createDigestIssue(
 ${total > 0 ? `- **Success Rate: ${successRate}%**` : ""}
 ${failureSection}
 ${prSection}
+${releaseReadySection}
 ${releaseSection}
 ${reviewSection}
 ${creditSection}
@@ -764,6 +873,16 @@ export async function handler(): Promise<DigestStats> {
     try {
       const mergedPRs = await getAllMergedPRs(githubToken, since);
       stats.mergedPRs = mergedPRs;
+
+      // Check which repos are ready for release
+      const mergedPRsByRepo = new Map<string, Array<{ title: string; number: number }>>();
+      for (const pr of mergedPRs) {
+        if (!mergedPRsByRepo.has(pr.repo)) {
+          mergedPRsByRepo.set(pr.repo, []);
+        }
+        mergedPRsByRepo.get(pr.repo)!.push({ title: pr.title, number: pr.number });
+      }
+      stats.releaseReadyRepos = await checkReleaseReadiness(githubToken, mergedPRsByRepo);
     } catch (error) {
       console.error("Failed to fetch merged PRs:", error);
     }

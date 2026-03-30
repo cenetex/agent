@@ -1,0 +1,51 @@
+name: Release
+description: Create a release and publish a new version
+title: 'release: cut v'
+labels: [agent]
+assignees: []
+body:
+  - type: markdown
+    attributes:
+      value: |
+        This template is used by the agent to create a new release version. The agent will:
+        1. Run `scripts/release.sh` with the specified version bump (major/minor/patch)
+        2. Create and push the version tag
+        3. Verify the deploy workflow is triggered
+
+  - type: textarea
+    id: changes
+    attributes:
+      label: Changes Since Previous Release
+      description: List the major changes included in this release
+      placeholder: |
+        - fix(handlers): gallery service test fixes (#1189)
+        - chore(handlers): remove Moltbook (#1198)
+        - feat(ci): add Twitter/X canary (#1194)
+      validations:
+        required: true
+
+  - type: dropdown
+    id: version-bump
+    attributes:
+      label: Version Bump Type
+      description: Which part of the version should be incremented?
+      options:
+        - major (v0.26.0 → v1.0.0)
+        - minor (v0.26.0 → v0.27.0)
+        - patch (v0.26.0 → v0.26.1)
+      default: 1
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: acceptance-criteria
+    attributes:
+      label: Acceptance Criteria
+      description: Verify these steps are completed
+      options:
+        - label: Run scripts/release.sh with the specified version bump
+          required: true
+        - label: Verify tag created and pushed to repository
+          required: true
+        - label: Verify deploy workflow triggered
+          required: true
