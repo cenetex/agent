@@ -767,11 +767,49 @@ export class GitHubAgentStack extends cdk.Stack {
     });
 
     // -------------------------------------------------------
+    // Credit Admin Handler (manage credits)
+    // -------------------------------------------------------
+    const creditAdminHandler = new NodejsFunction(this, "CreditAdminHandler", {
+      entry: path.join(__dirname, "credit-admin-handler.ts"),
+      handler: "handler",
+      runtime: lambda.Runtime.NODEJS_20_X,
+      architecture: lambda.Architecture.ARM_64,
+      timeout: cdk.Duration.seconds(30),
+      memorySize: 256,
+      bundling: {
+        minify: true,
+        sourceMap: true,
+        target: "node20",
+        externalModules: [],
+      },
+      environment: {
+        ARTIFACTS_BUCKET: artifactsBucket.bucketName,
+        // Optional: set ADMIN_API_KEY in Lambda environment for auth
+      },
+    });
+
+    artifactsBucket.grantReadWrite(creditAdminHandler);
+
+    httpApi.addRoutes({
+      path: "/credits",
+      methods: [apigwv2.HttpMethod.POST],
+      integration: new apigwv2Integrations.HttpLambdaIntegration(
+        "CreditAdminIntegration",
+        creditAdminHandler
+      ),
+    });
+
+    // -------------------------------------------------------
     // Outputs
     // -------------------------------------------------------
     new cdk.CfnOutput(this, "WebhookUrl", {
       value: `${httpApi.apiEndpoint}/webhook`,
       description: "URL to configure as GitHub webhook endpoint",
+    });
+
+    new cdk.CfnOutput(this, "CreditsAdminUrl", {
+      value: `${httpApi.apiEndpoint}/credits`,
+      description: "URL for credit administration API",
     });
 
     new cdk.CfnOutput(this, "EcrRepositoryUri", {

@@ -10,6 +10,7 @@
     "synth": "cd infra && npx cdk synth",
     "test": "cd infra && npm run test",
     "test:watch": "cd infra && npm run test:watch",
+    "credits": "npx ts-node scripts/credit-admin.ts",
     "prepare": "husky install"
   },
   "devDependencies": {
