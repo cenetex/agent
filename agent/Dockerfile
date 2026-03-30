@@ -28,9 +28,9 @@ WORKDIR /work
 COPY lib/common.sh /lib/common.sh
 RUN chmod +x /lib/common.sh
 
-USER agent
-
 COPY entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh
+
+USER agent
 
 ENTRYPOINT ["/entrypoint.sh"]

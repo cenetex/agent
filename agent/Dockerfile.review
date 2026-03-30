@@ -28,10 +28,10 @@ WORKDIR /work
 COPY lib/common.sh /lib/common.sh
 RUN chmod +x /lib/common.sh
 
-USER agent
-
 # Copy the review entrypoint script
 COPY review-entrypoint.sh /review-entrypoint.sh
 RUN chmod +x /review-entrypoint.sh
+
+USER agent
 
 ENTRYPOINT ["/review-entrypoint.sh"]
