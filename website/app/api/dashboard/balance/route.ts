@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { S3Client, GetObjectCommand } from '@aws-sdk/client-s3'
 import { getServerSession } from 'next-auth'
-import { authOptions } from '@/app/api/auth/[...nextauth]'
+import { authOptions } from '@/app/lib/auth'
 
 const s3Client = new S3Client({
   region: process.env.AWS_REGION || 'us-east-1',

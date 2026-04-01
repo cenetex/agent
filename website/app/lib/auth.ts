@@ -1,4 +1,3 @@
-import NextAuth from "next-auth"
 import type { JWT } from "next-auth/jwt"
 import type { User, Session } from "next-auth"
 import GithubProvider from "next-auth/providers/github"
@@ -47,6 +46,3 @@ export const authOptions = {
     },
   },
 }
-
-export const handler = NextAuth(authOptions)
-export { handler as GET, handler as POST }
