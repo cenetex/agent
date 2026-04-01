@@ -1,8 +1,3 @@
-'use client'
-
-import { signIn } from 'next-auth/react'
-import { FiGithub } from 'react-icons/fi'
-
 export default function SignIn() {
   return (
     <div className="min-h-screen flex items-center justify-center bg-gradient-to-br from-blue-50 to-indigo-100">
@@ -12,13 +7,15 @@ export default function SignIn() {
           Manage your credits and view task history
         </p>
 
-        <button
-          onClick={() => signIn('github', { redirect: true, callbackUrl: '/dashboard' })}
-          className="w-full flex items-center justify-center gap-2 bg-gray-900 text-white px-4 py-3 rounded-lg hover:bg-gray-800 transition font-semibold"
-        >
-          <FiGithub className="w-5 h-5" />
-          Sign in with GitHub
-        </button>
+        <div className="bg-yellow-50 border border-yellow-200 rounded-lg p-4">
+          <p className="text-yellow-800 text-sm">
+            GitHub OAuth sign-in is coming soon. Contact us at{' '}
+            <a href="https://github.com/cenetex/agent" className="text-blue-600 hover:text-blue-700 font-medium">
+              github.com/cenetex/agent
+            </a>{' '}
+            to get started.
+          </p>
+        </div>
 
         <p className="text-center text-gray-600 mt-6 text-sm">
           We only use your GitHub account to verify your identity and show your repository credits.

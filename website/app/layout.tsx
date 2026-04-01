@@ -2,7 +2,6 @@ import type { Metadata } from 'next'
 import './globals.css'
 import { Navigation } from '@/components/navigation'
 import { Footer } from '@/components/footer'
-import { Providers } from './providers'
 
 export const metadata: Metadata = {
   title: 'Agent - Autonomous GitHub Coding Agent',
@@ -18,13 +17,11 @@ export default function RootLayout({
   return (
     <html lang="en">
       <body className="bg-white">
-        <Providers>
-          <Navigation />
-          <main className="min-h-screen">
-            {children}
-          </main>
-          <Footer />
-        </Providers>
+        <Navigation />
+        <main className="min-h-screen">
+          {children}
+        </main>
+        <Footer />
       </body>
     </html>
   )
