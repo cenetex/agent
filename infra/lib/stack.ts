@@ -701,6 +701,46 @@ export class GitHubAgentStack extends cdk.Stack {
     groomingRule.addTarget(new targets.LambdaFunction(groomingHandler));
 
     // -------------------------------------------------------
+    // Triage Handler Lambda
+    // -------------------------------------------------------
+    const triageHandler = new NodejsFunction(this, "TriageHandler", {
+      entry: path.join(__dirname, "triage-handler.ts"),
+      handler: "handler",
+      runtime: lambda.Runtime.NODEJS_20_X,
+      architecture: lambda.Architecture.ARM_64,
+      timeout: cdk.Duration.minutes(5),
+      memorySize: 256,
+      bundling: {
+        minify: true,
+        sourceMap: true,
+        target: "node20",
+        externalModules: [],
+      },
+      environment: {
+        GITHUB_APP_ID_PARAM: PARAM_GITHUB_APP_ID,
+        GITHUB_APP_PRIVATE_KEY_PARAM: PARAM_GITHUB_APP_PRIVATE_KEY,
+        MONITORED_REPOS: "cenetex/aws-swarm,cenetex/kyro,cenetex/raticross,cenetex/ratibot,cenetex/litigation,cenetex/agent,cenetex/governance",
+      },
+    });
+
+    triageHandler.addToRolePolicy(
+      new iam.PolicyStatement({
+        actions: ["ssm:GetParameter"],
+        resources: ssmParamArns,
+      })
+    );
+
+    // -------------------------------------------------------
+    // EventBridge rule to trigger triage handler (every 15 minutes)
+    // -------------------------------------------------------
+    const triageRule = new events.Rule(this, "TriageRule", {
+      description: "Trigger issue triage scan every 15 minutes",
+      schedule: events.Schedule.rate(cdk.Duration.minutes(15)),
+    });
+
+    triageRule.addTarget(new targets.LambdaFunction(triageHandler));
+
+    // -------------------------------------------------------
     // API Gateway HTTP API
     // -------------------------------------------------------
     const httpApi = new apigwv2.HttpApi(this, "WebhookApi", {
