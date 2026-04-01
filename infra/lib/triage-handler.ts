@@ -235,7 +235,6 @@ async function breakDownIssue(
   try {
     const client = new Anthropic({
       apiKey,
-      baseURL: process.env.ANTHROPIC_BASE_URL,
     });
 
     const prompt = `You are a technical triage assistant. The following issue has too many acceptance criteria and should be broken down into smaller, more focused issues.
