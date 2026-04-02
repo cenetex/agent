@@ -102,9 +102,10 @@ format_review_findings() {
 
   # Use jq to format the findings as markdown
   echo "$findings_json" | jq -r '
-    def status_icon: if . == "pass" then "✅" elif . == "fail" then "❌" else "❓" end;
+    def status_icon: if . == "pass" then "✅" elif . == "fail" then "❌" elif . == "warn" then "⚠️" else "❓" end;
 
-    "### Compilation/Linting: \(.findings.compilation.status | status_icon)\n\(.findings.compilation.details // "")\n" +
+    "### Forbidden Files: \(.findings.forbidden_files.status | status_icon)\n\(.findings.forbidden_files.details // "")\n" +
+    "\n### Compilation/Linting: \(.findings.compilation.status | status_icon)\n\(.findings.compilation.details // "")\n" +
     "\n### Security: \(.findings.security.status | status_icon)\n" +
     (if (.findings.security.issues | length) > 0 then
       "Issues found:\n" + (.findings.security.issues | map("- \(.)") | join("\n")) + "\n"
@@ -115,7 +116,8 @@ format_review_findings() {
       "Issues found:\n" + (.findings.logic.issues | map("- \(.)") | join("\n")) + "\n"
     else "" end) +
     "\n### Complexity: \(.findings.complexity.status | status_icon)\n\(.findings.complexity.details // "")\n" +
-    "\n### Cost Impact: \(.findings.cost_impact.status | status_icon)\n\(.findings.cost_impact.details // "")\n"
+    "\n### Cost Impact: \(.findings.cost_impact.status | status_icon)\n\(.findings.cost_impact.details // "")\n" +
+    "\n### Scope: \(.findings.scope.status | status_icon)\n\(.findings.scope.details // "")\n"
   '
 }
 
@@ -281,6 +283,110 @@ CI_CHECKS=$(gh pr checks "${PR_NUMBER}" -R "${REPO}" 2>/dev/null || echo "unavai
 
 echo "PR context fetched. Linked issues: ${LINKED_ISSUES:-none}"
 
+# --- Check for forbidden files ---
+CURRENT_STAGE="check forbidden files"
+echo "Checking for forbidden files..."
+
+FORBIDDEN_FILES=()
+FORBIDDEN_PATTERNS=(
+  '.backup'
+  '.bak'
+  '.orig'
+  '.env'
+  'credentials.'
+  'secret'
+  '.key'
+  '.pem'
+  'node_modules/'
+  '__pycache__/'
+)
+
+# Get list of changed files
+CHANGED_FILES=$(echo "$PR_JSON" | jq -r '.files[].path' 2>/dev/null || echo "")
+
+# Check for forbidden patterns
+for file in $CHANGED_FILES; do
+  # Skip binary/symlink detection issues
+  [[ -z "$file" ]] && continue
+
+  # Check each pattern
+  for pattern in "${FORBIDDEN_PATTERNS[@]}"; do
+    if [[ "$file" == *"$pattern"* ]]; then
+      FORBIDDEN_FILES+=("$file")
+      break
+    fi
+  done
+
+  # Also check for large files (> 500KB)
+  # Get file size from diff statistics if available
+  if echo "$DIFF" | grep -q "^diff --git.*$file"; then
+    # Count additions in the diff for this file as rough size estimate
+    file_additions=$(echo "$DIFF" | awk "/^diff --git.*$file/,/^diff --git/ {print}" | grep -c "^+")
+    # If more than ~6000 additions (very rough estimate for 500KB), flag it
+    if [ "$file_additions" -gt 6000 ]; then
+      FORBIDDEN_FILES+=("$file (large file: ~$((file_additions / 10))KB)")
+    fi
+  fi
+done
+
+if [ ${#FORBIDDEN_FILES[@]} -gt 0 ]; then
+  echo "ERROR: Forbidden files detected:"
+  for file in "${FORBIDDEN_FILES[@]}"; do
+    echo "  - $file"
+  done
+  echo "Forbidden files will be flagged in review findings"
+fi
+
+# --- Extract acceptance criteria from linked issue ---
+CURRENT_STAGE="extract acceptance criteria"
+echo "Extracting acceptance criteria from linked issues..."
+
+ACCEPTANCE_CRITERIA=""
+if [ -n "$LINKED_ISSUES" ]; then
+  # Extract first issue number
+  FIRST_ISSUE=$(echo "$LINKED_ISSUES" | awk '{print $1}' | tr -d '#')
+
+  if [ -n "$FIRST_ISSUE" ]; then
+    echo "Fetching linked issue #${FIRST_ISSUE}..."
+    ISSUE_JSON=$(gh issue view "${FIRST_ISSUE}" -R "${REPO}" --json body 2>&1 | jq -r '.body // ""' 2>/dev/null || echo "")
+
+    if [ -n "$ISSUE_JSON" ]; then
+      # Extract checkbox items as acceptance criteria
+      ACCEPTANCE_CRITERIA=$(echo "$ISSUE_JSON" | grep -E '^\s*-\s*\[[\s|x|X]\]' | sed 's/^[[:space:]]*-[[:space:]]*\[[^]]*\][[:space:]]*//g' || echo "")
+
+      if [ -n "$ACCEPTANCE_CRITERIA" ]; then
+        echo "Found acceptance criteria:"
+        echo "$ACCEPTANCE_CRITERIA" | head -5
+      fi
+    fi
+  fi
+fi
+
+# --- Check PR scope (file count and line count) ---
+CURRENT_STAGE="check PR scope"
+echo "Analyzing PR scope..."
+
+FILES_CHANGED=$(echo "$PR_JSON" | jq '.files | length')
+LINES_ADDED=$(echo "$DIFF" | grep -c "^+" || echo "0")
+LINES_REMOVED=$(echo "$DIFF" | grep -c "^-" || echo "0")
+
+echo "PR Statistics:"
+echo "  Files changed: $FILES_CHANGED"
+echo "  Lines added: $LINES_ADDED"
+echo "  Lines removed: $LINES_REMOVED"
+
+SCOPE_WARNING=""
+if [ "$FILES_CHANGED" -gt 10 ]; then
+  SCOPE_WARNING="$SCOPE_WARNING⚠️ Large file count: $FILES_CHANGED files changed (threshold: 10)\n"
+fi
+if [ "$LINES_ADDED" -gt 1000 ]; then
+  SCOPE_WARNING="$SCOPE_WARNING⚠️ Large addition: $LINES_ADDED lines added (threshold: 1000)\n"
+fi
+
+if [ -n "$SCOPE_WARNING" ]; then
+  echo "Scope warnings detected"
+fi
+
 # --- Build the review prompt ---
 CURRENT_STAGE="run review analysis"
 echo "Starting automated review analysis..."
@@ -296,11 +402,25 @@ REVIEW_MISSION="You are an automated code review agent for PR #${PR_NUMBER} in $
 **BASE SHA:** ${BASE_SHA}
 **Linked Issues:** ${LINKED_ISSUES:-None identified}
 
+## PR Statistics
+- **Files Changed:** ${FILES_CHANGED}
+- **Lines Added:** ${LINES_ADDED}
+- **Lines Removed:** ${LINES_REMOVED}
+
 ## PR Context
 ${PR_JSON}
 
 ## CI Status (Real Data)
 ${CI_CHECKS}
+
+## Forbidden Files Detected
+$(if [ ${#FORBIDDEN_FILES[@]} -gt 0 ]; then echo "The following forbidden files were found in this PR:"; for file in "${FORBIDDEN_FILES[@]}"; do echo "- \`$file\`"; done; else echo "No forbidden files detected (good!)"; fi)
+
+## Acceptance Criteria from Linked Issue
+$(if [ -n "$ACCEPTANCE_CRITERIA" ]; then echo "$ACCEPTANCE_CRITERIA" | sed 's/^/- [ ] /g'; else echo "No acceptance criteria found in linked issue(s)"; fi)
+
+## Scope Assessment
+$(if [ -n "$SCOPE_WARNING" ]; then echo -e "$SCOPE_WARNING"; else echo "PR scope is within normal limits"; fi)
 
 ### How to Interpret CI Status
 - If all checks are passing or not yet run: Proceed with code review
@@ -309,23 +429,39 @@ ${CI_CHECKS}
   - If NO (pre-existing failures): Note this but don't block approval
 - If CI hasn't completed: Note in your review that CI is still pending
 
+## File Blocklist Rules
+AUTO-REJECT PRs containing the following files:
+- **Backup files**: \`*.backup\`, \`*.bak\`, \`*.orig\`
+- **Credentials**: \`.env\`, \`credentials.*\`, \`*secret*\`, \`*.key\`, \`*.pem\`
+- **Package directories**: \`node_modules/\`, \`__pycache__/\`
+- **Large files**: Any single file > 500KB
+- **Protected paths**: CI/CD workflows, infrastructure code, deployment scripts
+
+If ANY forbidden file is found, set decision to "changes_requested" with a summary explaining the file violations.
+
 ## Review Criteria
 You must evaluate this PR against the following criteria and provide structured findings:
 
-1. **Compilation/Linting**: Does the code compile and pass basic linting? Factor in CI results.
-2. **Security**: Are there any security issues (secret exposure, injection vulnerabilities, unsafe patterns)?
-3. **Issue Alignment**: Does this PR actually address the linked issue(s)?
-4. **Logic**: Are there obvious logic errors or bugs? Factor in CI results for test failures.
-5. **Complexity**: Does it introduce unnecessary complexity or scope creep?
-6. **Cost Impact**: Are there concerning cost implications (new infrastructure, expensive dependencies)?
-7. **CI Status**: Are there CI failures in changed files? Pre-existing failures should not block approval.
+1. **File Blocklist**: Are there forbidden files (backups, credentials, large files)? (REQUIRED)
+2. **Compilation/Linting**: Does the code compile and pass basic linting? Factor in CI results.
+3. **Security**: Are there any security issues (secret exposure, injection vulnerabilities, unsafe patterns)?
+4. **Issue Alignment**: Does this PR actually address the linked issue(s)?
+5. **Logic**: Are there obvious logic errors or bugs? Factor in CI results for test failures.
+6. **Complexity**: Does it introduce unnecessary complexity or scope creep?
+7. **Cost Impact**: Are there concerning cost implications (new infrastructure, expensive dependencies)?
+8. **CI Status**: Are there CI failures in changed files? Pre-existing failures should not block approval.
+9. **Acceptance Criteria**: If the PR references a linked issue with acceptance criteria checkboxes, verify that the diff addresses each item.
+10. **Scope Warning**: Flag if PR touches >10 files or adds >1000 lines (warn but don't reject).
 
 ## Your Tasks
-1. **Examine the codebase**: Use your tools to read relevant files and understand the changes
-2. **Analyze the diff**: Review the actual changes being made
-3. **Check for issues**: Look for the problems listed in the review criteria
-4. **Make a decision**: Determine if this should be APPROVED or if CHANGES ARE REQUESTED
-5. **Document findings**: Write findings to a structured JSON file
+1. **Check for forbidden files**: Review the list of forbidden files. If ANY are present, set decision to "changes_requested"
+2. **Examine the codebase**: Use your tools to read relevant files and understand the changes
+3. **Analyze the diff**: Review the actual changes being made
+4. **Check acceptance criteria**: If acceptance criteria were listed, review the diff to verify each criterion is addressed
+5. **Check scope**: Consider if the PR is too large (>10 files or >1000 lines added). Warn in findings if so, but don't reject based on scope alone
+6. **Check for issues**: Look for the problems listed in the review criteria
+7. **Make a decision**: Determine if this should be APPROVED or if CHANGES ARE REQUESTED
+8. **Document findings**: Write findings to a structured JSON file
 
 ## Output Format
 After completing your review, write your findings to a JSON file at: /tmp/review-findings.json
@@ -336,6 +472,10 @@ The file must have exactly this structure:
   \"decision\": \"approved\" or \"changes_requested\",
   \"summary\": \"Brief summary of the review\",
   \"findings\": {
+    \"forbidden_files\": {
+      \"status\": \"pass\" or \"fail\",
+      \"details\": \"List of forbidden files found (if any)\"
+    },
     \"compilation\": {
       \"status\": \"pass\" or \"fail\" or \"unknown\",
       \"details\": \"Details about compilation/linting\"
@@ -346,7 +486,7 @@ The file must have exactly this structure:
     },
     \"issue_alignment\": {
       \"status\": \"pass\" or \"fail\" or \"unknown\",
-      \"details\": \"Details about issue alignment\"
+      \"details\": \"Details about issue alignment and acceptance criteria\"
     },
     \"logic\": {
       \"status\": \"pass\" or \"fail\" or \"unknown\",
@@ -359,6 +499,10 @@ The file must have exactly this structure:
     \"cost_impact\": {
       \"status\": \"pass\" or \"fail\" or \"unknown\",
       \"details\": \"Details about cost impact\"
+    },
+    \"scope\": {
+      \"status\": \"pass\" or \"warn\" or \"unknown\",
+      \"details\": \"Details about PR scope (files changed, lines added)\"
     }
   }
 }
