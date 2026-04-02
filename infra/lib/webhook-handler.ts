@@ -763,6 +763,102 @@ async function getMainCIHealth(
 }
 
 /**
+ * Checks if a task should be allowed to dispatch despite main CI being broken
+ * Allows: issues with type:bug, priority:high labels, or titles with "fix:" or "CI"
+ * Blocks: everything else (feature work, enhancements, etc.)
+ */
+function isAllowedDespiteMainBroken(
+  issueTitle: string,
+  labels: string[],
+  taskMode: "issue" | "pull_request" | "planning"
+): boolean {
+  // PRs are not blocked (they're being reviewed, not creating new work)
+  if (taskMode === "pull_request") {
+    return true;
+  }
+
+  // Check for explicit bug/critical labels
+  const allowedLabels = new Set(["type:bug", "priority:high", "emergency", "hotfix"]);
+  if (labels.some(label => allowedLabels.has(label.toLowerCase()))) {
+    return true;
+  }
+
+  // Check title for fix/CI keywords
+  const titleLower = issueTitle.toLowerCase();
+  if (titleLower.includes("fix:") || titleLower.includes("ci:") || titleLower.includes("ci ")) {
+    return true;
+  }
+
+  return false;
+}
+
+/**
+ * Unblocks issues that were blocked due to main CI being broken
+ * Called when main branch CI goes green - re-adds agent label to trigger dispatch
+ */
+async function unblockMainBrokenIssues(
+  repoOwner: string,
+  repoName: string,
+  token: string
+): Promise<number> {
+  try {
+    // List all open issues with the blocked:main-broken label
+    const response = await githubRequest(
+      `/repos/${repoOwner}/${repoName}/issues?state=open&labels=${encodeURIComponent(BLOCKED_MAIN_BROKEN_LABEL)}&per_page=100`,
+      token,
+      { method: "GET" },
+      [200]
+    );
+
+    const issues = await response.json() as any[];
+    console.log(`Found ${issues.length} open issue(s) with blocked:main-broken label`);
+
+    let unblockedCount = 0;
+
+    for (const issue of issues) {
+      const issueNumber = issue.number;
+
+      console.log(`Unblocking issue #${issueNumber}: ${issue.title}`);
+
+      // Remove the blocked:main-broken label
+      await deleteLabelIfPresent(repoOwner, repoName, issueNumber, token, BLOCKED_MAIN_BROKEN_LABEL);
+
+      // Add the agent trigger label
+      await githubRequest(
+        `/repos/${repoOwner}/${repoName}/issues/${issueNumber}/labels`,
+        token,
+        {
+          method: "POST",
+          body: JSON.stringify({ labels: [TRIGGER_LABEL] }),
+        },
+        [200]
+      );
+
+      // Post unblocking comment
+      await addIssueComment(
+        repoOwner,
+        repoName,
+        issueNumber,
+        token,
+        `🎉 **Unblocked — Main branch CI is now healthy!**
+
+The main branch CI is now passing. This issue is no longer blocked and has been re-labeled with \`${TRIGGER_LABEL}\` for dispatch.
+
+The agent will process this on the next available cycle.`
+      );
+
+      unblockedCount++;
+    }
+
+    console.log(`Unblocked ${unblockedCount} issue(s)`);
+    return unblockedCount;
+  } catch (error) {
+    console.error(`Failed to unblock main-broken issues: ${error}`);
+    return 0;
+  }
+}
+
+/**
  * Parses PR body for issue references like "Fixes #123" or "Closes owner/repo#123"
  * Returns array of { issue_number, repo_owner, repo_name } for cross-repo refs
  */
@@ -3603,6 +3699,15 @@ export async function handler(event: {
       const appConfig: GitHubAppConfig = { appId, privateKey };
       const githubToken = await getInstallationToken(repoOwner, repoName, appConfig);
 
+      // Check if main CI is now healthy - if so, unblock main-broken issues
+      const mainIsNowHealthy = await getMainCIHealth(repoOwner, repoName, githubToken);
+      if (mainIsNowHealthy) {
+        console.log(`Main branch CI is now healthy, scanning for blocked:main-broken issues to unblock`);
+        await unblockMainBrokenIssues(repoOwner, repoName, githubToken);
+      } else {
+        console.log(`Main branch CI is still broken, skipping auto-unblock`);
+      }
+
       // Scan open PRs for merge conflicts
       await handleMergeConflictDetection(
         repoOwner,
@@ -3756,6 +3861,64 @@ export async function handler(event: {
   if (await checkForActiveTasks(repoSlug, issueNumber)) {
     console.log(`Issue #${issueNumber} has an active task in S3, skipping`);
     return { statusCode: 200, body: "Already running (active task found)" };
+  }
+
+  // --- Check main CI health and block feature work if broken ---
+  const mainIsHealthy = await getMainCIHealth(repoOwner, repoName, githubToken);
+  if (!mainIsHealthy && !isPR) {
+    // Main branch CI is broken - check if this is allowed work (bugs, hotfixes, CI fixes)
+    const issueTitle = issueData.title;
+    const isAllowed = isAllowedDespiteMainBroken(issueTitle, issueLabels, isPR ? "pull_request" : "issue");
+
+    if (!isAllowed) {
+      console.log(`Main CI is broken and issue #${issueNumber} is not a bug/critical fix - blocking dispatch`);
+
+      await ensureSignalLabels(repoOwner, repoName, githubToken);
+
+      // Add blocked label
+      await githubRequest(
+        `/repos/${repoOwner}/${repoName}/issues/${issueNumber}/labels`,
+        githubToken,
+        {
+          method: "POST",
+          body: JSON.stringify({ labels: [BLOCKED_MAIN_BROKEN_LABEL] }),
+        },
+        [200]
+      );
+
+      // Post informational comment
+      await addIssueComment(
+        repoOwner,
+        repoName,
+        issueNumber,
+        githubToken,
+        `⛔ **Dispatch blocked: main branch CI is red**
+
+The agent cannot dispatch feature work while the main branch has failing CI checks. This helps prevent wasting credits on PRs that will fail due to pre-existing issues.
+
+**What's happening:**
+- Main branch CI status: ❌ BROKEN
+- Issue type: Feature work (not a bug fix or critical fix)
+
+**To proceed:**
+1. **Quick fix:** Get the main branch CI passing again
+2. **Or:** Add a \`type:bug\` or \`priority:high\` label if this is actually a critical fix
+3. **Or:** Include "fix:" or "CI" in the issue title
+
+Once main is healthy or the issue is marked as a critical fix, re-label with \`agent\` to retry.`
+      );
+
+      return {
+        statusCode: 200,
+        body: JSON.stringify({
+          message: "Dispatch blocked: main CI is broken",
+          issueNumber,
+          reason: "feature work on broken main"
+        }),
+      };
+    } else {
+      console.log(`Main CI is broken but issue #${issueNumber} is allowed (bug/critical fix), proceeding`);
+    }
   }
 
   await ensureSignalLabels(repoOwner, repoName, githubToken);
