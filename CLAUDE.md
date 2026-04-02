@@ -70,3 +70,12 @@ Override with `.github/AGENT.md` in target repo:
 ```
 model: anthropic/claude-opus-4-6
 ```
+
+## Agent Focus Guardrails
+
+The agent is explicitly instructed to work ONLY on the assigned issue/PR, never drift to related issues. This is enforced in the mission prompt which states:
+
+- For issues: "You are working exclusively on issue #N. Do NOT work on other issues."
+- For PRs: "You are reviewing and working exclusively on PR #N. Do NOT work on other PRs or issues."
+
+Related issues, if referenced in the task description, are treated as context only and must not be worked on.

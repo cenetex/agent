@@ -811,6 +811,18 @@ TASK (from issue #${ISSUE_NUMBER}):
 
 You have been triggered by the 'diagnose' label on issue #${ISSUE_NUMBER} in ${REPO}.
 
+## CRITICAL FOCUS GUARDRAILS
+
+**You are working exclusively on the diagnostic task in issue #${ISSUE_NUMBER}. Do NOT investigate other issues.**
+
+Your ONLY goal is to diagnose and report on the specific problem described in THIS issue (#${ISSUE_NUMBER}).
+If the issue references other failing tasks or issues:
+- Those are CONTEXT ONLY — reference them as needed
+- Do NOT investigate or fix those other issues
+- Focus exclusively on the diagnostic task for #${ISSUE_NUMBER}
+
+---
+
 Here is the issue context:
 ${CONTEXT}
 
@@ -848,6 +860,19 @@ TASK (from PR #${ISSUE_NUMBER}):
 
 You have been triggered by the 'agent' label on PR #${ISSUE_NUMBER} in ${REPO}.
 
+## CRITICAL FOCUS GUARDRAILS
+
+**You are reviewing and working exclusively on PR #${ISSUE_NUMBER}. Do NOT work on other PRs or issues.**
+
+Your ONLY goal is to review changes in THIS PR (#${ISSUE_NUMBER}) and make improvements if needed.
+If the PR references, links to, or mentions other issues or PRs:
+- Those are CONTEXT ONLY — read them to understand the context
+- Do NOT implement or address them
+- Do NOT create new PRs for other issues
+- Focus exclusively on the changes in PR #${ISSUE_NUMBER}
+
+---
+
 Here is the PR context:
 ${CONTEXT}
 
@@ -877,6 +902,18 @@ elif [ "${TASK_MODE}" = "planning" ]; then
 TASK (from issue #${ISSUE_NUMBER}):
 
 You have been triggered by the 'agent' label on issue #${ISSUE_NUMBER} in ${REPO}.
+
+## CRITICAL FOCUS GUARDRAILS
+
+**You are working exclusively on the planning task in issue #${ISSUE_NUMBER}. Do NOT work on other issues.**
+
+Your ONLY goal is to complete the planning task described in THIS issue (#${ISSUE_NUMBER}).
+If the issue references or mentions other issues:
+- Those are CONTEXT ONLY — use them to inform your analysis
+- Do NOT work on or implement those other issues
+- Focus exclusively on the planning deliverables for #${ISSUE_NUMBER}
+
+---
 
 Here is the issue context:
 ${CONTEXT}
@@ -921,6 +958,21 @@ Only create a new PR if the existing one is fundamentally broken or takes a wron
 TASK (from issue #${ISSUE_NUMBER}):
 
 You have been triggered by the 'agent' label on issue #${ISSUE_NUMBER} in ${REPO}.
+
+## CRITICAL FOCUS GUARDRAILS
+
+**You are working exclusively on issue #${ISSUE_NUMBER}. Do NOT work on other issues.**
+
+Your ONLY goal is to satisfy the acceptance criteria and description in THIS issue (#${ISSUE_NUMBER}).
+If the issue references, links to, or mentions other issues or PRs:
+- Those are CONTEXT ONLY — read them to understand the big picture
+- Do NOT implement or address them
+- Do NOT create PRs for related issues
+- Focus exclusively on #${ISSUE_NUMBER}
+
+Example: If issue #${ISSUE_NUMBER} mentions \"related to issue #50\", do NOT work on #50. Only work on #${ISSUE_NUMBER}.
+
+---
 
 Here is the issue context:
 ${CONTEXT}${EXISTING_PR_NOTE}
