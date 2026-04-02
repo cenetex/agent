@@ -201,6 +201,83 @@ async function getCreditBalance(repoSlug: string): Promise<CreditBalance | null>
 }
 
 /**
+ * Checks if the main branch CI is healthy
+ * Returns true if main's checks are all passing, false otherwise
+ */
+async function getMainCIHealth(
+  repo: string,
+  token: string
+): Promise<boolean> {
+  try {
+    const [owner, repoName] = repo.split("/");
+
+    // Get the default branch (usually main) commit SHA
+    const repoResponse = await githubRequest(
+      `/repos/${repo}`,
+      token,
+      { method: "GET" },
+      [200]
+    );
+
+    const repoData = await repoResponse.json() as any;
+    const defaultBranch = repoData.default_branch;
+
+    // Get the latest commit on the default branch
+    const branchResponse = await githubRequest(
+      `/repos/${repo}/branches/${defaultBranch}`,
+      token,
+      { method: "GET" },
+      [200]
+    );
+
+    const branchData = await branchResponse.json() as any;
+    const mainSha = branchData.commit.sha;
+
+    // Get combined check status for main
+    const statusResponse = await githubRequest(
+      `/repos/${repo}/commits/${mainSha}/status`,
+      token,
+      { method: "GET" },
+      [200]
+    );
+
+    const statusData = await statusResponse.json() as any;
+    return statusData.state === "success";
+  } catch (error) {
+    console.error(`Failed to check main CI health for ${repo}:`, error);
+    return true; // Assume healthy on error to avoid false negatives
+  }
+}
+
+/**
+ * Checks if an issue is allowed to be labeled despite broken CI
+ * Allows: issues with type:bug or priority:high labels
+ */
+function isAllowedDespiteMainBroken(labels: any[]): boolean {
+  const allowedLabels = new Set(["type:bug", "priority:high", "emergency", "hotfix"]);
+  return labels.some((label: any) => {
+    const name = label.name || label;
+    return allowedLabels.has(name.toLowerCase());
+  });
+}
+
+/**
+ * Gets the priority rank of an issue for sorting
+ * Returns higher number for higher priority
+ */
+function getPriorityRank(labels: any[]): number {
+  const labelNames = labels.map((l: any) => (l.name || l).toLowerCase());
+
+  if (labelNames.includes("priority:high") || labelNames.includes("emergency")) return 100;
+  if (labelNames.includes("priority:critical")) return 110;
+  if (labelNames.includes("type:bug")) return 80;
+  if (labelNames.includes("priority:medium")) return 50;
+  if (labelNames.includes("priority:low")) return 10;
+
+  return 0; // No explicit priority
+}
+
+/**
  * Adds a label to the issue
  */
 async function addLabel(
@@ -563,6 +640,10 @@ async function scanRepository(
     const creditBalance = await getCreditBalance(repo);
     const hasCredits = !creditBalance || creditBalance.current_balance > 0;
 
+    // Check CI health for this repo
+    const mainCIHealthy = await getMainCIHealth(repo, token);
+    console.log(`${repo}: Main CI is ${mainCIHealthy ? "healthy" : "broken"}`);
+
     // Get all open issues WITHOUT agent or agent:* labels
     const response = await githubRequest(
       `/repos/${repo}/issues?state=open&per_page=100`,
@@ -573,7 +654,14 @@ async function scanRepository(
 
     const allIssues = await response.json() as any[];
 
-    for (const issue of allIssues) {
+    // Sort issues by priority (high priority first)
+    const sortedIssues = allIssues.sort((a, b) => {
+      const priorityA = getPriorityRank(a.labels);
+      const priorityB = getPriorityRank(b.labels);
+      return priorityB - priorityA; // Higher priority first
+    });
+
+    for (const issue of sortedIssues) {
       // Skip if should be skipped
       if (shouldSkip(issue)) {
         continue;
@@ -621,6 +709,12 @@ async function scanRepository(
           continue;
         }
 
+        // Check CI health: if broken, only label bug/high-priority issues
+        if (!mainCIHealthy && !isAllowedDespiteMainBroken(issue.labels)) {
+          console.log(`Issue #${issueNumber}: Would label as agent but main CI is broken and issue is not priority:high/type:bug`);
+          continue;
+        }
+
         await addLabel(repo, issueNumber, "agent", token);
         await postTriageComment(
           repo,
@@ -644,6 +738,12 @@ async function scanRepository(
             `⚠️ **Manual triage needed**: This issue has ${criteria} acceptance criteria (recommended max: ${AGENT_READY_THRESHOLD}). ❌ **Insufficient credits to auto-break down.**\n\nPlease manually break this into smaller issues or add credits.`,
             token
           );
+          continue;
+        }
+
+        // Check CI health: if broken, only break down bug/high-priority issues
+        if (!mainCIHealthy && !isAllowedDespiteMainBroken(issue.labels)) {
+          console.log(`Issue #${issueNumber}: Would break down but main CI is broken and issue is not priority:high/type:bug`);
           continue;
         }
 
