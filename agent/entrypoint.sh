@@ -224,6 +224,39 @@ $(if [ -n "$error_message" ]; then echo "- Error: $error_message"; fi)
   echo "$summary"
 }
 
+create_criteria_check_comment() {
+  local criteria_data="$1"
+
+  local total met summary
+  total=$(echo "$criteria_data" | jq -r '.total_criteria // 0')
+  met=$(echo "$criteria_data" | jq -r '.met_count // 0')
+  summary=$(echo "$criteria_data" | jq -r '.summary // ""')
+
+  # Extract criteria list with symbols
+  local criteria_list
+  criteria_list=$(echo "$criteria_data" | jq -r '.criteria[] | (if .met then "✅" else "❌" end) + " " + .criterion + "\n  " + .evidence' 2>/dev/null || echo "")
+
+  local comment="⚠️ **Acceptance Criteria Not Fully Met**
+
+$criteria_list
+
+**Summary:** ${summary}
+
+**Progress:** ${met}/${total} criteria addressed
+
+Please review the work and either:
+1. Request the agent to address remaining criteria by re-labeling with \`${TRIGGER_LABEL}\`
+2. Close the issue if the criteria were incorrect or this work is sufficient
+
+**Task Details:**
+- Task ID: \`${TASK_ID}\`
+- Commit SHA: \`${RESOLVED_COMMIT_SHA}\`
+
+[View artifacts](https://console.aws.amazon.com/s3/buckets/${ARTIFACTS_BUCKET}?prefix=${ARTIFACT_PREFIX}/)"
+
+  echo "$comment"
+}
+
 on_exit() {
   local exit_code=$?
   local pr_url=""
@@ -235,10 +268,14 @@ on_exit() {
     update_task_metadata "waiting" "" ""
     upload_artifacts "$exit_code" ""
 
-    # Only post waiting summary if it was waiting for a user question (not for permission escalation)
-    if ! grep -q "Permission Error - Agent Escalation" <(gh api "repos/${REPO}/issues/${ISSUE_NUMBER}/comments?per_page=10" \
+    # Check if this is criteria-based waiting (unmet acceptance criteria)
+    if [ -n "${CRITERIA_VERIFICATION_RESULT:-}" ]; then
+      local criteria_comment=$(create_criteria_check_comment "${CRITERIA_VERIFICATION_RESULT}")
+      post_comment "${ISSUE_NUMBER}" "${REPO}" "${criteria_comment}"
+    elif ! grep -q "Permission Error - Agent Escalation" <(gh api "repos/${REPO}/issues/${ISSUE_NUMBER}/comments?per_page=10" \
       --jq '.[] | select(.user.type == "Bot" or .user.login == "github-agent[bot]") | .body' \
       2>/dev/null | head -1); then
+      # Only post waiting summary if it was waiting for a user question (not for permission escalation)
       local summary=$(create_completion_summary "waiting" "" "")
       post_comment "${ISSUE_NUMBER}" "${REPO}" "$summary"
     fi
@@ -910,6 +947,27 @@ Your mission:
 - If you need more information to proceed, post a comment asking for clarification using: gh issue comment ${ISSUE_NUMBER} --body '<your question>'
 - Be concise. Make minimal, focused changes. Don't refactor unrelated code.
 
+**BEFORE FINISHING**, re-read the acceptance criteria from the issue. For each checkbox:
+- If you addressed it: explain how in one line
+- If you did NOT address it: say so explicitly
+
+Write your verification results to /tmp/criteria-check.json with this exact structure:
+\`\`\`json
+{
+  \"criteria_met\": true|false,
+  \"total_criteria\": N,
+  \"met_count\": N,
+  \"criteria\": [
+    {
+      \"criterion\": \"checkbox text\",
+      \"met\": true|false,
+      \"evidence\": \"brief explanation\"
+    }
+  ],
+  \"summary\": \"overall summary of which criteria were addressed\"
+}
+\`\`\`
+
 IMPORTANT: Do not ask for confirmation or approval. Do not say 'Ready to implement?' or 'Shall I proceed?'. Execute immediately. Create the branch, commit, push, and open the PR."
 fi
 
@@ -1007,6 +1065,7 @@ export CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1
 MAX_ATTEMPTS=2
 ATTEMPT=0
 RUN_STATUS=""
+CRITERIA_VERIFICATION_RESULT=""
 
 while [ -z "${RUN_STATUS}" ] && [ "${ATTEMPT}" -lt "${MAX_ATTEMPTS}" ]; do
   ATTEMPT=$((ATTEMPT + 1))
@@ -1132,6 +1191,29 @@ ${ERROR_MESSAGE}
     fi
   elif issue_was_closed "${ISSUE_NUMBER}" "${REPO}"; then
     RUN_STATUS="succeeded"
+  elif [ "${IS_PR}" != "true" ]; then
+    # For issue tasks (not PRs), verify acceptance criteria before declaring success
+    CRITERIA_CHECK_FILE="/tmp/criteria-check.json"
+    if [ -f "${CRITERIA_CHECK_FILE}" ]; then
+      echo "Found criteria check file, evaluating criteria..."
+      CRITERIA_DATA=$(cat "${CRITERIA_CHECK_FILE}")
+      CRITERIA_MET=$(echo "$CRITERIA_DATA" | jq -r '.criteria_met // false')
+
+      if [ "$CRITERIA_MET" = "true" ]; then
+        echo "All acceptance criteria were met" >&2
+        RUN_STATUS="succeeded"
+      else
+        echo "Acceptance criteria not fully met - setting status to waiting" >&2
+        CRITERIA_VERIFICATION_RESULT="$CRITERIA_DATA"
+        RUN_STATUS="waiting"
+        break  # Exit retry loop to post results
+      fi
+    elif has_agent_question_comment "${ISSUE_NUMBER}" "${REPO}" "${RUN_STARTED_AT}"; then
+      RUN_STATUS="waiting"
+    else
+      # No criteria file, no questions - just regular success if PR was created
+      RUN_STATUS="succeeded"
+    fi
   elif has_agent_question_comment "${ISSUE_NUMBER}" "${REPO}" "${RUN_STARTED_AT}"; then
     RUN_STATUS="waiting"
   elif [ "${ATTEMPT}" -lt "${MAX_ATTEMPTS}" ]; then
