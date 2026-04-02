@@ -1105,7 +1105,13 @@ ${ERROR_MESSAGE}
         exit 1
         ;;
       2) RUN_STATUS="succeeded" ;;               # Pre-existing failure on main
-      3) RUN_STATUS="succeeded" ;;               # Timeout — treat as success, CI may be slow
+      3)                                           # Timeout — CI still pending
+        echo "CI poll timeout for PR #${ISSUE_NUMBER} — waiting for CI completion" >&2
+        RUN_STATUS="waiting"
+        post_comment "${ISSUE_NUMBER}" "${REPO}" "⏱️ **CI Status Pending**
+
+CI checks are still running for PR #${ISSUE_NUMBER}. The agent will not mark this as succeeded until CI completes or resolves."
+        ;;
     esac
   elif PR_URL="$(find_created_pr_url "${ISSUE_NUMBER}" "${REPO}" "${RUN_STARTED_AT}")" && [ -n "${PR_URL}" ]; then
     # For newly created PRs, extract PR number and poll CI
@@ -1125,13 +1131,34 @@ ${ERROR_MESSAGE}
           exit 1
           ;;
         2) RUN_STATUS="succeeded" ;;             # Pre-existing failure on main
-        3) RUN_STATUS="succeeded" ;;             # Timeout — treat as success
+        3)                                         # Timeout — CI still pending
+          echo "CI poll timeout for PR #${PR_NUM} — waiting for CI completion" >&2
+          RUN_STATUS="waiting"
+          post_comment "${ISSUE_NUMBER}" "${REPO}" "⏱️ **CI Status Pending**
+
+CI checks are still running for PR #${PR_NUM}. The agent will not mark this as succeeded until CI completes or resolves."
+          ;;
       esac
     else
-      RUN_STATUS="succeeded"
+      # PR URL found but unable to extract PR number — cannot verify CI
+      echo "Unable to extract PR number from URL: ${PR_URL}" >&2
+      RUN_STATUS="waiting"
+      post_comment "${ISSUE_NUMBER}" "${REPO}" "⚠️ **Unable to Verify CI**
+
+The agent created a PR but was unable to verify CI status. Please check the PR and ensure CI passes: ${PR_URL}"
     fi
   elif issue_was_closed "${ISSUE_NUMBER}" "${REPO}"; then
-    RUN_STATUS="succeeded"
+    # Issue was closed — verify that the agent actually pushed code
+    if agent_pushed_commits "${REPO}" "${RUN_STARTED_AT}"; then
+      echo "Issue #${ISSUE_NUMBER} was closed and agent verified to have pushed commits" >&2
+      RUN_STATUS="succeeded"
+    else
+      echo "Issue #${ISSUE_NUMBER} was closed but agent did not push any commits" >&2
+      RUN_STATUS="waiting"
+      post_comment "${ISSUE_NUMBER}" "${REPO}" "⚠️ **Issue Closed but No Commits Found**
+
+The issue was closed, but the agent did not detect any commits pushed during this run. Please verify the issue is actually resolved and reopen if needed."
+    fi
   elif has_agent_question_comment "${ISSUE_NUMBER}" "${REPO}" "${RUN_STARTED_AT}"; then
     RUN_STATUS="waiting"
   elif [ "${ATTEMPT}" -lt "${MAX_ATTEMPTS}" ]; then

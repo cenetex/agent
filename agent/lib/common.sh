@@ -175,3 +175,22 @@ has_agent_question_comment() {
     | length > 0
   ' >/dev/null <<<"${comments_json}"
 }
+
+# Check if agent pushed any commits since a given time
+# Returns: 0 if agent pushed commits, 1 if no commits found
+agent_pushed_commits() {
+  local repo="$1"
+  local since="$2"
+  local committer_email="github-agent[bot]@users.noreply.github.com"
+
+  # Query commits authored/committed by the agent since the given time
+  local commit_count
+  commit_count=$(gh api "repos/${repo}/commits" \
+    --jq ".[] | select(.commit.author.email == \"${committer_email}\" or .commit.committer.email == \"${committer_email}\") | .sha" \
+    2>/dev/null | wc -l)
+
+  if [ "$commit_count" -gt 0 ]; then
+    return 0
+  fi
+  return 1
+}
