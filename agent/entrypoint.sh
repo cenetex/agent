@@ -811,8 +811,28 @@ TASK (from issue #${ISSUE_NUMBER}):
 
 You have been triggered by the 'diagnose' label on issue #${ISSUE_NUMBER} in ${REPO}.
 
+## CRITICAL FOCUS GUARDRAILS
+
+**You are working exclusively on the diagnostic task in issue #${ISSUE_NUMBER}. Do NOT investigate other issues.**
+
+Your ONLY goal is to diagnose and report on the specific problem described in THIS issue (#${ISSUE_NUMBER}).
+If the issue references other failing tasks or issues:
+- Those are CONTEXT ONLY — reference them as needed
+- Do NOT investigate or fix those other issues
+- Focus exclusively on the diagnostic task for #${ISSUE_NUMBER}
+
+---
+
 Here is the issue context:
 ${CONTEXT}
+
+## CRITICAL FOCUS GUARDRAILS:
+**You are working on issue #${ISSUE_NUMBER} ONLY.**
+
+1. **Focus on the assigned issue**: Your ONLY goal is to diagnose the specific problem described in issue #${ISSUE_NUMBER}.
+2. **Do NOT drift to related issues**: If the issue context mentions or links to other issues, those are context only. Do NOT implement, fix, or work on them.
+3. **Do NOT explore tangential problems**: If you discover other issues while diagnosing, ignore them. Stay focused on #${ISSUE_NUMBER}.
+4. **Validate your work**: Before finishing, confirm you addressed the acceptance criteria listed in issue #${ISSUE_NUMBER}, not any other issue.
 
 Your mission:
 - You have read-only access to AWS CloudWatch Logs for this deployment
@@ -840,8 +860,29 @@ TASK (from PR #${ISSUE_NUMBER}):
 
 You have been triggered by the 'agent' label on PR #${ISSUE_NUMBER} in ${REPO}.
 
+## CRITICAL FOCUS GUARDRAILS
+
+**You are reviewing and working exclusively on PR #${ISSUE_NUMBER}. Do NOT work on other PRs or issues.**
+
+Your ONLY goal is to review changes in THIS PR (#${ISSUE_NUMBER}) and make improvements if needed.
+If the PR references, links to, or mentions other issues or PRs:
+- Those are CONTEXT ONLY — read them to understand the context
+- Do NOT implement or address them
+- Do NOT create new PRs for other issues
+- Focus exclusively on the changes in PR #${ISSUE_NUMBER}
+
+---
+
 Here is the PR context:
 ${CONTEXT}
+
+## CRITICAL FOCUS GUARDRAILS:
+**You are reviewing PR #${ISSUE_NUMBER} ONLY.**
+
+1. **Focus on this PR**: Your ONLY goal is to review and improve PR #${ISSUE_NUMBER}.
+2. **Do NOT drift to related issues**: If the PR context mentions or links to other issues, those are context only. Do NOT work on them.
+3. **Do NOT implement features from linked issues**: Focus only on improving this specific PR's code and implementation.
+4. **Validate your work**: Before finishing, confirm you completed the review for PR #${ISSUE_NUMBER}, not for any other PR or issue.
 
 Your mission:
 - Review the PR diff and understand the changes
@@ -862,8 +903,28 @@ TASK (from issue #${ISSUE_NUMBER}):
 
 You have been triggered by the 'agent' label on issue #${ISSUE_NUMBER} in ${REPO}.
 
+## CRITICAL FOCUS GUARDRAILS
+
+**You are working exclusively on the planning task in issue #${ISSUE_NUMBER}. Do NOT work on other issues.**
+
+Your ONLY goal is to complete the planning task described in THIS issue (#${ISSUE_NUMBER}).
+If the issue references or mentions other issues:
+- Those are CONTEXT ONLY — use them to inform your analysis
+- Do NOT work on or implement those other issues
+- Focus exclusively on the planning deliverables for #${ISSUE_NUMBER}
+
+---
+
 Here is the issue context:
 ${CONTEXT}
+
+## CRITICAL FOCUS GUARDRAILS:
+**You are working on planning task #${ISSUE_NUMBER} ONLY.**
+
+1. **Focus on this planning task**: Your ONLY goal is to complete the planning task described in issue #${ISSUE_NUMBER}.
+2. **Do NOT drift to related issues**: If the issue context mentions or links to other issues, those are context only. Do NOT work on them.
+3. **Do NOT implement features**: This is a planning/analysis task. Do NOT write implementation code unless explicitly instructed within issue #${ISSUE_NUMBER}.
+4. **Validate your work**: Before finishing, confirm you completed all deliverables for issue #${ISSUE_NUMBER}, not for any other issue.
 
 Your mission:
 - Understand the planning task described in the issue
@@ -898,8 +959,31 @@ TASK (from issue #${ISSUE_NUMBER}):
 
 You have been triggered by the 'agent' label on issue #${ISSUE_NUMBER} in ${REPO}.
 
+## CRITICAL FOCUS GUARDRAILS
+
+**You are working exclusively on issue #${ISSUE_NUMBER}. Do NOT work on other issues.**
+
+Your ONLY goal is to satisfy the acceptance criteria and description in THIS issue (#${ISSUE_NUMBER}).
+If the issue references, links to, or mentions other issues or PRs:
+- Those are CONTEXT ONLY — read them to understand the big picture
+- Do NOT implement or address them
+- Do NOT create PRs for related issues
+- Focus exclusively on #${ISSUE_NUMBER}
+
+Example: If issue #${ISSUE_NUMBER} mentions \"related to issue #50\", do NOT work on #50. Only work on #${ISSUE_NUMBER}.
+
+---
+
 Here is the issue context:
 ${CONTEXT}${EXISTING_PR_NOTE}
+
+## CRITICAL FOCUS GUARDRAILS:
+**You are working on issue #${ISSUE_NUMBER} ONLY.**
+
+1. **Focus on the assigned issue**: Your ONLY goal is to satisfy the acceptance criteria listed in issue #${ISSUE_NUMBER}.
+2. **Do NOT work on linked issues**: If this issue references or links to other issues, those are context only. Do NOT implement them unless they are explicitly part of issue #${ISSUE_NUMBER}'s acceptance criteria.
+3. **Do NOT drift to related problems**: If you discover other bugs or features that could be fixed, ignore them. Stay focused on #${ISSUE_NUMBER}.
+4. **Validate before finishing**: Before creating a PR or closing this issue, confirm you addressed the specific acceptance criteria for issue #${ISSUE_NUMBER}, not any other issue.
 
 Your mission:
 - Understand the issue and explore the codebase to find the relevant files
