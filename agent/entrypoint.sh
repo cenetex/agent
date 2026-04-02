@@ -1105,7 +1105,12 @@ ${ERROR_MESSAGE}
         exit 1
         ;;
       2) RUN_STATUS="succeeded" ;;               # Pre-existing failure on main
-      3) RUN_STATUS="succeeded" ;;               # Timeout — treat as success, CI may be slow
+      3)                                           # Timeout — set to waiting
+        RUN_STATUS="waiting"
+        # Post comment about CI still pending
+        local ci_pending_comment="CI checks are still pending for PR #${ISSUE_NUMBER}. The agent is waiting for them to complete."
+        post_comment "${ISSUE_NUMBER}" "${REPO}" "$ci_pending_comment"
+        ;;
     esac
   elif PR_URL="$(find_created_pr_url "${ISSUE_NUMBER}" "${REPO}" "${RUN_STARTED_AT}")" && [ -n "${PR_URL}" ]; then
     # For newly created PRs, extract PR number and poll CI
@@ -1125,19 +1130,38 @@ ${ERROR_MESSAGE}
           exit 1
           ;;
         2) RUN_STATUS="succeeded" ;;             # Pre-existing failure on main
-        3) RUN_STATUS="succeeded" ;;             # Timeout — treat as success
+        3)                                         # Timeout — set to waiting
+          RUN_STATUS="waiting"
+          # Post comment about CI still pending
+          local ci_pending_comment="CI checks are still pending for PR #${PR_NUM}. The agent is waiting for them to complete."
+          post_comment "${ISSUE_NUMBER}" "${REPO}" "$ci_pending_comment"
+          ;;
       esac
     else
-      RUN_STATUS="succeeded"
+      # PR URL found but couldn't extract PR number — set to waiting
+      RUN_STATUS="waiting"
+      local pr_parsing_comment="PR was created but the number couldn't be extracted from the URL. The agent is waiting for manual verification."
+      post_comment "${ISSUE_NUMBER}" "${REPO}" "$pr_parsing_comment"
     fi
   elif issue_was_closed "${ISSUE_NUMBER}" "${REPO}"; then
-    RUN_STATUS="succeeded"
+    # Issue is closed — verify that agent actually pushed code since run start
+    local agent_commits
+    agent_commits=$(git log --oneline --since="${RUN_STARTED_AT}" --author="github-agent" --all 2>/dev/null | wc -l)
+
+    if [ "$agent_commits" -gt 0 ]; then
+      RUN_STATUS="succeeded"
+    else
+      # Issue closed but no agent commits found
+      RUN_STATUS="waiting"
+      local no_commit_comment="Issue was closed but no commits from the agent were found since the task started. Waiting for verification."
+      post_comment "${ISSUE_NUMBER}" "${REPO}" "$no_commit_comment"
+    fi
   elif has_agent_question_comment "${ISSUE_NUMBER}" "${REPO}" "${RUN_STARTED_AT}"; then
     RUN_STATUS="waiting"
   elif [ "${ATTEMPT}" -lt "${MAX_ATTEMPTS}" ]; then
     echo "Attempt ${ATTEMPT}: no PR created and no questions asked — retrying..." >&2
   else
     echo "Agent exited successfully but no PR was created for issue #${ISSUE_NUMBER} after ${MAX_ATTEMPTS} attempts" >&2
-    exit 1
+    RUN_STATUS="failed"
   fi
 done
