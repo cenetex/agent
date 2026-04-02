@@ -354,21 +354,94 @@ async function postTriageComment(
 }
 
 /**
+ * Extracts error lines from logs based on keywords
+ */
+function extractErrorLines(logs: string): string[] {
+  const lines = logs.split("\n");
+  const errorKeywords = /error|fail|denied|cannot|ts\d{4}|✖|×|✘/i;
+  const errorLines: string[] = [];
+
+  for (const line of lines) {
+    if (errorKeywords.test(line) && line.trim()) {
+      errorLines.push(line.trim());
+    }
+  }
+
+  // Return unique lines, limited to the most relevant ones
+  return [...new Set(errorLines)].slice(0, 10);
+}
+
+/**
+ * Classifies error type based on error messages
+ */
+function classifyError(errorLines: string[]): { category: string; label: string } {
+  const errorText = errorLines.join("\n").toLowerCase();
+
+  // IAM/credentials/OIDC errors
+  if (
+    errorText.includes("iam") ||
+    errorText.includes("permission denied") ||
+    errorText.includes("denied") ||
+    errorText.includes("oidc") ||
+    errorText.includes("credential") ||
+    errorText.includes("unauthorized")
+  ) {
+    return { category: "IAM/credentials", label: "needs:manual" };
+  }
+
+  // Infrastructure/network errors
+  if (
+    errorText.includes("infrastructure") ||
+    errorText.includes("connection refused") ||
+    errorText.includes("timeout") ||
+    errorText.includes("network") ||
+    errorText.includes("dns")
+  ) {
+    return { category: "Infrastructure", label: "needs:manual" };
+  }
+
+  // TypeScript/lint/test errors
+  if (
+    errorText.includes("typescript") ||
+    errorText.includes("ts") ||
+    errorText.includes("lint") ||
+    errorText.includes("test failed") ||
+    errorText.includes("error ts")
+  ) {
+    return { category: "TypeScript/Lint/Test", label: "agent" };
+  }
+
+  // Dependency errors
+  if (
+    errorText.includes("dependency") ||
+    errorText.includes("peer") ||
+    errorText.includes("npm") ||
+    errorText.includes("conflict")
+  ) {
+    return { category: "Dependency", label: "agent" };
+  }
+
+  // Unknown
+  return { category: "Unknown", label: "needs:triage" };
+}
+
+/**
  * Enriches deploy failure issue with workflow logs
  */
 async function enrichDeployFailure(
   repo: string,
   issue: any,
   token: string
-): Promise<void> {
+): Promise<{ label: string; errorCategory: string } | null> {
   try {
     // Try to extract workflow run ID from issue body
     const runIdMatch = (issue.body || "").match(/workflow run (\d+)/i) ||
-                       (issue.body || "").match(/run[\/\s]+id[:\s]+(\d+)/i);
+                       (issue.body || "").match(/run[\/\s]+id[:\s]+(\d+)/i) ||
+                       (issue.body || "").match(/\/runs\/(\d+)/);
 
     if (!runIdMatch) {
       console.log(`${repo}#${issue.number}: Could not find workflow run ID in issue body`);
-      return;
+      return null;
     }
 
     const runId = runIdMatch[1];
@@ -384,10 +457,8 @@ async function enrichDeployFailure(
 
     if (runResponse.status === 404) {
       console.log(`${repo}#${issue.number}: Workflow run ${runId} not found`);
-      return;
+      return null;
     }
-
-    const workflowRun = await runResponse.json() as any;
 
     // Get job logs
     const jobsResponse = await githubRequest(
@@ -398,22 +469,59 @@ async function enrichDeployFailure(
     );
 
     const jobs = await jobsResponse.json() as any;
-    let errorSummary = "";
+    let allErrorLines: string[] = [];
+    let failedJobsInfo = "";
 
+    // Fetch logs for each failed job
     for (const job of jobs.jobs) {
       if (job.status === "completed" && job.conclusion === "failure") {
-        // Extract error from job name and conclusion
-        errorSummary += `- **${job.name}**: ${job.conclusion}\n`;
+        failedJobsInfo += `- **${job.name}**\n`;
+
+        // Try to get logs from the failed job
+        try {
+          const logsUrl = `https://api.github.com/repos/${repo}/actions/jobs/${job.id}/logs`;
+          const logsResponse = await fetch(logsUrl, {
+            headers: {
+              Accept: "application/vnd.github+json",
+              Authorization: `Bearer ${token}`,
+              "User-Agent": "github-agent-triage",
+            },
+          });
+
+          if (logsResponse.ok) {
+            const logs = await logsResponse.text();
+            const errorLines = extractErrorLines(logs);
+            allErrorLines = [...allErrorLines, ...errorLines];
+          }
+        } catch (logsError) {
+          console.warn(`Could not fetch logs for job ${job.id}:`, logsError);
+        }
       }
     }
 
-    if (!errorSummary) {
+    if (!failedJobsInfo) {
       console.log(`${repo}#${issue.number}: No failed jobs found in workflow run`);
-      return;
+      return null;
     }
 
+    // Classify errors
+    let classification = classifyError(allErrorLines);
+
+    // Build root cause section
+    let rootCauseSection = "## Root Cause\n\n";
+    rootCauseSection += `**Failed Jobs:**\n${failedJobsInfo}\n`;
+
+    if (allErrorLines.length > 0) {
+      rootCauseSection += `\n**Error Details:**\n\`\`\`\n${allErrorLines.join("\n")}\n\`\`\`\n`;
+      rootCauseSection += `\n**Classification:** ${classification.category}\n`;
+    } else {
+      rootCauseSection += "\n*No specific error details extracted from logs*\n";
+    }
+
+    rootCauseSection += "\n_Enriched by auto-triage handler_";
+
     // Update issue body with error details
-    const newBody = `${issue.body || ""}\n\n## Workflow Failure Details\n\n${errorSummary}\n\n_Enriched by auto-triage handler_`;
+    const newBody = `${issue.body || ""}\n\n${rootCauseSection}`;
 
     await githubRequest(
       `/repos/${repo}/issues/${issue.number}`,
@@ -425,9 +533,17 @@ async function enrichDeployFailure(
       [200]
     );
 
-    console.log(`Enriched deploy failure ${repo}#${issue.number} with workflow details`);
+    console.log(
+      `Enriched deploy failure ${repo}#${issue.number} with workflow details (${classification.category})`
+    );
+
+    return {
+      label: classification.label,
+      errorCategory: classification.category,
+    };
   } catch (error) {
     console.warn(`Failed to enrich deploy failure ${repo}#${issue.number}:`, error);
+    return null;
   }
 }
 
@@ -476,18 +592,25 @@ async function scanRepository(
       // Handle deploy failures
       if (isDeployFailure(issue)) {
         console.log(`Issue #${issueNumber}: Deploy failure detected`);
-        await enrichDeployFailure(repo, issue, token);
+        const enrichmentResult = await enrichDeployFailure(repo, issue, token);
 
-        // If enrichment succeeded and criteria ≤3 and has credits, auto-label
-        if (criteria <= AGENT_READY_THRESHOLD && hasCredits) {
-          await addLabel(repo, issueNumber, "agent", token);
-          await postTriageComment(
-            repo,
-            issueNumber,
-            `✅ **Auto-triaged**: Enriched deploy failure with workflow details and labeled as agent-ready.\n\nAcceptance criteria: ${criteria}/${AGENT_READY_THRESHOLD}`,
-            token
-          );
+        if (enrichmentResult) {
+          const { label: classificationLabel, errorCategory } = enrichmentResult;
+
+          // Add classification label
+          await addLabel(repo, issueNumber, classificationLabel, token);
+
+          let commentMessage = `✅ **Auto-triaged**: Enriched deploy failure with actual error logs.\n\n**Error Category:** ${errorCategory}\n**Label Added:** \`${classificationLabel}\``;
+
+          if (classificationLabel === "agent" && criteria <= AGENT_READY_THRESHOLD && hasCredits) {
+            commentMessage += `\n\nAcceptance criteria: ${criteria}/${AGENT_READY_THRESHOLD}`;
+          } else if (classificationLabel === "needs:manual") {
+            commentMessage += `\n\nThis appears to be an infrastructure or credentials issue that needs manual intervention.`;
+          }
+
+          await postTriageComment(repo, issueNumber, commentMessage, token);
         }
+
         continue;
       }
 
