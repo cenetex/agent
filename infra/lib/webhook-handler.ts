@@ -715,6 +715,27 @@ async function getPRCheckStatus(
 }
 
 /**
+ * Determines if an issue should be dispatched even when main branch CI is red
+ * Returns true for high-priority fixes (bugs, CI fixes), false for feature work
+ */
+function shouldDispatchWhenMainBroken(issueMetadata: IssueMetadata): boolean {
+  const { labels, title } = issueMetadata;
+
+  // Allow dispatch if labeled as bug or high-priority
+  if (labels.includes("type:bug") || labels.includes("priority:high")) {
+    return true;
+  }
+
+  // Allow dispatch if title indicates a fix or CI issue
+  if (/^fix:|CI/i.test(title)) {
+    return true;
+  }
+
+  // Block all other work (features, enhancements, etc.)
+  return false;
+}
+
+/**
  * Checks if the main branch CI is healthy
  * Returns true if main's checks are all passing, false otherwise
  */
@@ -3756,6 +3777,65 @@ export async function handler(event: {
   if (await checkForActiveTasks(repoSlug, issueNumber)) {
     console.log(`Issue #${issueNumber} has an active task in S3, skipping`);
     return { statusCode: 200, body: "Already running (active task found)" };
+  }
+
+  // --- Extract issue labels and metadata early for blocking decision ---
+  const earlyLabels = isPR
+    ? (prData.labels || []).map((label: any) => label.name)
+    : (issueData.labels || []).map((label: any) => label.name);
+
+  const earlyIssueMetadata: IssueMetadata = {
+    number: issueNumber,
+    title: isPR ? prData.title : issueData.title,
+    body: isPR ? prData.body : issueData.body,
+    labels: earlyLabels,
+    head_ref: isPR ? prData.head.ref : undefined,
+    base_ref: isPR ? prData.base.ref : undefined,
+    author: isPR ? prData.user.login : issueData.user.login,
+  };
+
+  // --- Check if main branch CI is healthy ---
+  const mainIsHealthy = await getMainCIHealth(repoOwner, repoName, githubToken);
+
+  if (!mainIsHealthy && !shouldDispatchWhenMainBroken(earlyIssueMetadata)) {
+    console.log(
+      `Main branch CI is unhealthy and issue #${issueNumber} is not a priority fix, blocking dispatch`
+    );
+
+    // Add blocking label
+    await githubRequest(
+      `/repos/${repoOwner}/${repoName}/issues/${issueNumber}/labels`,
+      githubToken,
+      {
+        method: "POST",
+        body: JSON.stringify({ labels: [BLOCKED_MAIN_BROKEN_LABEL] }),
+      },
+      [200]
+    );
+
+    // Post explanatory comment
+    const comment = `🚨 **Issue Blocked: Main Branch CI is Red**
+
+The main branch is currently experiencing CI failures. To avoid wasting credits and creating noise, this issue has been automatically blocked from dispatch.
+
+**This issue will be unblocked once main CI is restored.**
+
+**Why this issue was blocked:** This appears to be feature work. The following issues would still be dispatched:
+- Issues labeled \`type:bug\` or \`priority:high\`
+- Issues with titles starting with "fix:" or containing "CI"
+
+If this issue is actually a critical fix for the broken CI, please add the \`type:bug\` or \`priority:high\` label to override this block.`;
+
+    await addIssueComment(repoOwner, repoName, issueNumber, githubToken, comment);
+
+    return {
+      statusCode: 202,
+      body: JSON.stringify({
+        message: "Issue blocked - main CI unhealthy",
+        issueNumber,
+        blockedReason: "main-ci-red",
+      }),
+    };
   }
 
   await ensureSignalLabels(repoOwner, repoName, githubToken);

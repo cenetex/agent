@@ -566,6 +566,166 @@ async function mergeApprovedPRs(token: string): Promise<void> {
 }
 
 /**
+ * Helper function to check main branch CI health
+ */
+async function getMainCIHealth(
+  repoOwner: string,
+  repoName: string,
+  token: string
+): Promise<boolean> {
+  try {
+    // Get the default branch (usually main) commit SHA
+    const repoResponse = await githubRequest(
+      `/repos/${repoOwner}/${repoName}`,
+      token,
+      { method: "GET" },
+      [200]
+    );
+
+    const repoData = await repoResponse.json() as any;
+    const defaultBranch = repoData.default_branch;
+
+    // Get the latest commit on the default branch
+    const branchResponse = await githubRequest(
+      `/repos/${repoOwner}/${repoName}/branches/${defaultBranch}`,
+      token,
+      { method: "GET" },
+      [200]
+    );
+
+    const branchData = await branchResponse.json() as any;
+    const mainSha = branchData.commit.sha;
+
+    // Get combined check status for main
+    const statusResponse = await githubRequest(
+      `/repos/${repoOwner}/${repoName}/commits/${mainSha}/status`,
+      token,
+      { method: "GET" },
+      [200]
+    );
+
+    const statusData = await statusResponse.json() as any;
+    return statusData.state === "success";
+  } catch (error) {
+    console.error(`Failed to check main CI health for ${repoOwner}/${repoName}:`, error);
+    return true; // Assume healthy on error to avoid false negatives
+  }
+}
+
+/**
+ * Helper function to remove a label from an issue
+ */
+async function deleteLabel(
+  repoOwner: string,
+  repoName: string,
+  issueNumber: number,
+  token: string,
+  label: string
+): Promise<void> {
+  try {
+    await githubRequest(
+      `/repos/${repoOwner}/${repoName}/issues/${issueNumber}/labels/${encodeURIComponent(label)}`,
+      token,
+      { method: "DELETE" },
+      [200, 204, 404]
+    );
+  } catch (error) {
+    console.warn(
+      `Failed to remove label "${label}" from ${repoOwner}/${repoName}#${issueNumber}:`,
+      error
+    );
+  }
+}
+
+/**
+ * Scans for issues blocked by main branch CI failures and auto-unblocks them
+ * when main CI recovers
+ */
+async function autoUnblockIssuesWhenMainHealthy(token: string): Promise<void> {
+  console.log("Checking for issues blocked by main CI failures...");
+
+  const repos = MONITORED_REPOS.length > 0 ? MONITORED_REPOS : [
+    "cenetex/aws-swarm",
+    "cenetex/kyro",
+    "cenetex/raticross",
+    "cenetex/ratibot",
+    "cenetex/litigation",
+    "cenetex/agent",
+    "cenetex/governance",
+  ];
+
+  const BLOCKED_MAIN_BROKEN_LABEL = "blocked:main-broken";
+  const TRIGGER_LABEL = "agent";
+
+  for (const repo of repos) {
+    try {
+      const [repoOwner, repoName] = repo.split("/");
+
+      // Check if main CI is healthy
+      const mainIsHealthy = await getMainCIHealth(repoOwner, repoName, token);
+
+      if (!mainIsHealthy) {
+        console.log(`${repo}: Main CI is still red, skipping unblock scan`);
+        continue;
+      }
+
+      console.log(`${repo}: Main CI is healthy, scanning for blocked:main-broken issues`);
+
+      // Query for issues with blocked:main-broken label
+      const response = await githubRequest(
+        `/repos/${repoOwner}/${repoName}/issues?labels=${encodeURIComponent(BLOCKED_MAIN_BROKEN_LABEL)}&state=open&per_page=100`,
+        token,
+        { method: "GET" },
+        [200]
+      );
+
+      const blockedIssues = await response.json() as any[];
+
+      for (const issue of blockedIssues) {
+        try {
+          // Remove blocking label
+          await deleteLabel(repoOwner, repoName, issue.number, token, BLOCKED_MAIN_BROKEN_LABEL);
+
+          // Re-add agent label to dispatch
+          await githubRequest(
+            `/repos/${repoOwner}/${repoName}/issues/${issue.number}/labels`,
+            token,
+            {
+              method: "POST",
+              body: JSON.stringify({ labels: [TRIGGER_LABEL] }),
+            },
+            [200]
+          );
+
+          // Post unblock comment
+          await githubRequest(
+            `/repos/${repoOwner}/${repoName}/issues/${issue.number}/comments`,
+            token,
+            {
+              method: "POST",
+              body: JSON.stringify({
+                body: `✅ **Issue Unblocked: Main Branch CI is Now Healthy**\n\nThe main branch CI has recovered. This issue is now being re-dispatched to the agent.`,
+              }),
+            },
+            [201]
+          );
+
+          console.log(`${repo}: Unblocked issue #${issue.number}`);
+        } catch (error) {
+          console.warn(`Failed to unblock issue #${issue.number} in ${repo}:`, error);
+        }
+      }
+
+      if (blockedIssues.length > 0) {
+        console.log(`${repo}: Unblocked ${blockedIssues.length} issue(s)`);
+      }
+    } catch (error) {
+      console.error(`Failed to check/unblock issues in ${repo}:`, error);
+    }
+  }
+}
+
+/**
  * Main handler function triggered by EventBridge
  */
 export async function handler() {
@@ -596,6 +756,9 @@ export async function handler() {
 
     // After discovering and reviewing new PRs, also merge approved ones
     await mergeApprovedPRs(githubToken);
+
+    // Auto-unblock issues when main CI recovers
+    await autoUnblockIssuesWhenMainHealthy(githubToken);
 
     if (reviewablePRs.length === 0) {
       console.log("No PRs need review at this time");
