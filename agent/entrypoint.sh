@@ -348,6 +348,9 @@ ${CRITERIA_STATUS_COMMENT}"
   update_task_metadata "failed" "$error_message" "" "$failure_category"
   upload_artifacts "$exit_code" ""
 
+  # Record failed task as feedback example for anti-pattern learning
+  record_failed_task_feedback "$REPO_SLUG" "$TASK_ID" "$(echo "$CONTEXT" | head -1)" "$error_message" "$failure_category" || true
+
   # Build structured failure comment with diagnostics
   local summary=$(create_completion_summary "failed" "" "$error_message")
 
@@ -720,6 +723,7 @@ fi
 fetch_feedback_examples() {
   local repo_slug="$1"
   local task_type="$2"
+  local outcome_filter="${3:-}"  # Optional: filter by outcome (e.g., "successful", "failed")
 
   # Compute cutoff date: 30 days ago
   local cutoff_date
@@ -733,12 +737,21 @@ fetch_feedback_examples() {
   # Query S3 index for recent examples
   local index_key="feedback-examples/${repo_slug}/${task_type}/index.json"
 
-  aws s3 cp "s3://${ARTIFACTS_BUCKET}/${index_key}" - 2>/dev/null \
-    | jq --arg cutoff "$cutoff_date" '
-        .examples
-        | map(select(.created_at >= $cutoff))
-        | sort_by(.outcome_at) | reverse | .[0:3]
-      ' 2>/dev/null || echo "[]"
+  if [ -n "$outcome_filter" ]; then
+    aws s3 cp "s3://${ARTIFACTS_BUCKET}/${index_key}" - 2>/dev/null \
+      | jq --arg cutoff "$cutoff_date" --arg outcome "$outcome_filter" '
+          .examples
+          | map(select(.created_at >= $cutoff and .outcome == $outcome))
+          | sort_by(.outcome_at) | reverse | .[0:3]
+        ' 2>/dev/null || echo "[]"
+  else
+    aws s3 cp "s3://${ARTIFACTS_BUCKET}/${index_key}" - 2>/dev/null \
+      | jq --arg cutoff "$cutoff_date" '
+          .examples
+          | map(select(.created_at >= $cutoff))
+          | sort_by(.outcome_at) | reverse | .[0:3]
+        ' 2>/dev/null || echo "[]"
+  fi
 }
 
 fetch_example_content() {
@@ -761,50 +774,47 @@ format_feedback_section() {
 
   # Fetch recent successful examples
   local examples_json
-  examples_json=$(fetch_feedback_examples "$repo_slug" "$task_type" 2>/dev/null)
+  examples_json=$(fetch_feedback_examples "$repo_slug" "$task_type" "merged" 2>/dev/null)
 
-  if [ -z "$examples_json" ] || [ "$examples_json" = "[]" ]; then
-    return 0  # No examples available
-  fi
-
-  feedback_section="
+  if [ -n "$examples_json" ] && [ "$examples_json" != "[]" ]; then
+    feedback_section="
 
 ## Recent Successful Examples
 
 Here are recent examples of similar tasks completed successfully by this agent:
 "
 
-  # Process each example
-  local count=0
-  while read -r example_entry; do
-    if [ -z "$example_entry" ]; then
-      continue
-    fi
+    # Process each successful example
+    local count=0
+    while read -r example_entry; do
+      if [ -z "$example_entry" ]; then
+        continue
+      fi
 
-    count=$((count + 1))
-    local example_id
-    example_id=$(echo "$example_entry" | jq -r '.example_id')
-    local outcome
-    outcome=$(echo "$example_entry" | jq -r '.outcome')
-    local example_date
-    example_date=$(echo "$example_entry" | jq -r '.created_at' | cut -d'T' -f1)
+      count=$((count + 1))
+      local example_id
+      example_id=$(echo "$example_entry" | jq -r '.example_id')
+      local outcome
+      outcome=$(echo "$example_entry" | jq -r '.outcome')
+      local example_date
+      example_date=$(echo "$example_entry" | jq -r '.created_at' | cut -d'T' -f1)
 
-    # Fetch full example content
-    local example_json
-    example_json=$(fetch_example_content "$repo_slug" "$outcome" "$example_date" "$example_id" 2>/dev/null)
+      # Fetch full example content
+      local example_json
+      example_json=$(fetch_example_content "$repo_slug" "$outcome" "$example_date" "$example_id" 2>/dev/null)
 
-    if [ -z "$example_json" ]; then
-      continue
-    fi
+      if [ -z "$example_json" ]; then
+        continue
+      fi
 
-    local title
-    title=$(echo "$example_json" | jq -r '.task_payload.issue_metadata.title // "Untitled"' 2>/dev/null)
-    local summary
-    summary=$(echo "$example_json" | jq -r '.task_payload.issue_metadata.body // ""' | head -c 200 2>/dev/null)
-    local diff
-    diff=$(echo "$example_json" | jq -r '.pr_diff // ""' | head -c 1000 2>/dev/null)
+      local title
+      title=$(echo "$example_json" | jq -r '.task_payload.issue_metadata.title // "Untitled"' 2>/dev/null)
+      local summary
+      summary=$(echo "$example_json" | jq -r '.task_payload.issue_metadata.body // ""' | head -c 200 2>/dev/null)
+      local diff
+      diff=$(echo "$example_json" | jq -r '.pr_diff // ""' | head -c 1000 2>/dev/null)
 
-    feedback_section="${feedback_section}
+      feedback_section="${feedback_section}
 
 ### Example ${count}: ${title}
 **Outcome:** ${outcome}
@@ -813,14 +823,75 @@ Here are recent examples of similar tasks completed successfully by this agent:
 ${summary}
 
 "
-    if [ -n "$diff" ] && [ "$diff" != "null" ]; then
-      feedback_section="${feedback_section}\`\`\`diff
+      if [ -n "$diff" ] && [ "$diff" != "null" ]; then
+        feedback_section="${feedback_section}\`\`\`diff
 ${diff}
 \`\`\`
 
 "
-    fi
-  done < <(echo "$examples_json" | jq -c '.[]')
+      fi
+    done < <(echo "$examples_json" | jq -c '.[]')
+  fi
+
+  # Fetch recent failed examples for anti-patterns
+  local failure_examples_json
+  failure_examples_json=$(fetch_feedback_examples "$repo_slug" "$task_type" "failed" 2>/dev/null)
+
+  if [ -n "$failure_examples_json" ] && [ "$failure_examples_json" != "[]" ]; then
+    feedback_section="${feedback_section}
+
+## Anti-patterns — Recent Failures to Avoid
+
+Learn from these recent mistakes to avoid repeating them:
+"
+
+    # Process each failure example
+    local count=0
+    while read -r example_entry; do
+      if [ -z "$example_entry" ]; then
+        continue
+      fi
+
+      count=$((count + 1))
+      local example_id
+      example_id=$(echo "$example_entry" | jq -r '.example_id')
+      local outcome
+      outcome=$(echo "$example_entry" | jq -r '.outcome')
+      local example_date
+      example_date=$(echo "$example_entry" | jq -r '.created_at' | cut -d'T' -f1)
+
+      # Fetch full example content
+      local example_json
+      example_json=$(fetch_example_content "$repo_slug" "$outcome" "$example_date" "$example_id" 2>/dev/null)
+
+      if [ -z "$example_json" ]; then
+        continue
+      fi
+
+      local title
+      title=$(echo "$example_json" | jq -r '.task_payload.issue_metadata.title // "Untitled"' 2>/dev/null)
+      local failure_reason
+      failure_reason=$(echo "$example_json" | jq -r '.failure_reason // "Unknown failure"' 2>/dev/null)
+      local what_was_tried
+      what_was_tried=$(echo "$example_json" | jq -r '.what_was_tried // ""' | head -c 200 2>/dev/null)
+
+      feedback_section="${feedback_section}
+
+### Failure ${count}: ${title}
+**Date:** ${example_date}
+**Reason:** ${failure_reason}
+"
+      if [ -n "$what_was_tried" ] && [ "$what_was_tried" != "null" ] && [ -n "$what_was_tried" ]; then
+        feedback_section="${feedback_section}
+**What was attempted:** ${what_was_tried}
+"
+      fi
+    done < <(echo "$failure_examples_json" | jq -c '.[]')
+  fi
+
+  if [ -z "$feedback_section" ]; then
+    return 0  # No examples available
+  fi
 
   echo "$feedback_section"
 }

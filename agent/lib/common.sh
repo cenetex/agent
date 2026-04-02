@@ -245,3 +245,79 @@ format_criteria_status() {
 
   echo "$status_section"
 }
+
+# Record a failed task as a feedback example for anti-pattern learning
+record_failed_task_feedback() {
+  local repo_slug="$1"
+  local task_id="$2"
+  local issue_title="$3"
+  local failure_reason="$4"
+  local failure_category="$5"
+
+  if [ -z "$ARTIFACTS_BUCKET" ]; then
+    echo "WARNING: ARTIFACTS_BUCKET not set, skipping feedback recording" >&2
+    return 1
+  fi
+
+  # Generate example ID (simplified: use first 8 chars of task_id + timestamp)
+  local example_id="${task_id:0:8}_$(date +%s)"
+  local now=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+  local date_part=$(echo "$now" | cut -d'T' -f1)
+
+  # Build failure reason with category
+  local full_reason="$failure_reason"
+  if [ -n "$failure_category" ]; then
+    full_reason="[$failure_category] $failure_reason"
+  fi
+
+  # Create feedback example JSON (minimal version - just the essentials)
+  local feedback_json=$(cat <<EOF
+{
+  "example_id": "${example_id}",
+  "repo_slug": "${repo_slug}",
+  "task_type": "issue",
+  "outcome": "failed",
+  "task_id": "${task_id}",
+  "task_payload": {
+    "task_id": "${task_id}",
+    "repo_slug": "${repo_slug}",
+    "issue_metadata": {
+      "title": "${issue_title}"
+    }
+  },
+  "what_was_tried": "Attempted to resolve: ${issue_title}",
+  "failure_reason": "${full_reason}",
+  "created_at": "${now}",
+  "outcome_at": "${now}"
+}
+EOF
+)
+
+  # Store feedback example to S3
+  local example_key="feedback-examples/${repo_slug}/failed/${date_part}/${example_id}.json"
+  echo "$feedback_json" | aws s3 cp - "s3://${ARTIFACTS_BUCKET}/${example_key}" --content-type "application/json" 2>/dev/null || {
+    echo "WARNING: Failed to record feedback example to S3" >&2
+    return 1
+  }
+
+  echo "SUCCESS: Recorded failed task feedback example at ${example_key}" >&2
+
+  # Update feedback index (best-effort)
+  local index_key="feedback-examples/${repo_slug}/issue/index.json"
+  local index_json=$(aws s3 cp "s3://${ARTIFACTS_BUCKET}/${index_key}" - 2>/dev/null || echo '{"repo_slug":"'"${repo_slug}"'","task_type":"issue","examples":[],"updated_at":"'"${now}"'"}')
+
+  # Add new example entry to index
+  local updated_index=$(echo "$index_json" | jq --arg example_id "$example_id" --arg outcome "failed" --arg created_at "$now" --arg outcome_at "$now" '
+    .examples += [{"example_id": $example_id, "outcome": $outcome, "created_at": $created_at, "outcome_at": $outcome_at}] |
+    if .examples | length > 100 then .examples[-100:] else . end |
+    .updated_at = $outcome_at
+  ')
+
+  echo "$updated_index" | aws s3 cp - "s3://${ARTIFACTS_BUCKET}/${index_key}" --content-type "application/json" 2>/dev/null || {
+    echo "WARNING: Failed to update feedback index" >&2
+    return 1
+  }
+
+  echo "SUCCESS: Updated feedback index at ${index_key}" >&2
+  return 0
+}

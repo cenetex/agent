@@ -240,8 +240,8 @@ export interface FeedbackExample {
   repo_slug: string;
   /** Task type: issue or pull_request */
   task_type: "issue" | "pull_request";
-  /** Outcome: merged (success) or closed (human rejection) */
-  outcome: "merged" | "closed";
+  /** Outcome: merged (success), closed (human rejection), or failed (task failure) */
+  outcome: "merged" | "closed" | "failed";
   /** The task that created this example */
   task_id: string;
   /** Original task payload */
@@ -250,9 +250,13 @@ export interface FeedbackExample {
   pr_diff?: string;
   /** Human comments on closed PR (if applicable) */
   human_comments?: string;
+  /** For failed outcomes: what the agent attempted to do */
+  what_was_tried?: string;
+  /** For failed outcomes: reason why it failed */
+  failure_reason?: string;
   /** When the task was created */
   created_at: string;
-  /** When the outcome occurred (PR merge/close timestamp) */
+  /** When the outcome occurred (PR merge/close/failure timestamp) */
   outcome_at: string;
 }
 
@@ -267,7 +271,7 @@ export interface FeedbackExampleIndex {
   /** List of recorded examples with basic metadata */
   examples: Array<{
     example_id: string;
-    outcome: "merged" | "closed";
+    outcome: "merged" | "closed" | "failed";
     created_at: string;
     outcome_at: string;
   }>;
@@ -374,7 +378,7 @@ export function generateExampleId(): string {
  */
 export function createFeedbackExamplePath(
   repoSlug: string,
-  outcome: "merged" | "closed",
+  outcome: "merged" | "closed" | "failed",
   exampleId: string
 ): string {
   const date = new Date().toISOString().split("T")[0]; // YYYY-MM-DD

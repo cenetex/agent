@@ -1626,8 +1626,9 @@ async function recordFeedbackExample(
   repoName: string,
   prNumber: number,
   taskMetadata: TaskMetadata,
-  outcome: "merged" | "closed",
-  token: string
+  outcome: "merged" | "closed" | "failed",
+  token: string,
+  failureDetails?: { what_was_tried?: string; failure_reason?: string }
 ): Promise<void> {
   try {
     const repoSlug = createRepoSlug(repoOwner, repoName);
@@ -1667,6 +1668,8 @@ async function recordFeedbackExample(
         created_at: taskMetadata.created_at,
       },
       pr_diff: prDiff,
+      what_was_tried: failureDetails?.what_was_tried,
+      failure_reason: failureDetails?.failure_reason,
       created_at: taskMetadata.created_at,
       outcome_at: now,
     };
@@ -1740,6 +1743,124 @@ async function recordFeedbackExample(
     console.log(`Updated feedback index at ${indexKey}`);
   } catch (error) {
     console.error(`Failed to record feedback example: ${error}`);
+    // Don't fail the entire handler if feedback recording fails
+  }
+}
+
+/**
+ * Records a failed task as a feedback example for anti-pattern learning
+ * Extracts failure information from task metadata and stores it for future agent learning
+ */
+async function recordFailedTaskAsExample(
+  taskMetadata: TaskMetadata,
+  repoOwner: string,
+  repoName: string
+): Promise<void> {
+  try {
+    // Only record failures for issue tasks (not PR reviews)
+    if (taskMetadata.task_mode !== "issue") {
+      console.log(`Skipping feedback recording for task_mode: ${taskMetadata.task_mode}`);
+      return;
+    }
+
+    const repoSlug = createRepoSlug(repoOwner, repoName);
+    const exampleId = generateExampleId();
+    const now = new Date().toISOString();
+
+    // Extract failure reason from error message and failure category
+    let failureReason = taskMetadata.error_message || "Task failed";
+    if (taskMetadata.failure_category) {
+      failureReason = `[${taskMetadata.failure_category}] ${failureReason}`;
+    }
+
+    // Create feedback example record for the failure
+    const feedbackExample: FeedbackExample = {
+      example_id: exampleId,
+      repo_slug: repoSlug,
+      task_type: "issue",
+      outcome: "failed",
+      task_id: taskMetadata.task_id,
+      task_payload: {
+        task_id: taskMetadata.task_id,
+        repo_slug: taskMetadata.repo_slug,
+        requested_ref: taskMetadata.requested_ref,
+        resolved_commit_sha: taskMetadata.resolved_commit_sha,
+        issue_metadata: taskMetadata.issue_metadata,
+        task_mode: "issue",
+        created_at: taskMetadata.created_at,
+      },
+      what_was_tried: `Attempted to resolve: ${taskMetadata.issue_metadata.title}`,
+      failure_reason: failureReason,
+      created_at: taskMetadata.created_at,
+      outcome_at: now,
+    };
+
+    // Store feedback example to S3
+    const exampleKey = createFeedbackExamplePath(repoSlug, "failed", exampleId);
+    await s3.send(
+      new PutObjectCommand({
+        Bucket: ARTIFACTS_BUCKET,
+        Key: exampleKey,
+        Body: JSON.stringify(feedbackExample, null, 2),
+        ContentType: "application/json",
+      })
+    );
+    console.log(`Stored failed task feedback example at ${exampleKey}`);
+
+    // Update rolling index
+    const indexKey = createFeedbackIndexPath(repoSlug, "issue");
+
+    let index: FeedbackExampleIndex = {
+      repo_slug: repoSlug,
+      task_type: "issue",
+      examples: [],
+      updated_at: now,
+    };
+
+    // Fetch existing index if it exists
+    try {
+      const indexResult = await s3.send(
+        new GetObjectCommand({
+          Bucket: ARTIFACTS_BUCKET,
+          Key: indexKey,
+        })
+      );
+      if (indexResult.Body) {
+        const indexContent = await indexResult.Body.transformToString();
+        index = JSON.parse(indexContent) as FeedbackExampleIndex;
+      }
+    } catch {
+      // Index doesn't exist yet, use default
+      console.log(`Creating new index at ${indexKey}`);
+    }
+
+    // Add new failed example to index
+    index.examples.push({
+      example_id: exampleId,
+      outcome: "failed",
+      created_at: taskMetadata.created_at,
+      outcome_at: now,
+    });
+
+    // Keep only last 100 examples in index
+    if (index.examples.length > 100) {
+      index.examples = index.examples.slice(-100);
+    }
+
+    index.updated_at = now;
+
+    // Store updated index
+    await s3.send(
+      new PutObjectCommand({
+        Bucket: ARTIFACTS_BUCKET,
+        Key: indexKey,
+        Body: JSON.stringify(index, null, 2),
+        ContentType: "application/json",
+      })
+    );
+    console.log(`Updated feedback index at ${indexKey}`);
+  } catch (error) {
+    console.error(`Failed to record failed task as feedback example: ${error}`);
     // Don't fail the entire handler if feedback recording fails
   }
 }
