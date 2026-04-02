@@ -104,17 +104,30 @@ format_review_findings() {
   echo "$findings_json" | jq -r '
     def status_icon: if . == "pass" then "✅" elif . == "fail" then "❌" else "❓" end;
 
-    "### Compilation/Linting: \(.findings.compilation.status | status_icon)\n\(.findings.compilation.details // "")\n" +
+    "### File Safety: \(.findings.file_safety.status | status_icon)\n\(.findings.file_safety.details // "")\n" +
+    (if (.findings.file_safety.blocklisted_files | length) > 0 then
+      "Blocklisted files:\n" + (.findings.file_safety.blocklisted_files | map("- \(.)") | join("\n")) + "\n"
+    else "" end) +
+    "\n### Compilation/Linting: \(.findings.compilation.status | status_icon)\n\(.findings.compilation.details // "")\n" +
     "\n### Security: \(.findings.security.status | status_icon)\n" +
     (if (.findings.security.issues | length) > 0 then
       "Issues found:\n" + (.findings.security.issues | map("- \(.)") | join("\n")) + "\n"
     else "" end) +
     "\n### Issue Alignment: \(.findings.issue_alignment.status | status_icon)\n\(.findings.issue_alignment.details // "")\n" +
+    (if (.findings.issue_alignment.acceptance_criteria_met | length) > 0 then
+      "✅ Criteria met:\n" + (.findings.issue_alignment.acceptance_criteria_met | map("- \(.)") | join("\n")) + "\n"
+    else "" end) +
+    (if (.findings.issue_alignment.acceptance_criteria_missing | length) > 0 then
+      "❌ Criteria missing:\n" + (.findings.issue_alignment.acceptance_criteria_missing | map("- \(.)") | join("\n")) + "\n"
+    else "" end) +
     "\n### Logic: \(.findings.logic.status | status_icon)\n" +
     (if (.findings.logic.issues | length) > 0 then
       "Issues found:\n" + (.findings.logic.issues | map("- \(.)") | join("\n")) + "\n"
     else "" end) +
     "\n### Complexity: \(.findings.complexity.status | status_icon)\n\(.findings.complexity.details // "")\n" +
+    (if (.findings.complexity.scope_warning | length) > 0 then
+      "⚠️ Scope Warning:\n\(.findings.complexity.scope_warning)\n"
+    else "" end) +
     "\n### Cost Impact: \(.findings.cost_impact.status | status_icon)\n\(.findings.cost_impact.details // "")\n"
   '
 }
@@ -281,6 +294,37 @@ CI_CHECKS=$(gh pr checks "${PR_NUMBER}" -R "${REPO}" 2>/dev/null || echo "unavai
 
 echo "PR context fetched. Linked issues: ${LINKED_ISSUES:-none}"
 
+# --- Fetch detailed file information ---
+echo "Analyzing PR files for size and type..."
+PR_FILES=$(gh pr view "${PR_NUMBER}" -R "${REPO}" --json files -q '.files[] | {path: .path, size: .additions, deletions: .deletions}' 2>&1 || echo "[]")
+
+# Count files and total lines changed
+FILE_COUNT=$(echo "$PR_JSON" | jq '.files | length')
+TOTAL_ADDITIONS=$(echo "$PR_JSON" | jq '[.files[].additions] | add // 0')
+TOTAL_DELETIONS=$(echo "$PR_JSON" | jq '[.files[].deletions] | add // 0')
+echo "PR has ${FILE_COUNT} files changed, ${TOTAL_ADDITIONS} additions, ${TOTAL_DELETIONS} deletions"
+
+# Fetch acceptance criteria from linked issues
+ACCEPTANCE_CRITERIA=""
+if [ -n "${LINKED_ISSUES}" ]; then
+  echo "Fetching acceptance criteria from linked issues..."
+  for ISSUE_NUM in ${LINKED_ISSUES}; do
+    # Remove the # prefix if present
+    ISSUE_NUM="${ISSUE_NUM#\#}"
+    ISSUE_BODY=$(gh issue view "${ISSUE_NUM}" -R "${REPO}" --json body -q '.body' 2>&1 || echo "")
+    if [ -n "$ISSUE_BODY" ]; then
+      # Extract lines with checkboxes (acceptance criteria)
+      CRITERIA=$(echo "$ISSUE_BODY" | grep -E '^\s*-\s+\[[x\s]\]' || echo "")
+      if [ -n "$CRITERIA" ]; then
+        ACCEPTANCE_CRITERIA="${ACCEPTANCE_CRITERIA}
+Issue #${ISSUE_NUM} Acceptance Criteria:
+${CRITERIA}
+"
+      fi
+    fi
+  done
+fi
+
 # --- Build the review prompt ---
 CURRENT_STAGE="run review analysis"
 echo "Starting automated review analysis..."
@@ -295,9 +339,23 @@ REVIEW_MISSION="You are an automated code review agent for PR #${PR_NUMBER} in $
 **HEAD SHA:** ${HEAD_SHA}
 **BASE SHA:** ${BASE_SHA}
 **Linked Issues:** ${LINKED_ISSUES:-None identified}
+**Files Changed:** ${FILE_COUNT}
+**Total Additions:** ${TOTAL_ADDITIONS}
+**Total Deletions:** ${TOTAL_DELETIONS}
 
 ## PR Context
 ${PR_JSON}
+
+## PR File Information
+Files changed: ${FILE_COUNT}
+Additions: ${TOTAL_ADDITIONS}
+Deletions: ${TOTAL_DELETIONS}
+
+Detailed files:
+${PR_FILES}
+
+## Linked Issue Acceptance Criteria
+${ACCEPTANCE_CRITERIA:-No acceptance criteria found in linked issues}
 
 ## CI Status (Real Data)
 ${CI_CHECKS}
@@ -309,16 +367,40 @@ ${CI_CHECKS}
   - If NO (pre-existing failures): Note this but don't block approval
 - If CI hasn't completed: Note in your review that CI is still pending
 
+## File Blocklist Check
+REJECT immediately if the PR contains ANY of these files:
+- Files matching: \`*.backup\`, \`*.bak\`, \`*.orig\`
+- Files: \`.env\`, \`credentials.*\`, or any file containing \`secret\` in the name
+- Directories: \`node_modules/\`, \`__pycache__/\`, \`.git/\`
+- Any single file exceeding 500KB in size
+If ANY blocklisted file is found, set decision to "changes_requested" and list all problematic files.
+
+## Acceptance Criteria Alignment Check
+For each linked issue, you MUST:
+1. Fetch the issue body from GitHub using the linked issue number
+2. Extract all acceptance criteria checkboxes (lines with \`- [ ]\` or \`- [x]\`)
+3. Verify that each criterion is addressed in the PR diff
+4. If criteria are found, evaluate whether the PR actually fulfills them
+5. Report which criteria are met and which are missing
+
+## Scope Assessment
+Flag (but don't auto-reject) if:
+- PR modifies MORE than 10 files, AND
+- PR adds MORE than 1000 lines
+
+Include a warning about scope creep in these cases, but approval/rejection is based on other factors.
+
 ## Review Criteria
 You must evaluate this PR against the following criteria and provide structured findings:
 
-1. **Compilation/Linting**: Does the code compile and pass basic linting? Factor in CI results.
-2. **Security**: Are there any security issues (secret exposure, injection vulnerabilities, unsafe patterns)?
-3. **Issue Alignment**: Does this PR actually address the linked issue(s)?
-4. **Logic**: Are there obvious logic errors or bugs? Factor in CI results for test failures.
-5. **Complexity**: Does it introduce unnecessary complexity or scope creep?
-6. **Cost Impact**: Are there concerning cost implications (new infrastructure, expensive dependencies)?
-7. **CI Status**: Are there CI failures in changed files? Pre-existing failures should not block approval.
+1. **File Safety**: No blocklisted files present (REJECT if any found)
+2. **Compilation/Linting**: Does the code compile and pass basic linting? Factor in CI results.
+3. **Security**: Are there any security issues (secret exposure, injection vulnerabilities, unsafe patterns)?
+4. **Issue Alignment**: Does this PR actually address the linked issue(s) and acceptance criteria?
+5. **Logic**: Are there obvious logic errors or bugs? Factor in CI results for test failures.
+6. **Complexity**: Does it introduce unnecessary complexity or scope creep?
+7. **Cost Impact**: Are there concerning cost implications (new infrastructure, expensive dependencies)?
+8. **CI Status**: Are there CI failures in changed files? Pre-existing failures should not block approval.
 
 ## Your Tasks
 1. **Examine the codebase**: Use your tools to read relevant files and understand the changes
@@ -336,6 +418,11 @@ The file must have exactly this structure:
   \"decision\": \"approved\" or \"changes_requested\",
   \"summary\": \"Brief summary of the review\",
   \"findings\": {
+    \"file_safety\": {
+      \"status\": \"pass\" or \"fail\" or \"unknown\",
+      \"details\": \"Details about file blocklist check\",
+      \"blocklisted_files\": []
+    },
     \"compilation\": {
       \"status\": \"pass\" or \"fail\" or \"unknown\",
       \"details\": \"Details about compilation/linting\"
@@ -346,7 +433,9 @@ The file must have exactly this structure:
     },
     \"issue_alignment\": {
       \"status\": \"pass\" or \"fail\" or \"unknown\",
-      \"details\": \"Details about issue alignment\"
+      \"details\": \"Details about issue alignment\",
+      \"acceptance_criteria_met\": [],
+      \"acceptance_criteria_missing\": []
     },
     \"logic\": {
       \"status\": \"pass\" or \"fail\" or \"unknown\",
@@ -354,7 +443,8 @@ The file must have exactly this structure:
     },
     \"complexity\": {
       \"status\": \"pass\" or \"fail\" or \"unknown\",
-      \"details\": \"Details about complexity\"
+      \"details\": \"Details about complexity\",
+      \"scope_warning\": \"Warning about large PR if applicable\"
     },
     \"cost_impact\": {
       \"status\": \"pass\" or \"fail\" or \"unknown\",
@@ -375,6 +465,10 @@ You are in the PR head worktree (${HEAD_SHA}). The base version is available at 
 - Check that tests pass if there are any
 - Always provide accurate status values (pass/fail/unknown), not placeholder text
 - Provide actual details and issues, not generic \"See full review log\" messages
+- **CRITICAL**: Check file_safety FIRST - ANY blocklisted file must trigger changes_requested
+- **Acceptance Criteria**: If criteria are found, verify each one is addressed in the diff
+- **Scope**: If >10 files AND >1000 additions, include a scope warning but don't auto-reject
+- Use your tools to inspect files in both ../base-worktree and current directory for detailed analysis
 
 Begin your review now."
 
