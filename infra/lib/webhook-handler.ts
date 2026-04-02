@@ -1089,6 +1089,7 @@ interface DispatchConfig {
   auto_dispatch: boolean;
   auto_dispatch_labels: string[];
   wip_cap: number;
+  max_concurrent: number;
 }
 
 /**
@@ -1117,12 +1118,12 @@ async function getDispatchConfig(
     );
 
     if (response.status === 404) {
-      return { auto_dispatch: true, auto_dispatch_labels: ["ready"], wip_cap: 0 };
+      return { auto_dispatch: true, auto_dispatch_labels: ["ready"], wip_cap: 0, max_concurrent: 3 };
     }
 
     const content = await response.json() as any;
     if (content.type !== "file" || !content.content) {
-      return { auto_dispatch: true, auto_dispatch_labels: ["ready"], wip_cap: 0 };
+      return { auto_dispatch: true, auto_dispatch_labels: ["ready"], wip_cap: 0, max_concurrent: 3 };
     }
 
     // Decode base64 content
@@ -1132,17 +1133,19 @@ async function getDispatchConfig(
     const autoDispatchMatch = decoded.match(/^auto_dispatch:\s*(.+)$/m);
     const labelsMatch = decoded.match(/^auto_dispatch_labels:\s*(.+)$/m);
     const wipCapMatch = decoded.match(/^wip_cap:\s*(\d+)$/m);
+    const maxConcurrentMatch = decoded.match(/^max_concurrent:\s*(\d+)$/m);
 
     const auto_dispatch = autoDispatchMatch ? autoDispatchMatch[1].trim().toLowerCase() === "true" : true;
     const auto_dispatch_labels = labelsMatch
       ? labelsMatch[1].trim().split(",").map(l => l.trim()).filter(l => l)
       : ["ready"];
     const wip_cap = wipCapMatch ? parseInt(wipCapMatch[1], 10) : 0;
+    const max_concurrent = maxConcurrentMatch ? parseInt(maxConcurrentMatch[1], 10) : 3;
 
-    return { auto_dispatch, auto_dispatch_labels, wip_cap };
+    return { auto_dispatch, auto_dispatch_labels, wip_cap, max_concurrent };
   } catch (error) {
     console.log(`Failed to fetch dispatch config from .github/AGENT.md: ${error}`);
-    return { auto_dispatch: true, auto_dispatch_labels: ["ready"], wip_cap: 0 };
+    return { auto_dispatch: true, auto_dispatch_labels: ["ready"], wip_cap: 0, max_concurrent: 3 };
   }
 }
 
@@ -2928,6 +2931,56 @@ async function checkForActiveTasks(
   }
 }
 
+/**
+ * Counts the number of currently running tasks for a repo
+ */
+async function countRunningTasksForRepo(repoSlug: string): Promise<number> {
+  try {
+    const prefix = `tasks/${repoSlug}/`;
+    const listResult = await s3.send(
+      new ListObjectsV2Command({
+        Bucket: ARTIFACTS_BUCKET,
+        Prefix: prefix,
+        MaxKeys: 200,
+      })
+    );
+
+    const contents = listResult.Contents || [];
+    const metadataKeys = contents
+      .map((obj) => obj.Key!)
+      .filter((key) => key.endsWith("/metadata.json"));
+
+    let runningCount = 0;
+    for (const key of metadataKeys) {
+      try {
+        const result = await s3.send(
+          new GetObjectCommand({
+            Bucket: ARTIFACTS_BUCKET,
+            Key: key,
+          })
+        );
+        const body = await result.Body!.transformToString();
+        const metadata = JSON.parse(body);
+
+        if (metadata.status === "running") {
+          runningCount++;
+        }
+      } catch {
+        // Skip unreadable metadata files
+        continue;
+      }
+    }
+
+    console.log(`Repo ${repoSlug} has ${runningCount} running tasks`);
+    return runningCount;
+  } catch (error) {
+    console.error(
+      `Error counting running tasks for repo (non-blocking): ${error}`
+    );
+    return 0;
+  }
+}
+
 export async function handler(event: {
   headers: Record<string, string | undefined>;
   body?: string;
@@ -3861,6 +3914,67 @@ export async function handler(event: {
   if (await checkForActiveTasks(repoSlug, issueNumber)) {
     console.log(`Issue #${issueNumber} has an active task in S3, skipping`);
     return { statusCode: 200, body: "Already running (active task found)" };
+  }
+
+  // --- Check concurrent task limit per repo ---
+  const dispatchConfig = await getDispatchConfig(repoOwner, repoName, githubToken);
+  const runningTaskCount = await countRunningTasksForRepo(repoSlug);
+
+  if (runningTaskCount >= dispatchConfig.max_concurrent) {
+    console.log(`Repo ${repoSlug} has reached concurrent task limit (${runningTaskCount}/${dispatchConfig.max_concurrent}), queuing issue #${issueNumber}`);
+
+    await ensureSignalLabels(repoOwner, repoName, githubToken);
+
+    // Add queued label
+    const QUEUED_LABEL = "agent:queued";
+    try {
+      await githubRequest(
+        `/repos/${repoOwner}/${repoName}/labels`,
+        githubToken,
+        {
+          method: "POST",
+          body: JSON.stringify({
+            name: QUEUED_LABEL,
+            color: "FFA500",
+            description: "Task is queued and waiting for available capacity"
+          }),
+        },
+        [201, 422]
+      );
+    } catch (labelError) {
+      console.warn(`Could not ensure queued label exists: ${labelError}`);
+    }
+
+    await githubRequest(
+      `/repos/${repoOwner}/${repoName}/issues/${issueNumber}/labels`,
+      githubToken,
+      {
+        method: "POST",
+        body: JSON.stringify({ labels: [QUEUED_LABEL] }),
+      },
+      [200]
+    );
+
+    // Post informational comment
+    await addIssueComment(
+      repoOwner,
+      repoName,
+      issueNumber,
+      githubToken,
+      `⏱️ **Dispatch queued** — Concurrency limit reached (${runningTaskCount}/${dispatchConfig.max_concurrent})
+
+This task has been queued and will be dispatched automatically when capacity becomes available.`
+    );
+
+    return {
+      statusCode: 200,
+      body: JSON.stringify({
+        message: "Task queued: concurrency limit reached",
+        issueNumber,
+        runningTasks: runningTaskCount,
+        maxConcurrent: dispatchConfig.max_concurrent
+      })
+    };
   }
 
   // --- Check main CI health and block feature work if broken ---
