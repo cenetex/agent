@@ -41,6 +41,9 @@ const GITHUB_APP_PRIVATE_KEY_PARAM = process.env.GITHUB_APP_PRIVATE_KEY_PARAM!;
 // Tasks older than this are considered stale
 const STALE_TASK_THRESHOLD_MINUTES = 60; // 1 hour
 const SIGNAL_LABEL_FAILED = "agent:failed";
+const SIGNAL_LABEL_RUNNING = "agent:running";
+const QUEUED_LABEL = "agent:queued";
+const TRIGGER_LABEL = "agent";
 
 interface CleanupStats {
   tasksChecked: number;
@@ -425,6 +428,152 @@ Automatic retry triggered by cleanup handler. ${retryCount < 2 ? 'If this retry 
   return result;
 }
 
+/**
+ * Processes queued issues and dispatches them if concurrency slots are available
+ * Returns count of issues dequeued
+ */
+async function dequeueQueuedIssues(appId: string, privateKey: string): Promise<number> {
+  try {
+    console.log("Starting dequeue process for queued issues...");
+
+    const jwt = createGitHubAppJWT(appId, privateKey);
+    let dequeueCount = 0;
+
+    // Find all unique repos with queued issues by scanning task metadata
+    const reposList = new Set<string>();
+    const listResult = await s3.send(new ListObjectsV2Command({
+      Bucket: ARTIFACTS_BUCKET,
+      Prefix: "tasks/",
+      Delimiter: "/",
+      MaxKeys: 1000,
+    }));
+
+    if (listResult.CommonPrefixes) {
+      for (const prefix of listResult.CommonPrefixes) {
+        if (!prefix.Prefix) continue;
+        const repoSlug = prefix.Prefix.replace("tasks/", "").replace("/", "");
+        if (repoSlug) reposList.add(repoSlug);
+      }
+    }
+
+    // Process each repo
+    for (const repoSlug of reposList) {
+      try {
+        const { owner, name } = parseRepoSlug(repoSlug);
+        const installationId = await getInstallationId(owner, name, jwt);
+        const tokenResult = await createInstallationToken(installationId, jwt);
+        const githubToken = tokenResult.token;
+
+        // Count currently running tasks for this repo
+        let runningCount = 0;
+        const metadataListResult = await s3.send(new ListObjectsV2Command({
+          Bucket: ARTIFACTS_BUCKET,
+          Prefix: `tasks/${repoSlug}/`,
+          MaxKeys: 1000,
+        }));
+
+        if (metadataListResult.Contents) {
+          const metadataKeys = metadataListResult.Contents
+            .map(obj => obj.Key!)
+            .filter(key => key.endsWith("/metadata.json"));
+
+          for (const key of metadataKeys) {
+            try {
+              const metadata = await getTaskMetadata(key);
+              if (metadata && metadata.status === "running") {
+                runningCount++;
+              }
+            } catch {
+              continue;
+            }
+          }
+        }
+
+        // Get dispatch config to read max_concurrent setting
+        const configUrl = `/repos/${owner}/${name}/contents/.github/AGENT.md`;
+        const configResponse = await githubRequest(configUrl, githubToken, { method: "GET" }, [200, 404]);
+
+        let maxConcurrent = 3; // default
+        if (configResponse.status === 200) {
+          const contentData = await configResponse.json() as any;
+          if (contentData.type === "file" && contentData.content) {
+            const decoded = Buffer.from(contentData.content as string, "base64").toString("utf8");
+            const maxConcurrentMatch = decoded.match(/^max_concurrent:\s*(\d+)$/m);
+            if (maxConcurrentMatch) {
+              maxConcurrent = parseInt(maxConcurrentMatch[1], 10);
+            }
+          }
+        }
+
+        console.log(`Repo ${repoSlug}: ${runningCount}/${maxConcurrent} tasks running`);
+
+        // If there's capacity, find and dispatch queued issues
+        if (runningCount < maxConcurrent) {
+          const availableSlots = maxConcurrent - runningCount;
+          console.log(`Repo ${repoSlug} has ${availableSlots} available slot(s), checking for queued issues...`);
+
+          // Find queued issues
+          const issuesResponse = await githubRequest(
+            `/repos/${owner}/${name}/issues?state=open&labels=${encodeURIComponent(QUEUED_LABEL)}&per_page=100`,
+            githubToken,
+            { method: "GET" },
+            [200]
+          );
+          const queuedIssues = await issuesResponse.json() as any[];
+
+          // Dispatch up to availableSlots issues
+          for (let i = 0; i < Math.min(availableSlots, queuedIssues.length); i++) {
+            const issue = queuedIssues[i];
+            console.log(`Dequeuing issue #${issue.number} from ${repoSlug}`);
+
+            // Remove queued label and add agent label to trigger dispatch
+            await githubRequest(
+              `/repos/${owner}/${name}/issues/${issue.number}/labels/${encodeURIComponent(QUEUED_LABEL)}`,
+              githubToken,
+              { method: "DELETE" },
+              [200, 204, 404]
+            );
+
+            await githubRequest(
+              `/repos/${owner}/${name}/issues/${issue.number}/labels`,
+              githubToken,
+              {
+                method: "POST",
+                body: JSON.stringify({ labels: [TRIGGER_LABEL] }),
+              },
+              [200]
+            );
+
+            // Post comment about dequeue
+            await githubRequest(
+              `/repos/${owner}/${name}/issues/${issue.number}/comments`,
+              githubToken,
+              {
+                method: "POST",
+                body: JSON.stringify({
+                  body: `✅ **Dequeued** — Capacity available!\n\nThis task was queued due to concurrency limit and is now being dispatched.`
+                }),
+              },
+              [201]
+            );
+
+            dequeueCount++;
+          }
+        }
+      } catch (repoError) {
+        console.error(`Error processing repo ${repoSlug} for dequeue: ${repoError}`);
+        // Continue with other repos
+      }
+    }
+
+    console.log(`Dequeue process completed, dispatched ${dequeueCount} issues`);
+    return dequeueCount;
+  } catch (error) {
+    console.error(`Error during dequeue process: ${error}`);
+    return 0;
+  }
+}
+
 async function archiveFeedbackExamples(): Promise<{ archived: number; errors: string[] }> {
   const result = { archived: 0, errors: [] as string[] };
 
@@ -691,6 +840,11 @@ The task has been automatically terminated and marked as failed.`;
     const retryResult = await retryFailedTasks(appId, privateKey);
     stats.retries = retryResult.retries;
     stats.retriesSkipped = retryResult.skipped;
+
+    // Dequeue issues and dispatch if capacity available
+    console.log("Running dequeue process for queued issues...");
+    const dequeueResult = await dequeueQueuedIssues(appId, privateKey);
+    console.log(`Dequeued ${dequeueResult} issue(s)`);
 
     // Archive old feedback examples (30+ days old)
     console.log("Running feedback example archival...");
