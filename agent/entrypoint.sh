@@ -720,6 +720,7 @@ fi
 fetch_feedback_examples() {
   local repo_slug="$1"
   local task_type="$2"
+  local outcome="${3:-merged}"  # Default to successful examples (merged), can override to "closed" for failures
 
   # Compute cutoff date: 30 days ago
   local cutoff_date
@@ -734,9 +735,9 @@ fetch_feedback_examples() {
   local index_key="feedback-examples/${repo_slug}/${task_type}/index.json"
 
   aws s3 cp "s3://${ARTIFACTS_BUCKET}/${index_key}" - 2>/dev/null \
-    | jq --arg cutoff "$cutoff_date" '
+    | jq --arg cutoff "$cutoff_date" --arg outcome "$outcome" '
         .examples
-        | map(select(.created_at >= $cutoff))
+        | map(select(.created_at >= $cutoff and .outcome == $outcome))
         | sort_by(.outcome_at) | reverse | .[0:3]
       ' 2>/dev/null || echo "[]"
 }
@@ -760,67 +761,130 @@ format_feedback_section() {
   local feedback_section=""
 
   # Fetch recent successful examples
-  local examples_json
-  examples_json=$(fetch_feedback_examples "$repo_slug" "$task_type" 2>/dev/null)
+  local success_examples_json
+  success_examples_json=$(fetch_feedback_examples "$repo_slug" "$task_type" "merged" 2>/dev/null)
 
-  if [ -z "$examples_json" ] || [ "$examples_json" = "[]" ]; then
+  # Fetch recent failure examples
+  local failure_examples_json
+  failure_examples_json=$(fetch_feedback_examples "$repo_slug" "$task_type" "closed" 2>/dev/null)
+
+  # Check if we have any examples at all
+  if ([ -z "$success_examples_json" ] || [ "$success_examples_json" = "[]" ]) && \
+     ([ -z "$failure_examples_json" ] || [ "$failure_examples_json" = "[]" ]); then
     return 0  # No examples available
   fi
 
-  feedback_section="
+  # Process successful examples
+  if [ -n "$success_examples_json" ] && [ "$success_examples_json" != "[]" ]; then
+    feedback_section="
 
 ## Recent Successful Examples
 
 Here are recent examples of similar tasks completed successfully by this agent:
 "
 
-  # Process each example
-  local count=0
-  while read -r example_entry; do
-    if [ -z "$example_entry" ]; then
-      continue
-    fi
+    local count=0
+    while read -r example_entry; do
+      if [ -z "$example_entry" ]; then
+        continue
+      fi
 
-    count=$((count + 1))
-    local example_id
-    example_id=$(echo "$example_entry" | jq -r '.example_id')
-    local outcome
-    outcome=$(echo "$example_entry" | jq -r '.outcome')
-    local example_date
-    example_date=$(echo "$example_entry" | jq -r '.created_at' | cut -d'T' -f1)
+      count=$((count + 1))
+      local example_id
+      example_id=$(echo "$example_entry" | jq -r '.example_id')
+      local outcome
+      outcome=$(echo "$example_entry" | jq -r '.outcome')
+      local example_date
+      example_date=$(echo "$example_entry" | jq -r '.created_at' | cut -d'T' -f1)
 
-    # Fetch full example content
-    local example_json
-    example_json=$(fetch_example_content "$repo_slug" "$outcome" "$example_date" "$example_id" 2>/dev/null)
+      # Fetch full example content
+      local example_json
+      example_json=$(fetch_example_content "$repo_slug" "$outcome" "$example_date" "$example_id" 2>/dev/null)
 
-    if [ -z "$example_json" ]; then
-      continue
-    fi
+      if [ -z "$example_json" ]; then
+        continue
+      fi
 
-    local title
-    title=$(echo "$example_json" | jq -r '.task_payload.issue_metadata.title // "Untitled"' 2>/dev/null)
-    local summary
-    summary=$(echo "$example_json" | jq -r '.task_payload.issue_metadata.body // ""' | head -c 200 2>/dev/null)
-    local diff
-    diff=$(echo "$example_json" | jq -r '.pr_diff // ""' | head -c 1000 2>/dev/null)
+      local title
+      title=$(echo "$example_json" | jq -r '.task_payload.issue_metadata.title // "Untitled"' 2>/dev/null)
+      local summary
+      summary=$(echo "$example_json" | jq -r '.task_payload.issue_metadata.body // ""' | head -c 200 2>/dev/null)
+      local diff
+      diff=$(echo "$example_json" | jq -r '.pr_diff // ""' | head -c 1000 2>/dev/null)
 
-    feedback_section="${feedback_section}
+      feedback_section="${feedback_section}
 
 ### Example ${count}: ${title}
-**Outcome:** ${outcome}
 **Date:** ${example_date}
 
 ${summary}
 
 "
-    if [ -n "$diff" ] && [ "$diff" != "null" ]; then
-      feedback_section="${feedback_section}\`\`\`diff
+      if [ -n "$diff" ] && [ "$diff" != "null" ]; then
+        feedback_section="${feedback_section}\`\`\`diff
 ${diff}
 \`\`\`
 
 "
-    fi
-  done < <(echo "$examples_json" | jq -c '.[]')
+      fi
+    done < <(echo "$success_examples_json" | jq -c '.[]')
+  fi
+
+  # Process failure examples (anti-patterns)
+  if [ -n "$failure_examples_json" ] && [ "$failure_examples_json" != "[]" ]; then
+    feedback_section="${feedback_section}
+
+## Anti-patterns — Don't Repeat These Mistakes
+
+Here are recent examples of failed attempts. Learn from these to avoid similar mistakes:
+"
+
+    local count=0
+    while read -r example_entry; do
+      if [ -z "$example_entry" ]; then
+        continue
+      fi
+
+      count=$((count + 1))
+      local example_id
+      example_id=$(echo "$example_entry" | jq -r '.example_id')
+      local outcome
+      outcome=$(echo "$example_entry" | jq -r '.outcome')
+      local example_date
+      example_date=$(echo "$example_entry" | jq -r '.created_at' | cut -d'T' -f1)
+
+      # Fetch full example content
+      local example_json
+      example_json=$(fetch_example_content "$repo_slug" "$outcome" "$example_date" "$example_id" 2>/dev/null)
+
+      if [ -z "$example_json" ]; then
+        continue
+      fi
+
+      local title
+      title=$(echo "$example_json" | jq -r '.task_payload.issue_metadata.title // "Untitled"' 2>/dev/null)
+      local description
+      description=$(echo "$example_json" | jq -r '.task_payload.issue_metadata.body // ""' | head -c 200 2>/dev/null)
+      local human_comments
+      human_comments=$(echo "$example_json" | jq -r '.human_comments // ""' 2>/dev/null)
+
+      feedback_section="${feedback_section}
+
+### Anti-pattern ${count}: ${title}
+**Date:** ${example_date}
+
+**What was attempted:**
+${description}
+
+"
+      if [ -n "$human_comments" ] && [ "$human_comments" != "null" ] && [ "$human_comments" != "" ]; then
+        feedback_section="${feedback_section}**Why it failed:**
+${human_comments}
+
+"
+      fi
+    done < <(echo "$failure_examples_json" | jq -c '.[]')
+  fi
 
   echo "$feedback_section"
 }
