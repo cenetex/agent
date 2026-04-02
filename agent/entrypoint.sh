@@ -248,6 +248,46 @@ on_exit() {
   fi
 
   if [ "${RUN_STATUS}" = "succeeded" ] && [ "${exit_code}" -eq 0 ]; then
+    # Check acceptance criteria before marking succeeded
+    CRITERIA_CHECK_FILE="/tmp/criteria-check.json"
+    CRITERIA_STATUS_COMMENT=""
+
+    if [ -f "$CRITERIA_CHECK_FILE" ]; then
+      echo "Checking acceptance criteria..."
+
+      if ! check_acceptance_criteria "$CRITERIA_CHECK_FILE"; then
+        # Unmet criteria found — switch to waiting status
+        echo "Unmet criteria detected — setting status to waiting"
+        set_signal_label "${SIGNAL_LABEL_WAITING}"
+        update_task_metadata "waiting" "" ""
+        upload_artifacts "$exit_code" ""
+
+        # Format criteria status for comment
+        CRITERIA_STATUS_COMMENT=$(format_criteria_status "$CRITERIA_CHECK_FILE")
+
+        local summary="⏸️ **Agent found unmet acceptance criteria**
+
+The agent has completed work, but some acceptance criteria from the issue were not addressed.
+
+Please review the criteria status below and either:
+1. Address the remaining criteria with the agent by re-labeling with \`${TRIGGER_LABEL}\`
+2. Update the acceptance criteria if they were incorrect
+
+**Task Details:**
+- Task ID: \`${TASK_ID}\`
+- Commit SHA: \`${RESOLVED_COMMIT_SHA}\`
+
+${CRITERIA_STATUS_COMMENT}
+
+[View artifacts](https://console.aws.amazon.com/s3/buckets/${ARTIFACTS_BUCKET}?prefix=${ARTIFACT_PREFIX}/)"
+
+        post_comment "${ISSUE_NUMBER}" "${REPO}" "$summary"
+
+        echo "=== Agent waiting (unmet criteria) ==="
+        exit 0
+      fi
+    fi
+
     set_signal_label "${SIGNAL_LABEL_SUCCEEDED}"
 
     # Find created PR URL if this was an issue
@@ -259,6 +299,14 @@ on_exit() {
     upload_artifacts "$exit_code" "$pr_url"
 
     local summary=$(create_completion_summary "succeeded" "$pr_url" "")
+
+    # Add criteria status to summary if available
+    if [ -n "$CRITERIA_STATUS_COMMENT" ]; then
+      summary="${summary}
+
+${CRITERIA_STATUS_COMMENT}"
+    fi
+
     post_comment "${ISSUE_NUMBER}" "${REPO}" "$summary"
 
     echo "=== Agent finished ==="
@@ -891,6 +939,20 @@ Your mission:
 - Post a comment on the PR summarizing what you did using: gh issue comment ${ISSUE_NUMBER} --body '<your comment>'
 - If you need clarification from the author, post a comment asking for it and stop
 - Be concise. Make minimal, focused changes.
+
+BEFORE FINISHING:
+Re-read the acceptance criteria from the issue description. For each checkbox:
+- If you addressed it: explain how in one line
+- If you did NOT address it: say so explicitly
+Write this to /tmp/criteria-check.json in this format:
+{
+  \"task_id\": \"${TASK_ID}\",
+  \"criteria\": [
+    {\"description\": \"first criterion\", \"met\": true, \"note\": \"explanation\"},
+    {\"description\": \"second criterion\", \"met\": false, \"note\": \"reason why not addressed\"}
+  ]
+}
+
 - IMPORTANT: Do not ask for confirmation or approval. Execute immediately.
 
 Note: You are working on commit SHA ${RESOLVED_COMMIT_SHA} which was the head of the PR when this task was created."
@@ -932,6 +994,20 @@ Your mission:
 - Post your results as comments on this issue
 - When done with all deliverables, close this issue using: gh issue close ${ISSUE_NUMBER}
 - Be thorough in your analysis and clear in your communications.
+
+BEFORE FINISHING:
+Re-read the acceptance criteria from the issue description. For each checkbox:
+- If you addressed it: explain how in one line
+- If you did NOT address it: say so explicitly
+Write this to /tmp/criteria-check.json in this format:
+{
+  \"task_id\": \"${TASK_ID}\",
+  \"criteria\": [
+    {\"description\": \"first criterion\", \"met\": true, \"note\": \"explanation\"},
+    {\"description\": \"second criterion\", \"met\": false, \"note\": \"reason why not addressed\"}
+  ]
+}
+
 - IMPORTANT: Do not ask for confirmation or approval. Execute immediately.
 
 When you close the issue, the system will detect this and mark your work as complete."
@@ -993,6 +1069,19 @@ Your mission:
 - If your task does NOT require code changes (e.g., creating issues, analysis, planning), post your results as a comment and close this issue when done using: gh issue close ${ISSUE_NUMBER}
 - If you need more information to proceed, post a comment asking for clarification using: gh issue comment ${ISSUE_NUMBER} --body '<your question>'
 - Be concise. Make minimal, focused changes. Don't refactor unrelated code.
+
+BEFORE FINISHING:
+Re-read the acceptance criteria from the issue description. For each checkbox:
+- If you addressed it: explain how in one line
+- If you did NOT address it: say so explicitly
+Write this to /tmp/criteria-check.json in this format:
+{
+  \"task_id\": \"${TASK_ID}\",
+  \"criteria\": [
+    {\"description\": \"first criterion\", \"met\": true, \"note\": \"explanation\"},
+    {\"description\": \"second criterion\", \"met\": false, \"note\": \"reason why not addressed\"}
+  ]
+}
 
 IMPORTANT: Do not ask for confirmation or approval. Do not say 'Ready to implement?' or 'Shall I proceed?'. Execute immediately. Create the branch, commit, push, and open the PR."
 fi

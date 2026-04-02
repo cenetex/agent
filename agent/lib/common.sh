@@ -175,3 +175,73 @@ has_agent_question_comment() {
     | length > 0
   ' >/dev/null <<<"${comments_json}"
 }
+
+# Check if acceptance criteria are met
+# Returns 0 if all criteria are met, 1 if any unmet
+check_acceptance_criteria() {
+  local criteria_file="$1"
+
+  if [ ! -f "$criteria_file" ]; then
+    # No criteria check file found — assume criteria checking not needed
+    return 0
+  fi
+
+  if ! jq empty "$criteria_file" 2>/dev/null; then
+    # Invalid JSON
+    echo "WARNING: Invalid JSON in criteria check file: $criteria_file" >&2
+    return 0
+  fi
+
+  # Check if any criteria are marked as unmet (met == false)
+  if jq -e '.criteria[]? | select(.met == false)' "$criteria_file" >/dev/null 2>&1; then
+    return 1  # Unmet criteria found
+  fi
+
+  return 0  # All criteria met
+}
+
+# Format criteria status for commenting
+format_criteria_status() {
+  local criteria_file="$1"
+
+  if [ ! -f "$criteria_file" ]; then
+    return 0
+  fi
+
+  if ! jq empty "$criteria_file" 2>/dev/null; then
+    return 0
+  fi
+
+  local status_section=""
+  status_section="## ✅ Acceptance Criteria Status
+
+"
+
+  # Add met criteria
+  if jq -e '.criteria[]? | select(.met == true)' "$criteria_file" >/dev/null 2>&1; then
+    status_section="${status_section}### ✅ Met Criteria
+"
+    while read -r criterion; do
+      local desc=$(echo "$criterion" | jq -r '.description')
+      local note=$(echo "$criterion" | jq -r '.note // ""')
+      status_section="${status_section}- **${desc}**: ${note}
+"
+    done < <(jq -c '.criteria[]? | select(.met == true)' "$criteria_file")
+    status_section="${status_section}
+"
+  fi
+
+  # Add unmet criteria
+  if jq -e '.criteria[]? | select(.met == false)' "$criteria_file" >/dev/null 2>&1; then
+    status_section="${status_section}### ❌ Unmet Criteria
+"
+    while read -r criterion; do
+      local desc=$(echo "$criterion" | jq -r '.description')
+      local note=$(echo "$criterion" | jq -r '.note // ""')
+      status_section="${status_section}- **${desc}**: ${note}
+"
+    done < <(jq -c '.criteria[]? | select(.met == false)' "$criteria_file")
+  fi
+
+  echo "$status_section"
+}
