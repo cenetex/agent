@@ -609,6 +609,9 @@ async function scanRepository(
           }
 
           await postTriageComment(repo, issueNumber, commentMessage, token);
+        } else {
+          // Enrichment failed - don't auto-label yet, let enrichment handler retry
+          console.log(`Issue #${issueNumber}: Deploy failure could not be enriched, skipping for now`);
         }
 
         continue;
