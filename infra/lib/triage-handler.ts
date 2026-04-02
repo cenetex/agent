@@ -354,25 +354,149 @@ async function postTriageComment(
 }
 
 /**
+ * Extracts error lines from workflow logs
+ */
+function parseErrorsFromLogs(logsContent: string): string[] {
+  const lines = logsContent.split("\n");
+  const errorPatterns = [
+    /\bERROR\b/i,
+    /\berror\b/i,
+    /\bTS\d+\b/,
+    /\bFAIL\b/i,
+    /\bCannot\b/,
+    /\bdenied\b/i,
+  ];
+
+  const errorLines: string[] = [];
+  for (const line of lines) {
+    if (errorPatterns.some(pattern => pattern.test(line))) {
+      const trimmed = line.trim();
+      if (trimmed && !errorLines.includes(trimmed)) {
+        errorLines.push(trimmed);
+      }
+    }
+  }
+
+  return errorLines;
+}
+
+/**
+ * Classifies error based on content
+ */
+function classifyError(errorContent: string): {
+  classification: "agent" | "needs:manual" | "needs:triage";
+  reason: string;
+} {
+  const lowerError = errorContent.toLowerCase();
+
+  // IAM/OIDC/credentials/infra issues
+  if (
+    lowerError.includes("iam") ||
+    lowerError.includes("oidc") ||
+    lowerError.includes("permission") ||
+    lowerError.includes("denied") ||
+    lowerError.includes("denied") ||
+    lowerError.includes("403") ||
+    lowerError.includes("401") ||
+    lowerError.includes("unauthorized") ||
+    lowerError.includes("access denied") ||
+    lowerError.includes("aws") ||
+    lowerError.includes("role") ||
+    lowerError.includes("credential") ||
+    lowerError.includes("secret")
+  ) {
+    return {
+      classification: "needs:manual",
+      reason: "IAM/OIDC/credentials or infrastructure issue",
+    };
+  }
+
+  // Code-actionable issues
+  if (
+    lowerError.includes("error ts") ||
+    lowerError.includes("type error") ||
+    lowerError.includes("cannot find") ||
+    lowerError.includes("lint") ||
+    lowerError.includes("failed") ||
+    lowerError.includes("jest") ||
+    lowerError.includes("test failed") ||
+    lowerError.includes("dependency") ||
+    lowerError.includes("module not found") ||
+    lowerError.includes("import") ||
+    lowerError.includes("syntax error")
+  ) {
+    return {
+      classification: "agent",
+      reason: "Code error - TypeScript, tests, or dependencies",
+    };
+  }
+
+  // Unknown
+  return {
+    classification: "needs:triage",
+    reason: "Unknown error type - requires manual review",
+  };
+}
+
+/**
+ * Fetches logs for a failed job and extracts error details
+ */
+async function getJobErrorLogs(
+  repo: string,
+  jobId: number,
+  token: string
+): Promise<string> {
+  try {
+    // Download logs for the job
+    const logsResponse = await githubRequest(
+      `/repos/${repo}/actions/jobs/${jobId}/logs`,
+      token,
+      { method: "GET" },
+      [200, 404, 410]
+    );
+
+    if (logsResponse.status !== 200) {
+      console.log(
+        `Could not fetch logs for job ${jobId} (status ${logsResponse.status})`
+      );
+      return "";
+    }
+
+    const logsContent = await logsResponse.text();
+    return logsContent;
+  } catch (error) {
+    console.warn(`Failed to fetch logs for job ${jobId}:`, error);
+    return "";
+  }
+}
+
+/**
  * Enriches deploy failure issue with workflow logs
  */
 async function enrichDeployFailure(
   repo: string,
   issue: any,
   token: string
-): Promise<void> {
+): Promise<{
+  succeeded: boolean;
+  classification?: "agent" | "needs:manual" | "needs:triage";
+}> {
   try {
     // Try to extract workflow run ID from issue body
-    const runIdMatch = (issue.body || "").match(/workflow run (\d+)/i) ||
-                       (issue.body || "").match(/run[\/\s]+id[:\s]+(\d+)/i);
+    const runIdMatch =
+      (issue.body || "").match(/Run ID[:\s]+(\d+)/i) ||
+      (issue.body || "").match(/workflow run (\d+)/i) ||
+      (issue.body || "").match(/run[\/\s]+id[:\s]+(\d+)/i) ||
+      (issue.body || "").match(/\(Run #(\d+)\)/);
 
     if (!runIdMatch) {
-      console.log(`${repo}#${issue.number}: Could not find workflow run ID in issue body`);
-      return;
+      console.log(
+        `${repo}#${issue.number}: Could not find workflow run ID in issue body`
+      );
+      return { succeeded: false };
     }
 
     const runId = runIdMatch[1];
-    const [owner, repoName] = repo.split("/");
 
     // Get workflow run details
     const runResponse = await githubRequest(
@@ -384,10 +508,8 @@ async function enrichDeployFailure(
 
     if (runResponse.status === 404) {
       console.log(`${repo}#${issue.number}: Workflow run ${runId} not found`);
-      return;
+      return { succeeded: false };
     }
-
-    const workflowRun = await runResponse.json() as any;
 
     // Get job logs
     const jobsResponse = await githubRequest(
@@ -397,23 +519,59 @@ async function enrichDeployFailure(
       [200]
     );
 
-    const jobs = await jobsResponse.json() as any;
-    let errorSummary = "";
+    const jobs = (await jobsResponse.json()) as any;
+    const failedJobs = jobs.jobs.filter(
+      (job: any) => job.status === "completed" && job.conclusion === "failure"
+    );
 
-    for (const job of jobs.jobs) {
-      if (job.status === "completed" && job.conclusion === "failure") {
-        // Extract error from job name and conclusion
-        errorSummary += `- **${job.name}**: ${job.conclusion}\n`;
+    if (failedJobs.length === 0) {
+      console.log(
+        `${repo}#${issue.number}: No failed jobs found in workflow run`
+      );
+      return { succeeded: false };
+    }
+
+    // Collect errors from all failed jobs
+    let allErrorLines: string[] = [];
+    let classificationReason = "";
+
+    for (const job of failedJobs) {
+      const logs = await getJobErrorLogs(repo, job.id, token);
+      const errorLines = parseErrorsFromLogs(logs);
+
+      if (errorLines.length > 0) {
+        allErrorLines = [...allErrorLines, ...errorLines];
       }
     }
 
-    if (!errorSummary) {
-      console.log(`${repo}#${issue.number}: No failed jobs found in workflow run`);
-      return;
+    if (allErrorLines.length === 0) {
+      console.log(
+        `${repo}#${issue.number}: Could not extract error lines from logs`
+      );
+      return { succeeded: false };
     }
 
+    // Limit error details to avoid huge issue bodies
+    const errorDetails = allErrorLines.slice(0, 10).join("\n");
+
+    // Classify the error
+    const { classification, reason } = classifyError(errorDetails);
+    classificationReason = reason;
+
+    // Build Root Cause section
+    const rootCauseSection = `## Root Cause
+
+\`\`\`
+${errorDetails}
+\`\`\`
+
+**Classification:** ${classification}
+**Reason:** ${reason}
+
+_Enriched by auto-triage handler_`;
+
     // Update issue body with error details
-    const newBody = `${issue.body || ""}\n\n## Workflow Failure Details\n\n${errorSummary}\n\n_Enriched by auto-triage handler_`;
+    const newBody = `${issue.body || ""}\n\n${rootCauseSection}`;
 
     await githubRequest(
       `/repos/${repo}/issues/${issue.number}`,
@@ -425,9 +583,14 @@ async function enrichDeployFailure(
       [200]
     );
 
-    console.log(`Enriched deploy failure ${repo}#${issue.number} with workflow details`);
+    console.log(
+      `Enriched deploy failure ${repo}#${issue.number} with workflow details (classification: ${classification})`
+    );
+
+    return { succeeded: true, classification };
   } catch (error) {
     console.warn(`Failed to enrich deploy failure ${repo}#${issue.number}:`, error);
+    return { succeeded: false };
   }
 }
 
@@ -476,17 +639,35 @@ async function scanRepository(
       // Handle deploy failures
       if (isDeployFailure(issue)) {
         console.log(`Issue #${issueNumber}: Deploy failure detected`);
-        await enrichDeployFailure(repo, issue, token);
+        const enrichResult = await enrichDeployFailure(repo, issue, token);
 
-        // If enrichment succeeded and criteria ≤3 and has credits, auto-label
-        if (criteria <= AGENT_READY_THRESHOLD && hasCredits) {
-          await addLabel(repo, issueNumber, "agent", token);
-          await postTriageComment(
-            repo,
-            issueNumber,
-            `✅ **Auto-triaged**: Enriched deploy failure with workflow details and labeled as agent-ready.\n\nAcceptance criteria: ${criteria}/${AGENT_READY_THRESHOLD}`,
-            token
-          );
+        if (enrichResult.succeeded && enrichResult.classification) {
+          // Add classification label
+          if (enrichResult.classification === "agent" && hasCredits) {
+            await addLabel(repo, issueNumber, "agent", token);
+            await postTriageComment(
+              repo,
+              issueNumber,
+              `✅ **Auto-triaged**: Enriched deploy failure with error logs and labeled as agent-ready (code-actionable issue).\n\nAcceptance criteria: ${criteria}/${AGENT_READY_THRESHOLD}`,
+              token
+            );
+          } else if (enrichResult.classification === "needs:manual") {
+            await addLabel(repo, issueNumber, "needs:manual", token);
+            await postTriageComment(
+              repo,
+              issueNumber,
+              `⚠️ **Auto-triaged**: Enriched deploy failure with error logs. This appears to be an IAM/infrastructure issue requiring manual intervention.`,
+              token
+            );
+          } else {
+            await addLabel(repo, issueNumber, "needs:triage", token);
+            await postTriageComment(
+              repo,
+              issueNumber,
+              `❓ **Auto-triaged**: Enriched deploy failure with error logs. Unable to classify - requires manual review.`,
+              token
+            );
+          }
         }
         continue;
       }
