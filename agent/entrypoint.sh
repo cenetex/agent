@@ -73,6 +73,7 @@ METADATA_KEY="${ARTIFACT_PREFIX}/metadata.json"
 LOG_KEY="${ARTIFACT_PREFIX}/agent.log"
 SUMMARY_KEY="${ARTIFACT_PREFIX}/summary.md"
 MANIFEST_KEY="${ARTIFACT_PREFIX}/manifest.json"
+DECISION_LOG_KEY="${ARTIFACT_PREFIX}/decision-log.json"
 
 set_signal_label() {
   local target_label="$1"
@@ -134,6 +135,9 @@ upload_artifacts() {
   # Upload agent log using common helper
   upload_artifact "${AGENT_LOG}" "${LOG_KEY}" "text/plain"
 
+  # Upload decision log if it exists
+  upload_artifact "/tmp/decision-log.json" "${DECISION_LOG_KEY}" "application/json"
+
   # Create and upload task manifest
   local manifest_json
   manifest_json=$(cat <<EOF
@@ -141,6 +145,7 @@ upload_artifacts() {
   "task_id": "${TASK_ID}",
   "metadata_key": "${METADATA_KEY}",
   "log_key": "$(if [ -f "${AGENT_LOG}" ] && [ -s "${AGENT_LOG}" ]; then echo "${LOG_KEY}"; else echo "null"; fi)",
+  "decision_log_key": "$(if [ -f "/tmp/decision-log.json" ]; then echo "${DECISION_LOG_KEY}"; else echo "null"; fi)",
   "summary_key": null,
   "exit_code": ${exit_code},
   "total_size_bytes": $(if [ -f "${AGENT_LOG}" ]; then wc -c < "${AGENT_LOG}"; else echo "0"; fi)",
@@ -170,7 +175,7 @@ The agent has reviewed and processed PR #${ISSUE_NUMBER}.
 - Commit SHA: \`${RESOLVED_COMMIT_SHA}\`
 - Completed at: $(date -u +"%Y-%m-%dT%H:%M:%SZ")
 
-[View artifacts](https://console.aws.amazon.com/s3/buckets/${ARTIFACTS_BUCKET}?prefix=${ARTIFACT_PREFIX}/)"
+[View artifacts](https://console.aws.amazon.com/s3/buckets/${ARTIFACTS_BUCKET}?prefix=${ARTIFACT_PREFIX}/) | [Decision Log](https://console.aws.amazon.com/s3/buckets/${ARTIFACTS_BUCKET}?prefix=${ARTIFACT_PREFIX}/decision-log.json)"
       elif [ -n "$pr_url" ]; then
         summary="✅ **Agent run completed successfully**
 
@@ -181,7 +186,7 @@ The agent has created a pull request to address issue #${ISSUE_NUMBER}: $pr_url
 - Commit SHA: \`${RESOLVED_COMMIT_SHA}\`
 - Completed at: $(date -u +"%Y-%m-%dT%H:%M:%SZ")
 
-[View artifacts](https://console.aws.amazon.com/s3/buckets/${ARTIFACTS_BUCKET}?prefix=${ARTIFACT_PREFIX}/)"
+[View artifacts](https://console.aws.amazon.com/s3/buckets/${ARTIFACTS_BUCKET}?prefix=${ARTIFACT_PREFIX}/) | [Decision Log](https://console.aws.amazon.com/s3/buckets/${ARTIFACTS_BUCKET}?prefix=${ARTIFACT_PREFIX}/decision-log.json)"
       else
         summary="✅ **Agent run completed**
 
@@ -192,7 +197,7 @@ The agent has finished working on issue #${ISSUE_NUMBER}.
 - Commit SHA: \`${RESOLVED_COMMIT_SHA}\`
 - Completed at: $(date -u +"%Y-%m-%dT%H:%M:%SZ")
 
-[View artifacts](https://console.aws.amazon.com/s3/buckets/${ARTIFACTS_BUCKET}?prefix=${ARTIFACT_PREFIX}/)"
+[View artifacts](https://console.aws.amazon.com/s3/buckets/${ARTIFACTS_BUCKET}?prefix=${ARTIFACT_PREFIX}/) | [Decision Log](https://console.aws.amazon.com/s3/buckets/${ARTIFACTS_BUCKET}?prefix=${ARTIFACT_PREFIX}/decision-log.json)"
       fi
       ;;
     "waiting")
@@ -1145,6 +1150,18 @@ Write this to /tmp/criteria-check.json in this format:
     {\"description\": \"first criterion\", \"met\": true, \"note\": \"explanation\"},
     {\"description\": \"second criterion\", \"met\": false, \"note\": \"reason why not addressed\"}
   ]
+}
+
+At the end of your work, write a JSON summary to /tmp/decision-log.json with:
+{
+  \"issue_interpreted_as\": \"your understanding of the task\",
+  \"files_changed\": [\"path/to/file1.ts\", \"path/to/file2.sh\"],
+  \"acceptance_criteria_met\": {
+    \"criterion description\": {\"met\": true, \"note\": \"explanation\"},
+    \"another criterion\": {\"met\": false, \"note\": \"reason\"}
+  },
+  \"confidence\": 9,
+  \"risks\": \"anything you're unsure about\"
 }
 
 IMPORTANT: Do not ask for confirmation or approval. Do not say 'Ready to implement?' or 'Shall I proceed?'. Execute immediately. Create the branch, commit, push, and open the PR."
