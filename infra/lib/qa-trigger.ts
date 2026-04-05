@@ -47,6 +47,27 @@ async function githubRequest(
   return response;
 }
 
+async function findExistingQAIssue(
+  repoOwner: string,
+  repoName: string,
+  token: string
+): Promise<number | null> {
+  const response = await githubRequest(
+    `/repos/${repoOwner}/${repoName}/issues?labels=agent&state=open&per_page=100`,
+    token,
+    { method: "GET" },
+    [200]
+  );
+
+  const issues = (await response.json()) as any[];
+  for (const issue of issues) {
+    if (issue.title === "QA: Nightly System Check") {
+      return issue.number;
+    }
+  }
+  return null;
+}
+
 async function createQAIssue(
   repoOwner: string,
   repoName: string,
@@ -135,6 +156,18 @@ export async function handler(): Promise<{ issueNumber: number }> {
     // Create installation token
     const tokenResult = await createInstallationToken(installationId, jwt);
     const githubToken = tokenResult.token;
+
+    // Check for existing open QA issue to prevent duplicates
+    const existingIssueNumber = await findExistingQAIssue(
+      "cenetex",
+      "agent",
+      githubToken
+    );
+
+    if (existingIssueNumber) {
+      console.log(`Found existing open QA issue #${existingIssueNumber}, skipping duplicate creation`);
+      return { issueNumber: existingIssueNumber };
+    }
 
     // Create QA issue
     const issueNumber = await createQAIssue(

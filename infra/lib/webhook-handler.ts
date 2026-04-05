@@ -2988,6 +2988,62 @@ async function countConcurrentTasks(repoSlug: string): Promise<number> {
   }
 }
 
+/**
+ * Checks if a task is already running or queued for the same issue
+ * Prevents duplicate task dispatch for the same issue number
+ */
+async function hasRunningTaskForIssue(
+  repoSlug: string,
+  issueNumber: number
+): Promise<boolean> {
+  try {
+    const prefix = `tasks/${repoSlug}/`;
+    const listResult = await s3.send(
+      new ListObjectsV2Command({
+        Bucket: ARTIFACTS_BUCKET,
+        Prefix: prefix,
+        MaxKeys: 1000,
+      })
+    );
+
+    const contents = listResult.Contents || [];
+    const metadataKeys = contents
+      .map((obj) => obj.Key!)
+      .filter((key) => key.endsWith("/metadata.json"));
+
+    for (const key of metadataKeys) {
+      try {
+        const result = await s3.send(
+          new GetObjectCommand({
+            Bucket: ARTIFACTS_BUCKET,
+            Key: key,
+          })
+        );
+        const body = await result.Body!.transformToString();
+        const metadata = JSON.parse(body);
+
+        // Check if any running/queued task is for the same issue number
+        if (
+          (metadata.status === "running" || metadata.status === "queued") &&
+          metadata.issue_metadata?.number === issueNumber
+        ) {
+          return true;
+        }
+      } catch {
+        // Skip unreadable metadata files
+        continue;
+      }
+    }
+
+    return false;
+  } catch (error) {
+    console.error(
+      `Error checking for duplicate task for issue #${issueNumber} (non-blocking): ${error}`
+    );
+    return false;
+  }
+}
+
 export async function handler(event: {
   headers: Record<string, string | undefined>;
   body?: string;
@@ -3979,6 +4035,35 @@ Once main is healthy or the issue is marked as a critical fix, re-label with \`a
     } else {
       console.log(`Main CI is broken but issue #${issueNumber} is allowed (bug/critical fix), proceeding`);
     }
+  }
+
+  // --- Check for duplicate task dispatch ---
+  const isDuplicate = await hasRunningTaskForIssue(repoSlug, issueNumber);
+  if (isDuplicate) {
+    console.log(`Task already running or queued for issue #${issueNumber}, rejecting duplicate dispatch`);
+
+    await ensureSignalLabels(repoOwner, repoName, githubToken);
+
+    // Post informational comment
+    await addIssueComment(
+      repoOwner,
+      repoName,
+      issueNumber,
+      githubToken,
+      `⚠️ **Duplicate task dispatch rejected**
+
+A task is already running or queued for this issue. To prevent conflicts, the duplicate task dispatch has been rejected.
+
+If you believe this is an error, close and re-open the issue to clear the status, then re-label with \`agent\`.`
+    );
+
+    return {
+      statusCode: 200,
+      body: JSON.stringify({
+        message: "Duplicate dispatch rejected: task already running for this issue",
+        issueNumber,
+      }),
+    };
   }
 
   // --- Check concurrency limit per repo ---
