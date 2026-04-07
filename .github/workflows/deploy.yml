@@ -5,6 +5,10 @@ on:
     branches: [main]
   workflow_dispatch:
 
+concurrency:
+  group: deploy-main
+  cancel-in-progress: true
+
 env:
   AWS_REGION: us-east-1
   ECR_REPO: github-agent
