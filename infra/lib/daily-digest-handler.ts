@@ -669,6 +669,65 @@ async function collectCreditStats(): Promise<{
   return result;
 }
 
+async function closePriorDigestIssues(
+  repoOwner: string,
+  repoName: string,
+  token: string,
+  currentDate: string
+): Promise<void> {
+  try {
+    const response = await githubRequest(
+      `/repos/${repoOwner}/${repoName}/issues?state=open&labels=bot-summary&per_page=100`,
+      token,
+      { method: "GET" },
+      [200]
+    );
+
+    const issues = (await response.json()) as Array<{
+      number: number;
+      title: string;
+      pull_request?: unknown;
+    }>;
+
+    const priorDigests = issues.filter(
+      (issue) =>
+        !issue.pull_request &&
+        issue.title.startsWith("Agent Daily Digest: ") &&
+        issue.title !== `Agent Daily Digest: ${currentDate}`
+    );
+
+    for (const issue of priorDigests) {
+      try {
+        await githubRequest(
+          `/repos/${repoOwner}/${repoName}/issues/${issue.number}/comments`,
+          token,
+          {
+            method: "POST",
+            body: JSON.stringify({
+              body: `Superseded by newer daily digest for ${currentDate}. Closing to keep only one open digest at a time.`,
+            }),
+          },
+          [201]
+        );
+        await githubRequest(
+          `/repos/${repoOwner}/${repoName}/issues/${issue.number}`,
+          token,
+          {
+            method: "PATCH",
+            body: JSON.stringify({ state: "closed", state_reason: "completed" }),
+          },
+          [200]
+        );
+        console.log(`Closed prior digest issue #${issue.number}`);
+      } catch (error) {
+        console.error(`Failed to close prior digest #${issue.number}:`, error);
+      }
+    }
+  } catch (error) {
+    console.error("Failed to list prior digest issues:", error);
+  }
+}
+
 async function createDigestIssue(
   repoOwner: string,
   repoName: string,
@@ -901,6 +960,13 @@ export async function handler(): Promise<DigestStats> {
       stats.reviewWaitingPRs = reviewWaitingPRs;
     } catch (error) {
       console.error("Failed to fetch PRs waiting for review:", error);
+    }
+
+    // Close prior digest issues before opening a new one (keeps only latest open)
+    try {
+      await closePriorDigestIssues("cenetex", "agent", githubToken, dateStr);
+    } catch (error) {
+      console.error("Failed to close prior digests:", error);
     }
 
     // Create digest issue in the cenetex/agent repository
