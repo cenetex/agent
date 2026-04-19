@@ -2614,27 +2614,35 @@ async function launchDiagnosticFargateTask(
 }
 
 /**
- * Checks if a workflow failure issue already exists for this workflow run
+ * Checks if a workflow failure issue already exists for this workflow.
+ *
+ * Searches both open and closed issues. A closed match means the workflow is
+ * failing again after being previously marked resolved — the caller should
+ * reopen + comment rather than create a duplicate.
+ *
+ * Matches on the literal auto-generated title prefix, so unrelated bug
+ * issues that happen to mention the workflow name are not picked up.
  */
 async function checkExistingWorkflowFailureIssue(
   repoOwner: string,
   repoName: string,
   workflowName: string,
   token: string
-): Promise<number | null> {
+): Promise<{ number: number; state: "open" | "closed" } | null> {
   try {
-    // Search for open issues with specific label pattern and title
-    const query = `repo:${repoOwner}/${repoName} is:issue is:open label:type:bug "${workflowName}" workflow`;
-    const response = await fetch(
-      `https://api.github.com/search/issues?q=${encodeURIComponent(query)}&per_page=5`,
-      {
-        headers: {
-          Accept: "application/vnd.github+json",
-          Authorization: `Bearer ${token}`,
-          "User-Agent": "github-agent-control-plane",
-        },
-      }
-    );
+    // Match the auto-generated title prefix literally and sort by most-recent
+    // update, so we always return the latest matching mirror issue regardless
+    // of whether it was closed manually.
+    const titleMatch = `🚨 Deploy Workflow Failed: ${workflowName}`;
+    const query = `repo:${repoOwner}/${repoName} is:issue in:title "${titleMatch}"`;
+    const url = `https://api.github.com/search/issues?q=${encodeURIComponent(query)}&per_page=5&sort=updated&order=desc`;
+    const response = await fetch(url, {
+      headers: {
+        Accept: "application/vnd.github+json",
+        Authorization: `Bearer ${token}`,
+        "User-Agent": "github-agent-control-plane",
+      },
+    });
 
     if (!response.ok) {
       console.warn(`Failed to search for existing issues: ${response.status}`);
@@ -2643,14 +2651,45 @@ async function checkExistingWorkflowFailureIssue(
 
     const data = await response.json() as any;
     if (data.items && data.items.length > 0) {
-      console.log(`Found ${data.items.length} existing workflow failure issue(s)`);
-      return data.items[0].number;
+      const top = data.items[0];
+      const state: "open" | "closed" = top.state === "closed" ? "closed" : "open";
+      console.log(
+        `Found ${data.items.length} existing workflow failure issue(s); latest #${top.number} is ${state}`
+      );
+      return { number: top.number, state };
     }
 
     return null;
   } catch (error) {
     console.warn(`Failed to check for existing workflow issue: ${error}`);
     return null;
+  }
+}
+
+/**
+ * Reopens a previously-closed issue. Used when a workflow that was marked
+ * resolved starts failing again — we reopen the mirror rather than create a
+ * duplicate.
+ */
+async function reopenIssue(
+  repoOwner: string,
+  repoName: string,
+  issueNumber: number,
+  token: string
+): Promise<void> {
+  try {
+    await githubRequest(
+      `/repos/${repoOwner}/${repoName}/issues/${issueNumber}`,
+      token,
+      {
+        method: "PATCH",
+        body: JSON.stringify({ state: "open" }),
+      },
+      [200]
+    );
+    console.log(`Reopened issue #${issueNumber}`);
+  } catch (error) {
+    console.warn(`Failed to reopen issue #${issueNumber}: ${error}`);
   }
 }
 
@@ -2769,16 +2808,20 @@ async function handleWorkflowRunFailure(
       `Handling workflow failure: ${workflowName} (run #${workflowRunId}) in ${repoSlug}`
     );
 
-    // Check if an issue already exists for this workflow
-    const existingIssueNumber = await checkExistingWorkflowFailureIssue(
+    // Check if an issue already exists for this workflow — in either state.
+    // A closed match means the workflow is failing again after being marked
+    // resolved; reopen + comment instead of spawning a duplicate mirror.
+    const existing = await checkExistingWorkflowFailureIssue(
       repoOwner,
       repoName,
       workflowName,
       token
     );
 
-    if (existingIssueNumber) {
-      console.log(`Found existing issue #${existingIssueNumber} for workflow failure`);
+    if (existing) {
+      console.log(
+        `Found existing issue #${existing.number} (${existing.state}) for workflow failure`
+      );
 
       // Update the existing issue with new failure information
       const errorMessages = await extractWorkflowErrorMessages(
@@ -2789,6 +2832,11 @@ async function handleWorkflowRunFailure(
         failedJobName
       );
 
+      const reopenedBanner =
+        existing.state === "closed"
+          ? "\n\n> ⚠️ This issue was previously closed but the workflow is failing again — reopened automatically."
+          : "";
+
       const updateComment = `## Workflow Failure Detected (Run #${workflowRunId})
 
 **Workflow:** [${workflowName}](${workflowRunUrl})
@@ -2797,10 +2845,13 @@ async function handleWorkflowRunFailure(
 
 **Failed Job:** ${failedJobName}
 
-${errorMessages}`;
+${errorMessages}${reopenedBanner}`;
 
-      await addIssueComment(repoOwner, repoName, existingIssueNumber, token, updateComment);
-      console.log(`Updated existing issue #${existingIssueNumber} with new failure`);
+      if (existing.state === "closed") {
+        await reopenIssue(repoOwner, repoName, existing.number, token);
+      }
+      await addIssueComment(repoOwner, repoName, existing.number, token, updateComment);
+      console.log(`Updated existing issue #${existing.number} with new failure`);
       return;
     }
 
