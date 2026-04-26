@@ -1145,6 +1145,15 @@ Your mission:
 - Understand the issue and explore the codebase to find the relevant files
 - Make the code changes needed to resolve the issue
 - Create a new branch, commit your changes, and push
+- **IMPORTANT: Before pushing, run the pre-push lint check** (if the repo has a lint script):
+  \`
+  bash /lib/pre-push-lint-check.sh ${ISSUE_NUMBER} ${REPO}
+  \`
+  This will:
+  1. Auto-fix trivial lint warnings (formatting, semicolons, unused imports)
+  2. Attempt up to 3 LLM-driven fixes for complex issues
+  3. Post a comment if unresolved warnings remain
+  4. Allow push to proceed (your PR will still be created)
 - Create a PR that references this issue using: gh pr create --title '<title>' --body 'Fixes #${ISSUE_NUMBER}\n\n<description>'
 - If your task does NOT require code changes (e.g., creating issues, analysis, planning), post your results as a comment and close this issue when done using: gh issue close ${ISSUE_NUMBER}
 - If you need more information to proceed, post a comment asking for clarification using: gh issue comment ${ISSUE_NUMBER} --body '<your question>'

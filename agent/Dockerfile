@@ -24,9 +24,12 @@ RUN useradd --create-home --shell /bin/bash agent \
 
 WORKDIR /work
 
-# Copy shared library
+# Copy shared library and lint check script
 COPY lib/common.sh /lib/common.sh
 RUN chmod +x /lib/common.sh
+
+COPY lib/pre-push-lint-check.sh /lib/pre-push-lint-check.sh
+RUN chmod +x /lib/pre-push-lint-check.sh
 
 COPY entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh

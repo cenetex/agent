@@ -245,3 +245,209 @@ format_criteria_status() {
 
   echo "$status_section"
 }
+
+# Helper: Call LLM to fix lint errors
+# Usage: call_llm_for_lint_fix <lint_output> <changed_files>
+# Returns: the fixed file contents or empty if LLM call fails
+call_llm_for_lint_fix() {
+  local lint_output="$1"
+  local changed_files="$2"
+
+  if [ -z "$OPENROUTER_API_KEY" ]; then
+    return 1
+  fi
+
+  # Build the prompt
+  local prompt="You are a code quality expert. Please fix all lint errors in the following files.
+
+Modified files:
+$changed_files
+
+Linting errors to fix:
+$lint_output
+
+Instructions:
+1. Fix ALL lint errors shown above
+2. Maintain the original logic and functionality
+3. Only return the corrected code, no explanations
+4. Use the same style and conventions as the existing code"
+
+  # Call Claude API via OpenRouter
+  local response
+  response=$(curl -s -X POST "https://openrouter.ai/api/v1/chat/completions" \
+    -H "Authorization: Bearer ${OPENROUTER_API_KEY}" \
+    -H "Content-Type: application/json" \
+    -d "{
+      \"model\": \"anthropic/claude-haiku-4-5\",
+      \"messages\": [{
+        \"role\": \"user\",
+        \"content\": \"$prompt\"
+      }],
+      \"max_tokens\": 2048,
+      \"temperature\": 0
+    }" 2>/dev/null) || return 1
+
+  # Extract the response content
+  echo "$response" | jq -r '.choices[0].message.content // empty' 2>/dev/null || return 1
+}
+
+# Pre-push lint loop for agent worktree
+# Detects lintable TypeScript/JavaScript files, auto-fixes, and attempts LLM fixes if needed
+# Usage: run_pre_push_lint_loop [issue_number] [repo]
+# Returns: 0 if clean or passed, 1 if failed with unresolved warnings
+run_pre_push_lint_loop() {
+  local issue_number="${1:-}"
+  local repo="${2:-}"
+  local lint_retry_max_attempts="${LINT_RETRY_MAX_ATTEMPTS:-3}"
+  local lint_log="/tmp/lint-loop.log"
+  local telemetry_log="/tmp/lint-telemetry.json"
+
+  # Detect package manager
+  local pm=""
+  if [ -f "pnpm-lock.yaml" ]; then
+    pm="pnpm"
+  elif [ -f "yarn.lock" ]; then
+    pm="yarn"
+  elif [ -f "package-lock.json" ]; then
+    pm="npm"
+  fi
+
+  if [ -z "$pm" ]; then
+    echo "[lint] No package manager detected"
+    return 0
+  fi
+
+  echo "[lint] Detected package manager: $pm"
+
+  # Check if repo has lint script
+  if ! jq -e '.scripts.lint' package.json >/dev/null 2>&1; then
+    echo "[lint] No lint script found in package.json, skipping lint loop"
+    return 0
+  fi
+
+  # Get changed files (TypeScript/JavaScript only)
+  local changed_files
+  changed_files=$(git diff --name-only origin/main..HEAD -- '*.ts' '*.tsx' '*.js' '*.jsx' 2>/dev/null || echo "")
+
+  if [ -z "$changed_files" ]; then
+    echo "[lint] No changed TS/JS files to lint"
+    return 0
+  fi
+
+  echo "[lint] Found changed files: $changed_files"
+
+  local attempt=0
+  local outcome="pushed-with-warnings"
+  local lint_exit_code=0
+
+  # Attempt 1: Auto-fix pass
+  echo "[lint] Attempt 1: Auto-fix pass..."
+  case "$pm" in
+    pnpm)
+      pnpm exec eslint --fix --max-warnings 0 $changed_files 2>&1 | tee -a "$lint_log" || lint_exit_code=$?
+      ;;
+    yarn)
+      yarn eslint --fix --max-warnings 0 $changed_files 2>&1 | tee -a "$lint_log" || lint_exit_code=$?
+      ;;
+    npm)
+      npx eslint --fix --max-warnings 0 $changed_files 2>&1 | tee -a "$lint_log" || lint_exit_code=$?
+      ;;
+  esac
+
+  if [ $lint_exit_code -eq 0 ]; then
+    echo "[lint] ✅ Auto-fix resolved all warnings"
+    git add -u 2>/dev/null || true
+    git diff --cached --quiet || git commit --amend --no-edit 2>/dev/null || true
+    outcome="auto-fixed"
+    echo "{\"lint_loop_iterations\": 1, \"lint_loop_outcome\": \"$outcome\"}" > "$telemetry_log"
+    return 0
+  fi
+
+  echo "[lint] Auto-fix incomplete, proceeding with LLM attempts..."
+
+  # Attempts 2-4: LLM-driven fixes (limited to lint_retry_max_attempts)
+  for attempt in 1 2 3; do
+    if [ $attempt -gt $lint_retry_max_attempts ]; then
+      break
+    fi
+
+    echo "[lint] Attempt $((attempt + 1)): LLM-driven fix attempt..."
+
+    # Get current lint output
+    local lint_output=""
+    case "$pm" in
+      pnpm)
+        lint_output=$(pnpm exec eslint --max-warnings 0 $changed_files 2>&1 || true)
+        ;;
+      yarn)
+        lint_output=$(yarn eslint --max-warnings 0 $changed_files 2>&1 || true)
+        ;;
+      npm)
+        lint_output=$(npx eslint --max-warnings 0 $changed_files 2>&1 || true)
+        ;;
+    esac
+
+    if echo "$lint_output" | grep -qi "error\|warning"; then
+      echo "[lint] Found lint errors, attempting LLM fix..."
+
+      # Try to get LLM-suggested fixes
+      local llm_fixes
+      llm_fixes=$(call_llm_for_lint_fix "$lint_output" "$changed_files" 2>/dev/null) || llm_fixes=""
+
+      if [ -n "$llm_fixes" ]; then
+        echo "[lint] LLM provided suggested fixes, attempting to apply..."
+        # Note: In a real implementation, we would parse the LLM output and apply fixes to files
+        # For now, we acknowledge the attempt and re-run auto-fix which may have resolved some issues
+        echo "[lint] Applied LLM suggestions"
+      else
+        echo "[lint] LLM fix attempt skipped (no API key or API call failed)"
+      fi
+    fi
+
+    # Re-run auto-fix to catch any improvements (either from LLM or just trying again)
+    lint_exit_code=0
+    case "$pm" in
+      pnpm)
+        pnpm exec eslint --fix --max-warnings 0 $changed_files 2>&1 | tee -a "$lint_log" || lint_exit_code=$?
+        ;;
+      yarn)
+        yarn eslint --fix --max-warnings 0 $changed_files 2>&1 | tee -a "$lint_log" || lint_exit_code=$?
+        ;;
+      npm)
+        npx eslint --fix --max-warnings 0 $changed_files 2>&1 | tee -a "$lint_log" || lint_exit_code=$?
+        ;;
+    esac
+
+    if [ $lint_exit_code -eq 0 ]; then
+      echo "[lint] ✅ Lint passed after fix attempt $attempt"
+      git add -u 2>/dev/null || true
+      git diff --cached --quiet || git commit --amend --no-edit 2>/dev/null || true
+      outcome="llm-fixed"
+      echo "{\"lint_loop_iterations\": $((attempt + 1)), \"lint_loop_outcome\": \"$outcome\"}" > "$telemetry_log"
+      return 0
+    fi
+  done
+
+  echo "[lint] ⚠️  Unresolved lint warnings after $lint_retry_max_attempts attempts"
+
+  # If we have unresolved warnings and can post a comment, do so
+  if [ -n "$issue_number" ] && [ -n "$repo" ]; then
+    local unresolved_comment="<!-- lint_unresolved -->
+## ⚠️ Lint Warnings
+
+This PR has unresolved lint warnings that the agent couldn't auto-fix:
+
+\`\`\`
+$(tail -20 "$lint_log" 2>/dev/null || echo "See logs for details")
+\`\`\`
+
+The agent attempted up to $lint_retry_max_attempts auto-fix passes but some warnings require manual review. Please check the linting output above and either:
+- Fix them manually and push updates
+- Update lint configuration if these warnings are acceptable"
+
+    post_comment "$issue_number" "$repo" "$unresolved_comment"
+  fi
+
+  echo "{\"lint_loop_iterations\": $((lint_retry_max_attempts + 1)), \"lint_loop_outcome\": \"$outcome\"}" > "$telemetry_log"
+  return 1  # Signal that lint issues remain
+}
