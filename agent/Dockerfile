@@ -24,9 +24,11 @@ RUN useradd --create-home --shell /bin/bash agent \
 
 WORKDIR /work
 
-# Copy shared library
+# Copy shared libraries
 COPY lib/common.sh /lib/common.sh
-RUN chmod +x /lib/common.sh
+COPY lib/orchestrate-lint.sh /lib/orchestrate-lint.sh
+COPY lib/lint-loop.sh /lib/lint-loop.sh
+RUN chmod +x /lib/common.sh /lib/orchestrate-lint.sh /lib/lint-loop.sh
 
 COPY entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh

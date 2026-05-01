@@ -15,6 +15,7 @@ set -Eeuo pipefail
 : "${SIGNAL_LABEL_FAILED:=agent:failed}"
 : "${SIGNAL_LABEL_SUCCEEDED:=agent:succeeded}"
 : "${AWS_REGION:=us-east-1}"  # Optional, used for diagnostic tasks
+: "${LINT_RETRY_MAX_ATTEMPTS:=3}"  # Optional, max retries for lint loop
 
 # --- Fetch task payload from S3 if S3 key provided (avoids ECS override limit) ---
 if [ -n "${TASK_PAYLOAD_S3_KEY:-}" ]; then
@@ -138,6 +139,11 @@ upload_artifacts() {
   # Upload decision log if it exists
   if [ -f "/tmp/decision-log.json" ]; then
     upload_artifact "/tmp/decision-log.json" "${DECISION_LOG_KEY}" "application/json"
+  fi
+
+  # Upload lint loop telemetry if it exists
+  if [ -f "/tmp/lint-loop-telemetry.json" ]; then
+    upload_artifact "/tmp/lint-loop-telemetry.json" "${ARTIFACT_PREFIX}/lint-loop-telemetry.json" "application/json"
   fi
 
   # Create and upload task manifest
@@ -1144,11 +1150,36 @@ ${CONTEXT}${EXISTING_PR_NOTE}
 Your mission:
 - Understand the issue and explore the codebase to find the relevant files
 - Make the code changes needed to resolve the issue
-- Create a new branch, commit your changes, and push
+- Create a new branch, commit your changes
+- **Before pushing, run the pre-push lint loop** (see Lint Loop Instructions below)
 - Create a PR that references this issue using: gh pr create --title '<title>' --body 'Fixes #${ISSUE_NUMBER}\n\n<description>'
 - If your task does NOT require code changes (e.g., creating issues, analysis, planning), post your results as a comment and close this issue when done using: gh issue close ${ISSUE_NUMBER}
 - If you need more information to proceed, post a comment asking for clarification using: gh issue comment ${ISSUE_NUMBER} --body '<your question>'
 - Be concise. Make minimal, focused changes. Don't refactor unrelated code.
+
+## Lint Loop Instructions
+
+**Before pushing your changes, ALWAYS run the pre-push lint check:**
+
+1. In your worktree directory, run: \`bash /lib/orchestrate-lint.sh\`
+2. This runs a 3-attempt lint loop:
+   - **Attempt 1**: Auto-fix pass using \`eslint --fix\` on changed files only
+   - **Attempts 2-3**: If lint still fails, fix the remaining issues manually (the script will point out what needs fixing)
+3. The script will:
+   - Only run if the repo has a lint script in package.json
+   - Only lint changed files (matching origin/main..HEAD for *.ts, *.tsx, *.js, *.jsx)
+   - Auto-commit any auto-fixed changes as part of your existing commit
+   - Output lint errors to /tmp/lint-errors.txt if LLM intervention is needed
+4. If lint passes: continue to create your PR
+5. If lint fails after 3 attempts: the script returns non-zero
+   - In this case, push anyway, and include this comment on the PR:
+   \`\`\`
+   ## ⚠️ Unresolved Lint Warnings
+
+   This PR has unresolved lint violations that should be addressed before merging:
+
+   [Paste content of /tmp/unresolved-lint-warnings.txt here if the file exists]
+   \`\`\`
 
 BEFORE FINISHING:
 Re-read the acceptance criteria from the issue description. For each checkbox:
