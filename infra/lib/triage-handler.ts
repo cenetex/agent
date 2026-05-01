@@ -232,16 +232,64 @@ async function getMainCIHealth(
     const branchData = await branchResponse.json() as any;
     const mainSha = branchData.commit.sha;
 
-    // Get combined check status for main
-    const statusResponse = await githubRequest(
-      `/repos/${repoOwner}/${repoName}/commits/${mainSha}/status`,
-      token,
-      { method: "GET" },
-      [200]
-    );
+    // Aggregate legacy commit-statuses + Actions check-runs.
+    // Many repos use Actions only, so the combined-status endpoint
+    // returns { state: "pending", total_count: 0 } even when every
+    // check-run is success. Walk both APIs and decide from the union.
+    let combinedState: string | undefined;
+    try {
+      const statusResponse = await githubRequest(
+        `/repos/${repoOwner}/${repoName}/commits/${mainSha}/status`,
+        token,
+        { method: "GET" },
+        [200]
+      );
+      const statusData = await statusResponse.json() as any;
+      if ((statusData.total_count ?? statusData.statuses?.length ?? 0) > 0) {
+        combinedState = statusData.state;
+      }
+    } catch (err) {
+      console.error(`combined-status fetch failed for ${repoOwner}/${repoName}@${mainSha}:`, err);
+    }
 
-    const statusData = await statusResponse.json() as any;
-    return statusData.state === "success";
+    let checkRunCount = 0;
+    let anyFailed = false;
+    let anyPending = false;
+    try {
+      let page = 1;
+      while (page < 10) {
+        const checkRunsResponse = await githubRequest(
+          `/repos/${repoOwner}/${repoName}/commits/${mainSha}/check-runs?per_page=100&page=${page}`,
+          token,
+          { method: "GET" },
+          [200]
+        );
+        const checkRunsData = await checkRunsResponse.json() as any;
+        const runs = checkRunsData.check_runs ?? [];
+        if (runs.length === 0) break;
+        checkRunCount += runs.length;
+        for (const run of runs) {
+          if (run.status !== "completed") { anyPending = true; continue; }
+          const conclusion = run.conclusion;
+          if (conclusion === "failure" || conclusion === "cancelled" ||
+              conclusion === "timed_out" || conclusion === "action_required") {
+            anyFailed = true;
+          }
+        }
+        if (runs.length < 100) break;
+        page++;
+      }
+    } catch (err) {
+      console.error(`check-runs fetch failed for ${repoOwner}/${repoName}@${mainSha}:`, err);
+    }
+
+    if (anyFailed || combinedState === "failure" || combinedState === "error") return false;
+    // pending and unknown both treated as healthy: don't block on
+    // long-running post-deploy jobs while observable signal is green,
+    // and don't block on repos with no CI configured.
+    if (anyPending || combinedState === "pending") return true;
+    if (checkRunCount > 0 || combinedState === "success") return true;
+    return true;
   } catch (error) {
     console.error(`Failed to check main CI health for ${repoOwner}/${repoName}:`, error);
     return true; // Assume healthy on error to avoid false negatives

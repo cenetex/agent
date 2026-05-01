@@ -697,27 +697,111 @@ async function getPRCheckStatus(
     const pr = await prResponse.json() as any;
     const headSha = pr.head.sha;
 
-    // Get combined check status for the commit
-    const statusResponse = await githubRequest(
-      `/repos/${repoOwner}/${repoName}/commits/${headSha}/status`,
-      token,
-      { method: "GET" },
-      [200]
-    );
-
-    const statusData = await statusResponse.json() as any;
-    const conclusion = statusData.state; // "success", "failure", "pending", "error"
-
-    // Extract failed check names
-    const failures = statusData.statuses
-      .filter((status: any) => status.state === "failure" || status.state === "error")
-      .map((status: any) => status.context);
-
-    return { conclusion, failures };
+    // Aggregate both legacy combined-status and Actions check-runs.
+    // See aggregateCommitCIState() for why combined-status alone is wrong.
+    return await aggregateCommitCIState(repoOwner, repoName, headSha, token);
   } catch (error) {
     console.error(`Failed to get PR check status for #${prNumber}:`, error);
     return null;
   }
+}
+
+/**
+ * Aggregate CI conclusion + failure list for a commit.
+ *
+ * GitHub has two separate APIs for "did CI pass on this commit?":
+ *   - `/commits/<sha>/status`     — legacy commit statuses (Travis,
+ *     CircleCI, external CI). Returns { state, statuses: [] }.
+ *   - `/commits/<sha>/check-runs` — GitHub Actions check-runs.
+ *     Returns { check_runs: [{ name, status, conclusion }] }.
+ *
+ * Many repos (including cenetex/signal) use only Actions, so the
+ * legacy status endpoint returns { state: "pending", total_count: 0 }
+ * even when every check-run is success. The previous getMainCIHealth()
+ * trusted only the legacy endpoint and incorrectly blocked dispatch on
+ * Actions-only repos.
+ *
+ * Conclusion rules:
+ *   - "success"  if at least one source returned data and every result
+ *                is success / skipped / neutral
+ *   - "failure"  if any check-run conclusion is failure / cancelled /
+ *                timed_out / action_required, or combined status is
+ *                failure / error
+ *   - "pending"  if anything is still in_progress / queued, or combined
+ *                status is pending and check-runs returned nothing
+ *   - "unknown"  if both APIs returned no data
+ */
+async function aggregateCommitCIState(
+  repoOwner: string,
+  repoName: string,
+  sha: string,
+  token: string
+): Promise<{ conclusion: "success" | "failure" | "pending" | "unknown"; failures: string[] }> {
+  let combinedState: string | undefined;
+  const combinedFailures: string[] = [];
+  try {
+    const statusResponse = await githubRequest(
+      `/repos/${repoOwner}/${repoName}/commits/${sha}/status`,
+      token,
+      { method: "GET" },
+      [200]
+    );
+    const statusData = await statusResponse.json() as any;
+    if ((statusData.total_count ?? statusData.statuses?.length ?? 0) > 0) {
+      combinedState = statusData.state;
+      for (const s of statusData.statuses ?? []) {
+        if (s.state === "failure" || s.state === "error") combinedFailures.push(s.context);
+      }
+    }
+  } catch (err) {
+    console.error(`combined-status fetch failed for ${repoOwner}/${repoName}@${sha}:`, err);
+  }
+
+  const checkRunFailures: string[] = [];
+  let checkRunCount = 0;
+  let anyPending = false;
+  let anyFailed = false;
+  try {
+    let page = 1;
+    while (page < 10) {
+      const checkRunsResponse = await githubRequest(
+        `/repos/${repoOwner}/${repoName}/commits/${sha}/check-runs?per_page=100&page=${page}`,
+        token,
+        { method: "GET" },
+        [200]
+      );
+      const checkRunsData = await checkRunsResponse.json() as any;
+      const runs = checkRunsData.check_runs ?? [];
+      if (runs.length === 0) break;
+      checkRunCount += runs.length;
+      for (const run of runs) {
+        if (run.status !== "completed") { anyPending = true; continue; }
+        const conclusion = run.conclusion;
+        if (conclusion === "failure" || conclusion === "cancelled" ||
+            conclusion === "timed_out" || conclusion === "action_required") {
+          anyFailed = true;
+          checkRunFailures.push(run.name);
+        }
+      }
+      if (runs.length < 100) break;
+      page++;
+    }
+  } catch (err) {
+    console.error(`check-runs fetch failed for ${repoOwner}/${repoName}@${sha}:`, err);
+  }
+
+  const failures = [...new Set([...combinedFailures, ...checkRunFailures])];
+
+  if (anyFailed || combinedState === "failure" || combinedState === "error") {
+    return { conclusion: "failure", failures };
+  }
+  if (anyPending || combinedState === "pending") {
+    return { conclusion: "pending", failures };
+  }
+  if (checkRunCount > 0 || combinedState === "success") {
+    return { conclusion: "success", failures };
+  }
+  return { conclusion: "unknown", failures };
 }
 
 /**
@@ -752,16 +836,12 @@ async function getMainCIHealth(
     const branchData = await branchResponse.json() as any;
     const mainSha = branchData.commit.sha;
 
-    // Get combined check status for main
-    const statusResponse = await githubRequest(
-      `/repos/${repoOwner}/${repoName}/commits/${mainSha}/status`,
-      token,
-      { method: "GET" },
-      [200]
-    );
-
-    const statusData = await statusResponse.json() as any;
-    return statusData.state === "success";
+    const { conclusion } = await aggregateCommitCIState(repoOwner, repoName, mainSha, token);
+    // "unknown"  → no CI configured at all → don't block on CI we can't see.
+    // "pending"  → in-flight; treat as healthy so long-running post-deploy
+    //              jobs don't block dispatch while everything observable
+    //              so far is green.
+    return conclusion === "success" || conclusion === "unknown" || conclusion === "pending";
   } catch (error) {
     console.error(`Failed to check main CI health for ${repoOwner}/${repoName}:`, error);
     return true; // Assume healthy on error to avoid false negatives
