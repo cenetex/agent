@@ -125,6 +125,15 @@ trigger issue is closed automatically by entrypoint.sh once your run completes.
 EOF
 )
 
+# --- Set up Claude Code / OpenRouter ---
+# persona-runner.sh is invoked as an early-exit branch in entrypoint.sh, before
+# the OpenRouter env vars are normally configured (~line 1330). Set them here so
+# the claude call below routes to OpenRouter instead of the default Anthropic API.
+export ANTHROPIC_BASE_URL="https://openrouter.ai/api"
+export ANTHROPIC_AUTH_TOKEN="${OPENROUTER_API_KEY}"
+export ANTHROPIC_API_KEY=""
+export CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1
+
 # --- Run Claude Code ---
 MODEL=$(echo "${TASK_PAYLOAD}" | jq -r '.model // "anthropic/claude-sonnet-4-6"')
 echo "Using model: ${MODEL}"
