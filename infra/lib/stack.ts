@@ -802,6 +802,56 @@ export class GitHubAgentStack extends cdk.Stack {
     });
 
     // -------------------------------------------------------
+    // Unblocker Collector Lambda (failure-graph snapshot collection)
+    // -------------------------------------------------------
+    const unblockerCollectorFunction = new NodejsFunction(this, "UnblockerCollectorFunction", {
+      entry: path.join(__dirname, "unblocker", "collector.ts"),
+      handler: "handler",
+      runtime: lambda.Runtime.NODEJS_20_X,
+      architecture: lambda.Architecture.ARM_64,
+      timeout: cdk.Duration.minutes(15),
+      memorySize: 512,
+      environment: {
+        ARTIFACTS_BUCKET: artifactsBucket.bucketName,
+        GITHUB_APP_ID_PARAM: PARAM_GITHUB_APP_ID,
+        GITHUB_APP_PRIVATE_KEY_PARAM: PARAM_GITHUB_APP_PRIVATE_KEY,
+      },
+    });
+
+    unblockerCollectorFunction.addToRolePolicy(
+      new iam.PolicyStatement({
+        actions: ["ssm:GetParameter"],
+        resources: ssmParamArns,
+      })
+    );
+
+    artifactsBucket.grantReadWrite(unblockerCollectorFunction);
+
+    // Grant CloudWatch Logs permissions
+    unblockerCollectorFunction.addToRolePolicy(
+      new iam.PolicyStatement({
+        actions: ["cloudwatch:PutMetricData"],
+        resources: ["*"],
+      })
+    );
+
+    // -------------------------------------------------------
+    // EventBridge rule to trigger unblocker collector (every 15 min)
+    // -------------------------------------------------------
+    const unblockerCollectorRule = new events.Rule(this, "UnblockerCollectorRule", {
+      description: "Trigger failure-graph collector every 15 minutes",
+      schedule: events.Schedule.cron({
+        minute: "*/15",
+        hour: "*",
+        day: "*",
+        month: "*",
+        year: "*",
+      }),
+    });
+
+    unblockerCollectorRule.addTarget(new targets.LambdaFunction(unblockerCollectorFunction));
+
+    // -------------------------------------------------------
     // Outputs
     // -------------------------------------------------------
     new cdk.CfnOutput(this, "WebhookUrl", {
