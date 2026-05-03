@@ -4112,8 +4112,10 @@ export async function handler(event: {
   }
 
   // --- Check main CI health and block feature work if broken ---
+  // Persona dispatches are read-only governance reviews — always allow them
+  // even when main CI is red, because they don't open PRs or modify code.
   const mainIsHealthy = await getMainCIHealth(repoOwner, repoName, githubToken);
-  if (!mainIsHealthy && !isPR) {
+  if (!mainIsHealthy && !isPR && !isPersonaDispatch(issueLabels)) {
     // Main branch CI is broken - check if this is allowed work (bugs, hotfixes, CI fixes)
     const issueTitle = issueData.title;
     const isAllowed = isAllowedDespiteMainBroken(issueTitle, issueLabels, isPR ? "pull_request" : "issue");

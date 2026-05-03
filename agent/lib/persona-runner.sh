@@ -63,6 +63,16 @@ PROMPT_FILE=$(yq -r '.prompt_file' "${PERSONA_YAML}")
 DISPLAY_NAME=$(yq -r '.display_name // .id' "${PERSONA_YAML}")
 TARGET_REPO=$(yq -r '.output.target_repo' "${PERSONA_YAML}")
 TARGET_ISSUE=$(yq -r '.output.target_issue' "${PERSONA_YAML}")
+
+for _key_name in PROMPT_FILE TARGET_REPO TARGET_ISSUE; do
+  _val="${!_key_name}"
+  if [ -z "${_val}" ] || [ "${_val}" = "null" ]; then
+    echo "ERROR: YAML key '${_key_name}' is missing or null in ${PERSONA_YAML}" >&2
+    exit 1
+  fi
+done
+unset _key_name _val
+
 PERSONA_PROMPT_PATH="${PERSONA_DIR}/${PROMPT_FILE}"
 
 if [ ! -f "${PERSONA_PROMPT_PATH}" ]; then
@@ -89,14 +99,14 @@ if [ "${BOARD}" != "board" ]; then
   CLAUDE_TOOLS+=("WebFetch")
 fi
 
-ALLOWED_TOOLS_FLAG=""
+ALLOWED_TOOLS_ARGS=()
 if [ "${#CLAUDE_TOOLS[@]}" -gt 0 ]; then
-  ALLOWED_TOOLS_FLAG="--allowedTools $(IFS=,; echo "${CLAUDE_TOOLS[*]}")"
+  ALLOWED_TOOLS_ARGS=(--allowedTools "$(IFS=,; printf '%s' "${CLAUDE_TOOLS[*]}")")
 fi
 
 echo "Display name: ${DISPLAY_NAME}"
 echo "Target: ${TARGET_REPO}#${TARGET_ISSUE}"
-echo "Allowed tools: ${CLAUDE_TOOLS[*]}"
+echo "Allowed tools: ${CLAUDE_TOOLS[*]:-<none>}"
 
 # --- Build mission prompt ---
 # The persona MD file is the system prompt. We append a small task-context
@@ -132,12 +142,11 @@ echo "Using model: ${MODEL}"
 CLAUDE_EXIT_CODE=0
 TIMEOUT_SECONDS=2700  # 45 minutes — same as default flow
 echo "=== Starting persona Claude Code run ==="
-# shellcheck disable=SC2086
 timeout ${TIMEOUT_SECONDS} claude --dangerously-skip-permissions \
     --model "${MODEL}" \
     --effort max \
     --print \
-    ${ALLOWED_TOOLS_FLAG} \
+    "${ALLOWED_TOOLS_ARGS[@]}" \
     "${MISSION}" 2>&1 | tee "${AGENT_LOG}" || CLAUDE_EXIT_CODE=$?
 CLAUDE_EXIT_CODE=${CLAUDE_EXIT_CODE:-${PIPESTATUS[0]}}
 
