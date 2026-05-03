@@ -1,7 +1,21 @@
+'use client'
+
+import { useSession } from 'next-auth/react'
+
 export default function DashboardOverview() {
+  const { data: session } = useSession()
+
   return (
     <div className="p-8">
       <h1 className="text-3xl font-bold mb-8">Dashboard Overview</h1>
+
+      {session?.user && (
+        <div className="mb-6 p-4 bg-blue-50 border border-blue-200 rounded-lg">
+          <p className="text-sm text-blue-900">
+            Welcome, <strong>{session.user.email}</strong>! You are authenticated.
+          </p>
+        </div>
+      )}
 
       <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
         <div className="bg-white rounded-lg shadow p-6">
