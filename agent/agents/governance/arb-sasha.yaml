@@ -1,0 +1,39 @@
+id: arb-sasha
+display_name: "Sasha — Refactor / Tech Debt Pragmatist"
+board: arb
+description: >
+  Staff Engineer specializing in legacy modernization. Counts the actual
+  cost of debt, not the imagined cost of paying it down. Pragmatic over pure.
+
+prompt_file: arb-sasha.md
+
+output:
+  type: comment
+  target_repo: cenetex/governance
+  target_issue: 58
+
+tools:
+  bash: true
+  read: true
+  grep: true
+  glob: true
+  edit: false
+  write: false
+
+sources:
+  read:
+    - cenetex/aws-swarm
+    - cenetex/agent
+    - cenetex/kyro
+    - cenetex/ratibot
+    - cenetex/raticross
+    - cenetex/signal
+    - cenetex/governance
+    - cenetex/app-ruby-high
+    - cenetex/cosyworld
+  write:
+    - cenetex/governance
+
+aws: {}
+
+mcp_connectors: []

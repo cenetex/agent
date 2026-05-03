@@ -134,6 +134,17 @@ export interface TaskPayload {
   created_at: string;
   /** Model to use for this task, defaults based on task type if not specified */
   model?: string;
+  /**
+   * Persona profile ID (e.g., "cab-marcus", "arb-noor", "cto-weekly").
+   *
+   * Set when the trigger issue carries a `role:<id>` label. The container's
+   * entrypoint.sh reads `agent/agents/**\/<id>.yaml` to load the persona's
+   * prompt, tool allowlist, and output target. When unset, the agent runs
+   * its default coding-agent flow.
+   *
+   * See agent/agents/README.md for schema and the 11 governance personas.
+   */
+  persona_id?: string;
 }
 
 export interface IssueMetadata {

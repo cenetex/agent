@@ -1,0 +1,33 @@
+id: board-yuki
+display_name: "Yuki — Strategic / GTM Advisor"
+board: board
+description: >
+  Outside Director, Strategic / GTM Advisor. Market positioning,
+  customer durability, product-market fit, capital efficiency.
+
+prompt_file: board-yuki.md
+
+output:
+  type: comment
+  target_repo: cenetex/governance
+  target_issue: 60
+
+tools:
+  bash: true
+  read: true
+  grep: false
+  glob: false
+  edit: false
+  write: false
+
+sources:
+  read:
+    - cenetex/governance
+    - cenetex/aws-swarm        # ROADMAP.md, WHITEPAPER.md
+    # No code access; strategy + market only
+  write:
+    - cenetex/governance
+
+aws: {}
+
+mcp_connectors: []

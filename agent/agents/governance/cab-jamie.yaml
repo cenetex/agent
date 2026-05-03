@@ -1,0 +1,47 @@
+id: cab-jamie
+display_name: "Jamie — Product Reliability Manager"
+board: cab
+description: >
+  Product Reliability persona on the Change Advisory Board.
+  Translates engineering events into customer impact. p95 latency,
+  error rate by user segment, error message clarity, user flow health.
+
+prompt_file: cab-jamie.md
+
+output:
+  type: comment
+  target_repo: cenetex/governance
+  target_issue: 57
+
+tools:
+  bash: true        # gh + aws read for CloudWatch metrics
+  read: true
+  grep: true
+  glob: true
+  edit: false
+  write: false
+
+sources:
+  read:
+    - cenetex/aws-swarm
+    - cenetex/agent
+    - cenetex/kyro
+    - cenetex/ratibot
+    - cenetex/raticross
+    - cenetex/signal
+    - cenetex/governance
+    - cenetex/app-ruby-high
+    - cenetex/cosyworld
+  write:
+    - cenetex/governance
+
+aws:
+  iam_role: arn:aws:iam::332730082708:role/governance-cab-product
+  permissions:
+    # Lambda & frontend metrics for user-facing services
+    - cloudwatch:GetMetricStatistics
+    - lambda:ListFunctions
+    - lambda:GetFunction
+    - logs:FilterLogEvents
+
+mcp_connectors: []

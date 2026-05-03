@@ -42,6 +42,7 @@ import {
   CODING_AGENT_BOT_LOGINS,
 } from "./types";
 import { publishDigestToSocialMedia } from "./digest-publisher";
+import { extractPersonaId, isPersonaDispatch } from "./persona-registry";
 
 const ecs = new ECSClient({});
 const ssm = new SSMClient({});
@@ -4303,6 +4304,15 @@ The agent will automatically dispatch this task when capacity becomes available.
     console.log(`Using default model for ${taskMode}: ${selectedModel}`);
   }
 
+  // --- Persona detection ---
+  // If the issue carries a `role:<id>` label, dispatch the persona profile
+  // instead of the default coding-agent flow. The persona's prompt + tool
+  // allowlist + output target are loaded by entrypoint.sh inside the container.
+  const personaId = extractPersonaId(labels);
+  if (personaId) {
+    console.log(`Persona dispatch: role=${personaId} for issue #${issueNumber}`);
+  }
+
   const taskPayload: TaskPayload = {
     task_id: taskId,
     repo_slug: repoSlug,
@@ -4312,6 +4322,7 @@ The agent will automatically dispatch this task when capacity becomes available.
     task_mode: isPR ? "pull_request" : "issue",
     created_at: new Date().toISOString(),
     model: selectedModel,
+    ...(personaId ? { persona_id: personaId } : {}),
   };
 
   console.log(`Created task ${taskId} with resolved SHA ${resolvedCommitSha}`);
