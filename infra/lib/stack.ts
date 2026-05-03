@@ -802,6 +802,71 @@ export class GitHubAgentStack extends cdk.Stack {
     });
 
     // -------------------------------------------------------
+    // Unblocker Failure-Graph Collector Lambda
+    // -------------------------------------------------------
+    const collectorFunction = new NodejsFunction(this, "UnblockerCollector", {
+      entry: path.join(__dirname, "unblocker/collector.ts"),
+      handler: "handler",
+      runtime: lambda.Runtime.NODEJS_20_X,
+      architecture: lambda.Architecture.ARM_64,
+      timeout: cdk.Duration.minutes(5),
+      memorySize: 512,
+      bundling: {
+        minify: true,
+        sourceMap: true,
+        target: "node20",
+        externalModules: [],
+      },
+      environment: {
+        ARTIFACTS_BUCKET: artifactsBucket.bucketName,
+        GITHUB_APP_ID_PARAM: PARAM_GITHUB_APP_ID,
+        GITHUB_APP_PRIVATE_KEY_PARAM: PARAM_GITHUB_APP_PRIVATE_KEY,
+        MONITORED_REPOS: "cenetex/aws-swarm,cenetex/kyro,cenetex/raticross,cenetex/ratibot,cenetex/litigation,cenetex/agent,cenetex/governance",
+      },
+    });
+
+    collectorFunction.addToRolePolicy(
+      new iam.PolicyStatement({
+        actions: ["ssm:GetParameter"],
+        resources: ssmParamArns,
+      })
+    );
+
+    collectorFunction.addToRolePolicy(
+      new iam.PolicyStatement({
+        actions: ["s3:GetObject", "s3:ListBucket"],
+        resources: [
+          artifactsBucket.bucketArn,
+          `${artifactsBucket.bucketArn}/*`,
+        ],
+      })
+    );
+
+    collectorFunction.addToRolePolicy(
+      new iam.PolicyStatement({
+        actions: ["s3:PutObject"],
+        resources: [`${artifactsBucket.bucketArn}/unblocker/snapshots/*`],
+      })
+    );
+
+    collectorFunction.addToRolePolicy(
+      new iam.PolicyStatement({
+        actions: ["cloudwatch:PutMetricData"],
+        resources: ["*"],
+      })
+    );
+
+    // -------------------------------------------------------
+    // EventBridge rule to trigger unblocker collector (every 15 minutes)
+    // -------------------------------------------------------
+    const collectorRule = new events.Rule(this, "UnblockerCollectorRule", {
+      description: "Trigger unblocker failure-graph collector every 15 minutes",
+      schedule: events.Schedule.rate(cdk.Duration.minutes(15)),
+    });
+
+    collectorRule.addTarget(new targets.LambdaFunction(collectorFunction));
+
+    // -------------------------------------------------------
     // Outputs
     // -------------------------------------------------------
     new cdk.CfnOutput(this, "WebhookUrl", {
