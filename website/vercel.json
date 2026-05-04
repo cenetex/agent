@@ -23,8 +23,16 @@
       "default": "us-east-1"
     },
     "ARTIFACTS_BUCKET": {
-      "description": "S3 bucket containing credit data",
+      "description": "S3 bucket containing task artifacts (legacy, kept for compatibility)",
+      "required": false
+    },
+    "CREDITS_BUCKET": {
+      "description": "S3 bucket containing credit balance data",
       "required": true
+    },
+    "GITHUB_APP_SLUG": {
+      "description": "GitHub App slug for filtering installations",
+      "default": "cenetex-coding-agent"
     }
   },
   "redirects": [
