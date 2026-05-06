@@ -156,7 +156,18 @@ find_created_pr_url() {
     '
 }
 
-# Check if there are agent questions in comments
+# Check if there are agent question comments since the run started.
+#
+# A "question comment" is identified by an explicit marker the agent is
+# instructed to include: the literal HTML comment <!-- agent-question -->.
+# This avoids false positives that arose from matching a literal "?" anywhere
+# in the comment body — bot status comments routinely contain artifact URLs
+# like ".../?prefix=tasks/..." which would otherwise short-circuit the
+# retry loop and freeze the issue in agent:waiting with no actual question.
+#
+# A fallback exists for human-authored questions that omit the marker: a
+# comment from a non-bot account that contains "?" *outside of any URL* is
+# also considered a question. URLs are stripped before the fallback check.
 has_agent_question_comment() {
   local issue_number="$1"
   local repo="$2"
@@ -169,7 +180,15 @@ has_agent_question_comment() {
     map(
       select(
         .created_at >= $since
-        and (.body | test("\\?"))
+        and (
+          # Primary: explicit marker from the agent prompt contract.
+          (.body | test("<!-- *agent-question *-->"; "i"))
+          # Fallback: human author with a "?" that is not inside a URL.
+          or (
+            (.user.type // "") != "Bot"
+            and ((.body | gsub("https?://[^\\s)\"]+"; "")) | test("\\?"))
+          )
+        )
       )
     )
     | length > 0
