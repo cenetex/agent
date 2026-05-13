@@ -96,6 +96,18 @@ export class GitHubAgentStack extends cdk.Stack {
           expiration: cdk.Duration.days(30), // Clean up artifacts after 30 days
           abortIncompleteMultipartUploadAfter: cdk.Duration.days(1),
         },
+        {
+          id: "cleanup-old-unblocker-snapshots",
+          enabled: true,
+          prefix: "unblocker/snapshots/",
+          expiration: cdk.Duration.days(30), // Expire snapshots older than 30 days to prevent indefinite accumulation
+          transitions: [
+            {
+              storageClass: s3.StorageClass.INFREQUENT_ACCESS,
+              transitionAfter: cdk.Duration.days(7), // Move to IA after 7 days for cost optimization
+            },
+          ],
+        },
       ],
       versioned: false,
     });
