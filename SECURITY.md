@@ -23,13 +23,13 @@ The agent system implements a tiered architecture where different agents have di
 
 **Permissions:**
 - Same as Tier 1 + Opus model (higher capability)
-- Can approve PRs for auto-merge (with 1-hour hold period before merge)
+- Can label PRs as review-approved, but auto-merge also requires a human GitHub review approval and the hold period
 
 **Trigger:** Scheduled (every 15 minutes) or manual label
 
 **Trust Model:** Only reads diffs and posts comments; never trusted with hostile input
 
-**Risk Profile:** Can approve PRs but hold period allows human override before merge
+**Risk Profile:** Can recommend merge, but protected paths and final merge eligibility require human review
 
 ### Tier 3: Diagnostic Agent (label: `diagnose`)
 
@@ -49,10 +49,12 @@ The GitHub Agent executes untrusted code in isolated AWS Fargate tasks within a 
 
 ### Network Isolation
 
-**Public Subnet Execution:**
-- Agent tasks currently run in public subnets with assigned public IPs. This avoids NAT Gateway cost while still blocking inbound access at the security group.
+**Private Subnet Execution:**
+- Agent tasks run in private subnets by default with no public IP assigned.
+- Outbound internet access goes through a NAT gateway.
 - All inbound access is disabled.
 - Outbound access is controlled through explicit security group rules.
+- Public subnet execution remains available only as an explicit cost-saving CDK context override: `-c usePublicSubnets=true`.
 
 **Explicit Egress Controls:**
 - HTTPS (port 443): GitHub API, model inference, and AWS service APIs
@@ -60,7 +62,9 @@ The GitHub Agent executes untrusted code in isolated AWS Fargate tasks within a 
 
 **VPC Endpoints:**
 - S3 Gateway Endpoint: Private access to artifact storage
-- Additional interface endpoints for ECR, CloudWatch Logs, and SSM are not currently provisioned. Those would be needed before moving tasks to private subnets without NAT.
+- ECR API/Docker Interface Endpoints: Private container image access
+- CloudWatch Logs Interface Endpoint: Private task logging
+- SSM Interface Endpoint: Private parameter access
 
 ### Compute Isolation
 
@@ -91,7 +95,7 @@ The GitHub Agent executes untrusted code in isolated AWS Fargate tasks within a 
 
 | Boundary | Control | Purpose |
 |----------|---------|---------|
-| Network | Public subnets with no inbound rules | Avoid direct inbound exposure while preserving outbound access without NAT |
+| Network | Private subnets with NAT | Avoid direct internet exposure for task ENIs |
 | Egress | Security group rules allowing HTTPS only | Limit outbound connections |
 | Compute | Fargate isolation | Prevent task-to-task communication |
 | Storage | Ephemeral containers | No persistent state between tasks |

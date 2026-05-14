@@ -56,7 +56,7 @@ GitHub Issue
     ↓
   [review:approved] or [review:changes-requested] label
     ↓
-  Auto-merge after 1-hour hold (if approved)
+  Merge after hold period only if a human approval exists
 ```
 
 ### Label Semantics
@@ -77,6 +77,7 @@ The agent uses a trigger + status label system:
 **Review Labels:**
 - `review:approved` - Review agent approved the PR quality
 - `review:changes-requested` - Review agent found issues needing fixes
+- `review:human-required` - Protected files or policy require manual review; auto-merge is blocked
 
 **Status Labels:**
 - `status:blocked` - Indicates task is blocked (credit-aware throttling)
@@ -210,6 +211,15 @@ All scheduled operations use EventBridge rules. Times listed are in UTC:
 | Escalation Checks | Every 15 minutes | Route decisions to human admins |
 | Task Status Monitor | Every 30 minutes | Health checks on running tasks |
 | Credit Rescan | Hourly | Unblock repos when credits available |
+
+## Deployment
+
+GitHub Actions separates validation from deployment:
+
+- `CI` runs on pull requests and pushes to `main`.
+- `Deploy` runs only for published GitHub releases or manual `workflow_dispatch`.
+
+The CDK stack runs agent tasks in private subnets by default. To use the prior lower-cost public-subnet mode for a non-production deployment, pass `-c usePublicSubnets=true` to CDK.
 
 ## Per-Repo Configuration
 

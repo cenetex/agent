@@ -2,7 +2,6 @@ import { createHmac } from "crypto";
 import {
   ECSClient,
   RunTaskCommand,
-  type RunTaskCommandInput,
 } from "@aws-sdk/client-ecs";
 import {
   SSMClient,
@@ -41,6 +40,16 @@ import {
   PROTECTED_PATHS,
   CODING_AGENT_BOT_LOGINS,
 } from "./types";
+import {
+  DEFAULT_DISPATCH_CONFIG,
+  DEFAULT_MERGE_HOLD_CONFIG,
+  parseAgentConfig,
+  type DispatchConfig,
+} from "./agent-config";
+import {
+  createRunTaskInput,
+  parseTaskAssignPublicIp,
+} from "./fargate-task";
 import { publishDigestToSocialMedia } from "./digest-publisher";
 
 const ecs = new ECSClient({});
@@ -54,6 +63,7 @@ const CONTAINER_NAME = process.env.CONTAINER_NAME!;
 const DIAGNOSTIC_CONTAINER_NAME = process.env.DIAGNOSTIC_CONTAINER_NAME!;
 const SUBNETS = process.env.SUBNETS!;
 const SECURITY_GROUP = process.env.SECURITY_GROUP!;
+const TASK_ASSIGN_PUBLIC_IP = parseTaskAssignPublicIp(process.env.TASK_ASSIGN_PUBLIC_IP);
 const WEBHOOK_SECRET_PARAM = process.env.WEBHOOK_SECRET_PARAM!;
 const GITHUB_APP_ID_PARAM = process.env.GITHUB_APP_ID_PARAM!;
 const GITHUB_APP_PRIVATE_KEY_PARAM = process.env.GITHUB_APP_PRIVATE_KEY_PARAM!;
@@ -231,7 +241,7 @@ async function getIssueLabels(
   return issueData.labels.map((label: any) => label.name);
 }
 
-async function getRepoModelConfig(
+async function getRepoAgentConfigContent(
   repoOwner: string,
   repoName: string,
   token: string
@@ -253,16 +263,20 @@ async function getRepoModelConfig(
       return null;
     }
 
-    // Decode base64 content
-    const decoded = Buffer.from(content.content, "base64").toString("utf8");
-
-    // Simple regex to extract model line: "model: anthropic/claude-sonnet-4"
-    const modelMatch = decoded.match(/^model:\s*(.+)$/m);
-    return modelMatch ? modelMatch[1].trim() : null;
+    return Buffer.from(content.content, "base64").toString("utf8");
   } catch (error) {
     console.log(`Failed to fetch .github/AGENT.md: ${error}`);
     return null;
   }
+}
+
+async function getRepoModelConfig(
+  repoOwner: string,
+  repoName: string,
+  token: string
+): Promise<string | null> {
+  const content = await getRepoAgentConfigContent(repoOwner, repoName, token);
+  return content ? parseAgentConfig(content).model : null;
 }
 
 function getDefaultModel(taskMode: "issue" | "pull_request" | "planning"): string {
@@ -608,30 +622,15 @@ async function triggerReviewForPR(
     const REVIEW_TASK_DEFINITION_ARN = process.env.REVIEW_TASK_DEFINITION_ARN!;
     const REVIEW_CONTAINER_NAME = process.env.REVIEW_CONTAINER_NAME!;
 
-    const params: RunTaskCommandInput = {
-      cluster: CLUSTER_ARN,
-      taskDefinition: REVIEW_TASK_DEFINITION_ARN,
-      launchType: "FARGATE",
-      count: 1,
-      networkConfiguration: {
-        awsvpcConfiguration: {
-          subnets: SUBNETS.split(","),
-          securityGroups: [SECURITY_GROUP],
-          assignPublicIp: "ENABLED",
-        },
-      },
-      overrides: {
-        containerOverrides: [
-          {
-            name: REVIEW_CONTAINER_NAME,
-            environment: Object.entries(reviewEnvironment).map(([name, value]) => ({
-              name,
-              value,
-            })),
-          },
-        ],
-      },
-    };
+    const params = createRunTaskInput({
+      clusterArn: CLUSTER_ARN,
+      taskDefinitionArn: REVIEW_TASK_DEFINITION_ARN,
+      containerName: REVIEW_CONTAINER_NAME,
+      subnets: SUBNETS,
+      securityGroup: SECURITY_GROUP,
+      environment: reviewEnvironment,
+      assignPublicIp: TASK_ASSIGN_PUBLIC_IP,
+    });
 
     const result = await ecs.send(new RunTaskCommand(params));
     const taskArn = result.tasks?.[0]?.taskArn;
@@ -1169,24 +1168,6 @@ function detectCircularDependency(
 }
 
 /**
- * Configuration for issue dispatch (read from .github/AGENT.md)
- */
-interface DispatchConfig {
-  auto_dispatch: boolean;
-  auto_dispatch_labels: string[];
-  wip_cap: number;
-  max_concurrent: number;
-}
-
-/**
- * Configuration for merge hold period (read from .github/AGENT.md)
- */
-interface MergeHoldConfig {
-  merge_hold_minutes: number;
-  merge_hold_minutes_infra: number;
-}
-
-/**
  * Reads dispatch configuration from repo's .github/AGENT.md
  * Returns config with defaults if file doesn't exist
  */
@@ -1195,44 +1176,8 @@ async function getDispatchConfig(
   repoName: string,
   token: string
 ): Promise<DispatchConfig> {
-  try {
-    const response = await githubRequest(
-      `/repos/${repoOwner}/${repoName}/contents/.github/AGENT.md`,
-      token,
-      { method: "GET" },
-      [200, 404]
-    );
-
-    if (response.status === 404) {
-      return { auto_dispatch: true, auto_dispatch_labels: ["ready"], wip_cap: 0, max_concurrent: 3 };
-    }
-
-    const content = await response.json() as any;
-    if (content.type !== "file" || !content.content) {
-      return { auto_dispatch: true, auto_dispatch_labels: ["ready"], wip_cap: 0, max_concurrent: 3 };
-    }
-
-    // Decode base64 content
-    const decoded = Buffer.from(content.content as string, "base64").toString("utf8");
-
-    // Extract configuration lines
-    const autoDispatchMatch = decoded.match(/^auto_dispatch:\s*(.+)$/m);
-    const labelsMatch = decoded.match(/^auto_dispatch_labels:\s*(.+)$/m);
-    const wipCapMatch = decoded.match(/^wip_cap:\s*(\d+)$/m);
-    const maxConcurrentMatch = decoded.match(/^max_concurrent:\s*(\d+)$/m);
-
-    const auto_dispatch = autoDispatchMatch ? autoDispatchMatch[1].trim().toLowerCase() === "true" : true;
-    const auto_dispatch_labels = labelsMatch
-      ? labelsMatch[1].trim().split(",").map(l => l.trim()).filter(l => l)
-      : ["ready"];
-    const wip_cap = wipCapMatch ? parseInt(wipCapMatch[1], 10) : 0;
-    const max_concurrent = maxConcurrentMatch ? parseInt(maxConcurrentMatch[1], 10) : 3;
-
-    return { auto_dispatch, auto_dispatch_labels, wip_cap, max_concurrent };
-  } catch (error) {
-    console.log(`Failed to fetch dispatch config from .github/AGENT.md: ${error}`);
-    return { auto_dispatch: true, auto_dispatch_labels: ["ready"], wip_cap: 0, max_concurrent: 3 };
-  }
+  const content = await getRepoAgentConfigContent(repoOwner, repoName, token);
+  return content ? parseAgentConfig(content).dispatch : DEFAULT_DISPATCH_CONFIG;
 }
 
 /**
@@ -1264,33 +1209,12 @@ async function getMergeHoldConfig(
       return 5;
     }
 
-    // Get .github/AGENT.md config
-    const configResponse = await githubRequest(
-      `/repos/${repoOwner}/${repoName}/contents/.github/AGENT.md`,
-      token,
-      { method: "GET" },
-      [200, 404]
-    );
-
-    let mergeHoldMinutes = 60; // default
-    let mergeHoldMinutesInfra = 120; // default for infra paths
-
-    if (configResponse.status === 200) {
-      const content = await configResponse.json() as any;
-      if (content.type === "file" && content.content) {
-        const decoded = Buffer.from(content.content as string, "base64").toString("utf8");
-
-        const holdMatch = decoded.match(/^merge_hold_minutes:\s*(\d+)$/m);
-        if (holdMatch) {
-          mergeHoldMinutes = parseInt(holdMatch[1], 10);
-        }
-
-        const holdInfraMatch = decoded.match(/^merge_hold_minutes_infra:\s*(\d+)$/m);
-        if (holdInfraMatch) {
-          mergeHoldMinutesInfra = parseInt(holdInfraMatch[1], 10);
-        }
-      }
-    }
+    const content = await getRepoAgentConfigContent(repoOwner, repoName, token);
+    const mergeHoldConfig = content
+      ? parseAgentConfig(content).mergeHold
+      : DEFAULT_MERGE_HOLD_CONFIG;
+    const mergeHoldMinutes = mergeHoldConfig.merge_hold_minutes;
+    const mergeHoldMinutesInfra = mergeHoldConfig.merge_hold_minutes_infra;
 
     // Check if PR touches infra/ paths
     const filesResponse = await githubRequest(
@@ -1311,8 +1235,8 @@ async function getMergeHoldConfig(
     console.log(`PR #${prNumber} using default ${mergeHoldMinutes} minute hold period`);
     return mergeHoldMinutes;
   } catch (error) {
-    console.log(`Failed to fetch merge hold config, using default 60 minutes: ${error}`);
-    return 60;
+    console.log(`Failed to fetch merge hold config, using default ${DEFAULT_MERGE_HOLD_CONFIG.merge_hold_minutes} minutes: ${error}`);
+    return DEFAULT_MERGE_HOLD_CONFIG.merge_hold_minutes;
   }
 }
 
@@ -2651,30 +2575,15 @@ function createTaskEnvironmentForDiagnostic(
 async function launchDiagnosticFargateTask(
   taskEnvironment: Record<string, string>
 ): Promise<void> {
-  const params: RunTaskCommandInput = {
-    cluster: CLUSTER_ARN,
-    taskDefinition: DIAGNOSTIC_TASK_DEFINITION_ARN,
-    launchType: "FARGATE",
-    count: 1,
-    networkConfiguration: {
-      awsvpcConfiguration: {
-        subnets: SUBNETS.split(","),
-        securityGroups: [SECURITY_GROUP],
-        assignPublicIp: "ENABLED",
-      },
-    },
-    overrides: {
-      containerOverrides: [
-        {
-          name: DIAGNOSTIC_CONTAINER_NAME,
-          environment: Object.entries(taskEnvironment).map(([name, value]) => ({
-            name,
-            value,
-          })),
-        },
-      ],
-    },
-  };
+  const params = createRunTaskInput({
+    clusterArn: CLUSTER_ARN,
+    taskDefinitionArn: DIAGNOSTIC_TASK_DEFINITION_ARN,
+    containerName: DIAGNOSTIC_CONTAINER_NAME,
+    subnets: SUBNETS,
+    securityGroup: SECURITY_GROUP,
+    environment: taskEnvironment,
+    assignPublicIp: TASK_ASSIGN_PUBLIC_IP,
+  });
 
   const result = await ecs.send(new RunTaskCommand(params));
   const taskArn = result.tasks?.[0]?.taskArn;
@@ -4397,30 +4306,15 @@ Add the \`agent\` label again after purchasing credits. Credits can be purchased
       SIGNAL_LABEL_SUCCEEDED,
     };
 
-    const params: RunTaskCommandInput = {
-      cluster: CLUSTER_ARN,
-      taskDefinition: TASK_DEFINITION_ARN,
-      launchType: "FARGATE",
-      count: 1,
-      networkConfiguration: {
-        awsvpcConfiguration: {
-          subnets: SUBNETS.split(","),
-          securityGroups: [SECURITY_GROUP],
-          assignPublicIp: "ENABLED",
-        },
-      },
-      overrides: {
-        containerOverrides: [
-          {
-            name: CONTAINER_NAME,
-            environment: Object.entries(taskEnvironment).map(([name, value]) => ({
-              name,
-              value,
-            })),
-          },
-        ],
-      },
-    };
+    const params = createRunTaskInput({
+      clusterArn: CLUSTER_ARN,
+      taskDefinitionArn: TASK_DEFINITION_ARN,
+      containerName: CONTAINER_NAME,
+      subnets: SUBNETS,
+      securityGroup: SECURITY_GROUP,
+      environment: { ...taskEnvironment },
+      assignPublicIp: TASK_ASSIGN_PUBLIC_IP,
+    });
 
     const result = await ecs.send(new RunTaskCommand(params));
     const taskArn = result.tasks?.[0]?.taskArn;

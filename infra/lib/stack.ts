@@ -42,20 +42,38 @@ export class GitHubAgentStack extends cdk.Stack {
         `arn:aws:ssm:${this.region}:${this.account}:parameter${name}`
     );
 
+    const usePublicSubnets = this.node.tryGetContext("usePublicSubnets") === "true";
+    const agentSubnetType = usePublicSubnets
+      ? ec2.SubnetType.PUBLIC
+      : ec2.SubnetType.PRIVATE_WITH_EGRESS;
+    const taskAssignPublicIp = usePublicSubnets ? "ENABLED" : "DISABLED";
+
     // -------------------------------------------------------
-    // VPC — public subnets for cost efficiency
+    // VPC — private task subnets by default
     // -------------------------------------------------------
     const vpc = new ec2.Vpc(this, "AgentVpc", {
       maxAzs: 2,
-      natGateways: 0, // No NAT gateway — use public subnets instead
+      natGateways: usePublicSubnets ? 0 : 1,
       subnetConfiguration: [
         {
           name: "Public",
           subnetType: ec2.SubnetType.PUBLIC,
           cidrMask: 24,
         },
+        ...(usePublicSubnets
+          ? []
+          : [
+              {
+                name: "Private",
+                subnetType: ec2.SubnetType.PRIVATE_WITH_EGRESS,
+                cidrMask: 24,
+              },
+            ]),
       ],
     });
+
+    const agentSubnets = usePublicSubnets ? vpc.publicSubnets : vpc.privateSubnets;
+    const agentSubnetIds = agentSubnets.map((s) => s.subnetId).join(",");
 
     const taskSecurityGroup = new ec2.SecurityGroup(this, "TaskSG", {
       vpc,
@@ -77,9 +95,28 @@ export class GitHubAgentStack extends cdk.Stack {
     vpc.addGatewayEndpoint("S3GatewayEndpoint", {
       service: ec2.GatewayVpcEndpointAwsService.S3,
       subnets: [
-        { subnetType: ec2.SubnetType.PUBLIC },
+        { subnetType: agentSubnetType },
       ],
     });
+
+    if (!usePublicSubnets) {
+      vpc.addInterfaceEndpoint("EcrApiEndpoint", {
+        service: ec2.InterfaceVpcEndpointAwsService.ECR,
+        subnets: { subnetType: agentSubnetType },
+      });
+      vpc.addInterfaceEndpoint("EcrDockerEndpoint", {
+        service: ec2.InterfaceVpcEndpointAwsService.ECR_DOCKER,
+        subnets: { subnetType: agentSubnetType },
+      });
+      vpc.addInterfaceEndpoint("CloudWatchLogsEndpoint", {
+        service: ec2.InterfaceVpcEndpointAwsService.CLOUDWATCH_LOGS,
+        subnets: { subnetType: agentSubnetType },
+      });
+      vpc.addInterfaceEndpoint("SsmEndpoint", {
+        service: ec2.InterfaceVpcEndpointAwsService.SSM,
+        subnets: { subnetType: agentSubnetType },
+      });
+    }
 
     // -------------------------------------------------------
     // S3 Bucket for Task Artifacts
@@ -278,8 +315,9 @@ export class GitHubAgentStack extends cdk.Stack {
         CONTAINER_NAME: containerName,
         DIAGNOSTIC_CONTAINER_NAME: diagnosticContainerName,
         REVIEW_CONTAINER_NAME: reviewContainerName,
-        SUBNETS: vpc.publicSubnets.map((s) => s.subnetId).join(","),
+        SUBNETS: agentSubnetIds,
         SECURITY_GROUP: taskSecurityGroup.securityGroupId,
+        TASK_ASSIGN_PUBLIC_IP: taskAssignPublicIp,
         WEBHOOK_SECRET_PARAM: PARAM_WEBHOOK_SECRET,
         GITHUB_APP_ID_PARAM: PARAM_GITHUB_APP_ID,
         GITHUB_APP_PRIVATE_KEY_PARAM: PARAM_GITHUB_APP_PRIVATE_KEY,
@@ -343,8 +381,9 @@ export class GitHubAgentStack extends cdk.Stack {
         CLUSTER_ARN: cluster.clusterArn,
         REVIEW_TASK_DEFINITION_ARN: reviewTaskDefinition.taskDefinitionArn,
         REVIEW_CONTAINER_NAME: reviewContainerName,
-        SUBNETS: vpc.publicSubnets.map((s) => s.subnetId).join(","),
+        SUBNETS: agentSubnetIds,
         SECURITY_GROUP: taskSecurityGroup.securityGroupId,
+        TASK_ASSIGN_PUBLIC_IP: taskAssignPublicIp,
         GITHUB_APP_ID_PARAM: PARAM_GITHUB_APP_ID,
         GITHUB_APP_PRIVATE_KEY_PARAM: PARAM_GITHUB_APP_PRIVATE_KEY,
         OPENROUTER_API_KEY_PARAM: PARAM_OPENROUTER_KEY,
@@ -892,6 +931,11 @@ export class GitHubAgentStack extends cdk.Stack {
     new cdk.CfnOutput(this, "ArtifactsBucket", {
       value: artifactsBucket.bucketName,
       description: "S3 bucket for task artifacts and metadata",
+    });
+
+    new cdk.CfnOutput(this, "TaskNetworkMode", {
+      value: usePublicSubnets ? "public-subnets-public-ip" : "private-subnets-nat",
+      description: "Network mode used for agent Fargate tasks",
     });
   }
 }
