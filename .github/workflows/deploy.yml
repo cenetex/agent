@@ -25,11 +25,42 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 20.20.2
           cache: npm
           cache-dependency-path: |
+            package-lock.json
             infra/package-lock.json
             agent/package-lock.json
+            website/package-lock.json
+
+      - name: Install root deps
+        run: npm ci
+
+      - name: Install infra deps
+        run: cd infra && npm ci
+
+      - name: Validate infra
+        run: |
+          cd infra
+          npm run build
+          npm test
+
+      - name: Validate agent shell scripts
+        run: |
+          cd agent
+          npm ci
+          npm run build
+          bash -n entrypoint.sh
+          bash -n review-entrypoint.sh
+          bash -n lib/common.sh
+          bash -n lib/orchestrate-lint.sh
+          bash -n lib/lint-loop.sh
+
+      - name: Install website deps
+        run: cd website && npm ci
+
+      - name: Build website
+        run: cd website && npm run build
 
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v4
@@ -40,9 +71,6 @@ jobs:
       - name: Login to ECR
         id: ecr-login
         uses: aws-actions/amazon-ecr-login@v2
-
-      - name: Install infra deps
-        run: cd infra && npm ci
 
       - name: CDK deploy
         run: cd infra && npx cdk deploy --require-approval never --outputs-file ../cdk-outputs.json

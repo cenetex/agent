@@ -1,6 +1,11 @@
-FROM node:20
+ARG NODE_IMAGE=node:20.20.2-bookworm-slim
+FROM ${NODE_IMAGE}
 
-RUN apt-get update && apt-get install -y git jq curl unzip && rm -rf /var/lib/apt/lists/*
+ARG CLAUDE_CODE_VERSION=2.1.128
+
+RUN apt-get update \
+  && apt-get install -y --no-install-recommends git jq curl unzip ca-certificates \
+  && rm -rf /var/lib/apt/lists/*
 
 # Install AWS CLI v2 (needed for S3 artifact uploads)
 RUN curl -sf "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o /tmp/awscliv2.zip \
@@ -16,7 +21,7 @@ RUN curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
   && apt-get update && apt-get install -y gh && rm -rf /var/lib/apt/lists/*
 
 # Install Claude Code
-RUN npm install -g @anthropic-ai/claude-code
+RUN npm install -g "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}"
 
 RUN useradd --create-home --shell /bin/bash agent \
   && mkdir -p /work \
