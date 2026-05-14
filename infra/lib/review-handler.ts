@@ -1,7 +1,6 @@
 import {
   ECSClient,
   RunTaskCommand,
-  type RunTaskCommandInput,
 } from "@aws-sdk/client-ecs";
 import {
   SSMClient,
@@ -23,6 +22,14 @@ import {
   type ReviewEnvironment,
   type GitHubAppConfig,
 } from "./types";
+import {
+  createRunTaskInput,
+  parseTaskAssignPublicIp,
+} from "./fargate-task";
+import {
+  hasCurrentHumanApproval,
+  hasBlockingAutoMergeLabel,
+} from "./review-policy";
 
 const ecs = new ECSClient({});
 const ssm = new SSMClient({});
@@ -33,6 +40,7 @@ const REVIEW_TASK_DEFINITION_ARN = process.env.REVIEW_TASK_DEFINITION_ARN!;
 const REVIEW_CONTAINER_NAME = process.env.REVIEW_CONTAINER_NAME!;
 const SUBNETS = process.env.SUBNETS!;
 const SECURITY_GROUP = process.env.SECURITY_GROUP!;
+const TASK_ASSIGN_PUBLIC_IP = parseTaskAssignPublicIp(process.env.TASK_ASSIGN_PUBLIC_IP);
 const GITHUB_APP_ID_PARAM = process.env.GITHUB_APP_ID_PARAM!;
 const GITHUB_APP_PRIVATE_KEY_PARAM = process.env.GITHUB_APP_PRIVATE_KEY_PARAM!;
 const OPENROUTER_API_KEY_PARAM = process.env.OPENROUTER_API_KEY_PARAM!;
@@ -346,30 +354,15 @@ async function startReviewTask(
     REVIEW_CRITERIA: JSON.stringify(reviewCriteria),
   };
 
-  const params: RunTaskCommandInput = {
-    cluster: CLUSTER_ARN,
-    taskDefinition: REVIEW_TASK_DEFINITION_ARN,
-    launchType: "FARGATE",
-    count: 1,
-    networkConfiguration: {
-      awsvpcConfiguration: {
-        subnets: SUBNETS.split(","),
-        securityGroups: [SECURITY_GROUP],
-        assignPublicIp: "ENABLED",
-      },
-    },
-    overrides: {
-      containerOverrides: [
-        {
-          name: REVIEW_CONTAINER_NAME,
-          environment: Object.entries(reviewEnvironment).map(([name, value]) => ({
-            name,
-            value,
-          })),
-        },
-      ],
-    },
-  };
+  const params = createRunTaskInput({
+    clusterArn: CLUSTER_ARN,
+    taskDefinitionArn: REVIEW_TASK_DEFINITION_ARN,
+    containerName: REVIEW_CONTAINER_NAME,
+    subnets: SUBNETS,
+    securityGroup: SECURITY_GROUP,
+    environment: { ...reviewEnvironment },
+    assignPublicIp: TASK_ASSIGN_PUBLIC_IP,
+  });
 
   const result = await ecs.send(new RunTaskCommand(params));
   const taskArn = result.tasks?.[0]?.taskArn;
@@ -456,19 +449,30 @@ async function mergeApprovedPRs(token: string): Promise<void> {
 
       // Filter PRs with review:approved label
       const approvedPRs = prs.filter((pr: any) => {
+        const labels = pr.labels.map((label: any) => label.name);
         const hasApprovedLabel = pr.labels.some((label: any) =>
           label.name === "review:approved"
         );
 
-        const hasPauseLabel = pr.labels.some((label: any) =>
-          label.name === "pause-agent"
-        );
-
-        return hasApprovedLabel && !hasPauseLabel;
+        return hasApprovedLabel && !hasBlockingAutoMergeLabel(labels);
       });
 
       for (const pr of approvedPRs) {
         try {
+          const reviewsResponse = await githubRequest(
+            `/repos/${repo}/pulls/${pr.number}/reviews?per_page=100`,
+            token,
+            { method: "GET" },
+            [200]
+          );
+          const reviews = await reviewsResponse.json() as any[];
+          const hasHumanApproval = hasCurrentHumanApproval(reviews);
+
+          if (!hasHumanApproval) {
+            console.log(`PR ${pr.number}: review:approved label exists but no human approving review was found, skipping auto-merge`);
+            continue;
+          }
+
           // Get the label events to check when review:approved was added
           const labelsResponse = await githubRequest(
             `/repos/${repo}/issues/${pr.number}/events`,

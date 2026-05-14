@@ -2,23 +2,24 @@ ARG NODE_IMAGE=node:20.20.2-bookworm-slim
 FROM ${NODE_IMAGE}
 
 ARG CLAUDE_CODE_VERSION=2.1.128
+ARG AWS_CLI_VERSION=2.34.46
+ARG GH_CLI_VERSION=2.92.0
 
 RUN apt-get update \
   && apt-get install -y --no-install-recommends git jq curl unzip ca-certificates \
   && rm -rf /var/lib/apt/lists/*
 
 # Install AWS CLI v2 (needed for S3 artifact uploads)
-RUN curl -sf "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o /tmp/awscliv2.zip \
+RUN curl -sf "https://awscli.amazonaws.com/awscli-exe-linux-x86_64-${AWS_CLI_VERSION}.zip" -o /tmp/awscliv2.zip \
   && unzip -q /tmp/awscliv2.zip -d /tmp \
   && /tmp/aws/install \
   && rm -rf /tmp/awscliv2.zip /tmp/aws
 
 # Install gh CLI
-RUN curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
-    | dd of=/usr/share/keyrings/githubcli-archive-keyring.gpg \
-  && echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" \
-    | tee /etc/apt/sources.list.d/github-cli.list > /dev/null \
-  && apt-get update && apt-get install -y gh && rm -rf /var/lib/apt/lists/*
+RUN curl -fsSL "https://github.com/cli/cli/releases/download/v${GH_CLI_VERSION}/gh_${GH_CLI_VERSION}_linux_amd64.tar.gz" -o /tmp/gh.tar.gz \
+  && tar -xzf /tmp/gh.tar.gz -C /tmp \
+  && install -m 0755 "/tmp/gh_${GH_CLI_VERSION}_linux_amd64/bin/gh" /usr/local/bin/gh \
+  && rm -rf /tmp/gh.tar.gz "/tmp/gh_${GH_CLI_VERSION}_linux_amd64"
 
 # Install Claude Code
 RUN npm install -g "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}"

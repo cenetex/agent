@@ -1,0 +1,56 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20.20.2
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            infra/package-lock.json
+            agent/package-lock.json
+            website/package-lock.json
+
+      - name: Install root deps
+        run: npm ci
+
+      - name: Validate infra
+        run: |
+          cd infra
+          npm ci
+          npm run build
+          npm test
+
+      - name: Validate agent shell scripts
+        run: |
+          cd agent
+          npm ci
+          npm run build
+          bash -n entrypoint.sh
+          bash -n review-entrypoint.sh
+          bash -n lib/common.sh
+          bash -n lib/orchestrate-lint.sh
+          bash -n lib/lint-loop.sh
+
+      - name: Build website
+        run: |
+          cd website
+          npm ci
+          npm run build
