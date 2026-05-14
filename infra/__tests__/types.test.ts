@@ -3,6 +3,13 @@ import {
   parseRepoSlug,
   createRepoSlug,
   createArtifactPrefix,
+  createArtifactKeys,
+  createInitialTaskMetadata,
+  createCreditBalancePath,
+  createCreditLedgerPath,
+  createEscalationConfigPath,
+  createEscalationQueuePath,
+  getModelCost,
   createGitHubAppJWT,
 } from '../lib/types';
 
@@ -45,6 +52,80 @@ describe('types utilities', () => {
     it('should create predictable artifact prefix', () => {
       const prefix = createArtifactPrefix('octocat/repo', 'task_abc123');
       expect(prefix).toBe('tasks/octocat/repo/task_abc123');
+    });
+  });
+
+  describe('createArtifactKeys', () => {
+    it('should create standardized task artifact keys', () => {
+      const keys = createArtifactKeys('tasks/octocat/repo/task_abc123');
+
+      expect(keys).toEqual({
+        metadata: 'tasks/octocat/repo/task_abc123/metadata.json',
+        log: 'tasks/octocat/repo/task_abc123/agent.log',
+        summary: 'tasks/octocat/repo/task_abc123/summary.md',
+        manifest: 'tasks/octocat/repo/task_abc123/manifest.json',
+      });
+    });
+  });
+
+  describe('createInitialTaskMetadata', () => {
+    it('should preserve immutable task payload fields', () => {
+      const metadata = createInitialTaskMetadata(
+        {
+          task_id: 'task_abc123_def456',
+          repo_slug: 'octocat/repo',
+          requested_ref: 'main',
+          resolved_commit_sha: 'abc123',
+          task_mode: 'issue',
+          created_at: '2026-05-14T00:00:00Z',
+          issue_metadata: {
+            number: 42,
+            title: 'Fix issue',
+            body: 'Details',
+            labels: ['agent'],
+            author: 'octocat',
+          },
+        },
+        'arn:aws:ecs:task/test'
+      );
+
+      expect(metadata).toMatchObject({
+        task_id: 'task_abc123_def456',
+        repo_slug: 'octocat/repo',
+        issue_number: 42,
+        task_mode: 'issue',
+        status: 'requested',
+        requested_ref: 'main',
+        resolved_commit_sha: 'abc123',
+        task_arn: 'arn:aws:ecs:task/test',
+        artifact_prefix: 'tasks/octocat/repo/task_abc123_def456',
+        created_at: '2026-05-14T00:00:00Z',
+      });
+    });
+  });
+
+  describe('credit helpers', () => {
+    it('should map known model families to credit costs', () => {
+      expect(getModelCost('anthropic/claude-haiku-4-5')).toBe(4);
+      expect(getModelCost('anthropic/claude-sonnet-4-6')).toBe(12);
+      expect(getModelCost('anthropic/claude-opus-4-6')).toBe(20);
+      expect(getModelCost('unknown-model')).toBe(12);
+    });
+
+    it('should create stable credit storage paths', () => {
+      const date = new Date('2026-05-14T10:00:00Z');
+
+      expect(createCreditBalancePath('octocat/repo')).toBe('credits/octocat/repo/balance.json');
+      expect(createCreditLedgerPath('octocat/repo', date)).toBe(
+        'credits/octocat/repo/ledger/2026/05/transactions.jsonl'
+      );
+    });
+  });
+
+  describe('escalation path helpers', () => {
+    it('should create stable escalation storage paths', () => {
+      expect(createEscalationQueuePath('octocat/repo')).toBe('escalations/octocat/repo/queue.json');
+      expect(createEscalationConfigPath('octocat/repo')).toBe('escalations/octocat/repo/config.json');
     });
   });
 

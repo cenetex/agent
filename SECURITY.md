@@ -49,21 +49,18 @@ The GitHub Agent executes untrusted code in isolated AWS Fargate tasks within a 
 
 ### Network Isolation
 
-**Private Network Execution:**
-- Agent tasks run in private subnets without public IP addresses
-- All inbound access is disabled
-- Outbound access is controlled through explicit security group rules and NAT gateway
+**Public Subnet Execution:**
+- Agent tasks currently run in public subnets with assigned public IPs. This avoids NAT Gateway cost while still blocking inbound access at the security group.
+- All inbound access is disabled.
+- Outbound access is controlled through explicit security group rules.
 
 **Explicit Egress Controls:**
 - HTTPS (port 443): GitHub API, model inference, and AWS service APIs
-- HTTP (port 80): Package installations and HTTP redirects
-- DNS (ports 53 UDP/TCP): Name resolution
+- Package installation and API access must use HTTPS.
 
 **VPC Endpoints:**
 - S3 Gateway Endpoint: Private access to artifact storage
-- ECR Interface Endpoints: Private container image access
-- CloudWatch Logs Interface Endpoint: Private logging
-- SSM Interface Endpoint: Private parameter access
+- Additional interface endpoints for ECR, CloudWatch Logs, and SSM are not currently provisioned. Those would be needed before moving tasks to private subnets without NAT.
 
 ### Compute Isolation
 
@@ -94,8 +91,8 @@ The GitHub Agent executes untrusted code in isolated AWS Fargate tasks within a 
 
 | Boundary | Control | Purpose |
 |----------|---------|---------|
-| Network | Private subnets + NAT | Prevent direct internet exposure |
-| Egress | Security group rules | Limit outbound connections |
+| Network | Public subnets with no inbound rules | Avoid direct inbound exposure while preserving outbound access without NAT |
+| Egress | Security group rules allowing HTTPS only | Limit outbound connections |
 | Compute | Fargate isolation | Prevent task-to-task communication |
 | Storage | Ephemeral containers | No persistent state between tasks |
 | Identity | Scoped IAM roles | Limit AWS service access |
