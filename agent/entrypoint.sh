@@ -95,35 +95,48 @@ update_task_metadata() {
   local error_message="$2"
   local pr_url="$3"
   local failure_category="${4:-}"
-  local completed_timestamp=""
+  local completed_at=""
 
   if [ "$status" != "running" ]; then
-    completed_timestamp="\"completed_at\": \"$(date -u +"%Y-%m-%dT%H:%M:%SZ")\","
+    completed_at="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
   fi
 
   # Create updated metadata JSON
   local metadata_json
-  metadata_json=$(cat <<EOF
-{
-  "task_id": "${TASK_ID}",
-  "repo_slug": "${REPO_SLUG}",
-  "issue_number": ${ISSUE_NUMBER},
-  "task_mode": "${TASK_MODE}",
-  "status": "${status}",
-  "requested_ref": "${REQUESTED_REF}",
-  "resolved_commit_sha": "${RESOLVED_COMMIT_SHA}",
-  "task_arn": "$(echo "$TASK_PAYLOAD" | jq -r '.task_arn // empty')",
-  "artifact_prefix": "${ARTIFACT_PREFIX}",
-  "created_at": "${CREATED_AT}",
-  "started_at": "${RUN_STARTED_AT}",
-  ${completed_timestamp}
-  "error_message": $(if [ -n "$error_message" ]; then echo "\"$error_message\""; else echo "null"; fi),
-  "failure_category": $(if [ -n "$failure_category" ]; then echo "\"$failure_category\""; else echo "null"; fi),
-  "pr_url": $(if [ -n "$pr_url" ]; then echo "\"$pr_url\""; else echo "null"; fi),
-  "issue_metadata": $(echo "$TASK_PAYLOAD" | jq '.issue_metadata')
-}
-EOF
-)
+  metadata_json=$(jq -n \
+    --arg task_id "${TASK_ID}" \
+    --arg repo_slug "${REPO_SLUG}" \
+    --arg issue_number "${ISSUE_NUMBER}" \
+    --arg task_mode "${TASK_MODE}" \
+    --arg status "${status}" \
+    --arg requested_ref "${REQUESTED_REF}" \
+    --arg resolved_commit_sha "${RESOLVED_COMMIT_SHA}" \
+    --arg task_arn "$(echo "$TASK_PAYLOAD" | jq -r '.task_arn // empty')" \
+    --arg artifact_prefix "${ARTIFACT_PREFIX}" \
+    --arg created_at "${CREATED_AT}" \
+    --arg started_at "${RUN_STARTED_AT}" \
+    --arg completed_at "${completed_at}" \
+    --arg error_message "${error_message}" \
+    --arg failure_category "${failure_category}" \
+    --arg pr_url "${pr_url}" \
+    --argjson issue_metadata "$(echo "$TASK_PAYLOAD" | jq '.issue_metadata')" \
+    '{
+      task_id: $task_id,
+      repo_slug: $repo_slug,
+      issue_number: ($issue_number | tonumber),
+      task_mode: $task_mode,
+      status: $status,
+      requested_ref: $requested_ref,
+      resolved_commit_sha: $resolved_commit_sha,
+      task_arn: $task_arn,
+      artifact_prefix: $artifact_prefix,
+      created_at: $created_at,
+      started_at: $started_at,
+      error_message: (if $error_message == "" then null else $error_message end),
+      failure_category: (if $failure_category == "" then null else $failure_category end),
+      pr_url: (if $pr_url == "" then null else $pr_url end),
+      issue_metadata: $issue_metadata
+    } + (if $completed_at == "" then {} else {completed_at: $completed_at} end)')
 
   # Upload metadata to S3
   echo "$metadata_json" | aws s3 cp - "s3://${ARTIFACTS_BUCKET}/${METADATA_KEY}" --content-type "application/json" || true
@@ -148,19 +161,37 @@ upload_artifacts() {
 
   # Create and upload task manifest
   local manifest_json
-  manifest_json=$(cat <<EOF
-{
-  "task_id": "${TASK_ID}",
-  "metadata_key": "${METADATA_KEY}",
-  "log_key": "$(if [ -f "${AGENT_LOG}" ] && [ -s "${AGENT_LOG}" ]; then echo "${LOG_KEY}"; else echo "null"; fi)",
-  "summary_key": null,
-  "decision_log_key": "$(if [ -f "/tmp/decision-log.json" ] && [ -s "/tmp/decision-log.json" ]; then echo "${DECISION_LOG_KEY}"; else echo "null"; fi)",
-  "exit_code": ${exit_code},
-  "total_size_bytes": $(if [ -f "${AGENT_LOG}" ]; then wc -c < "${AGENT_LOG}"; else echo "0"; fi)",
-  "created_at": "$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
-}
-EOF
-)
+  local log_key=""
+  local decision_log_key=""
+  local total_size_bytes="0"
+
+  if [ -f "${AGENT_LOG}" ] && [ -s "${AGENT_LOG}" ]; then
+    log_key="${LOG_KEY}"
+    total_size_bytes="$(wc -c < "${AGENT_LOG}")"
+  fi
+
+  if [ -f "/tmp/decision-log.json" ] && [ -s "/tmp/decision-log.json" ]; then
+    decision_log_key="${DECISION_LOG_KEY}"
+  fi
+
+  manifest_json=$(jq -n \
+    --arg task_id "${TASK_ID}" \
+    --arg metadata_key "${METADATA_KEY}" \
+    --arg log_key "${log_key}" \
+    --arg decision_log_key "${decision_log_key}" \
+    --arg exit_code "${exit_code}" \
+    --arg total_size_bytes "${total_size_bytes}" \
+    --arg created_at "$(date -u +"%Y-%m-%dT%H:%M:%SZ")" \
+    '{
+      task_id: $task_id,
+      metadata_key: $metadata_key,
+      log_key: (if $log_key == "" then null else $log_key end),
+      summary_key: null,
+      decision_log_key: (if $decision_log_key == "" then null else $decision_log_key end),
+      exit_code: ($exit_code | tonumber),
+      total_size_bytes: ($total_size_bytes | tonumber),
+      created_at: $created_at
+    }')
 
   upload_artifact_from_stdin "$manifest_json" "${MANIFEST_KEY}" "application/json"
 }
@@ -1345,7 +1376,7 @@ while [ -z "${RUN_STATUS}" ] && [ "${ATTEMPT}" -lt "${MAX_ATTEMPTS}" ]; do
     echo "Detected non-retryable error: ${ERROR_TYPE} (${ERROR_CODE})" | tee -a "${AGENT_LOG}"
 
     if should_post_comment "${ISSUE_NUMBER}" "${REPO}" "${ERROR_CODE}"; then
-      local escalation_comment="<!-- task_id: ${TASK_ID} -->
+      escalation_comment="<!-- task_id: ${TASK_ID} -->
 ## ⚠️ Permission Error - Agent Escalation
 
 **Error Type:** \`${ERROR_TYPE}\`
@@ -1388,8 +1419,10 @@ ${ERROR_MESSAGE}
     poll_pr_checks "${ISSUE_NUMBER}" "${REPO}" || CI_RESULT=$?
 
     case "$CI_RESULT" in
-      0) RUN_STATUS="succeeded" ;;               # CI passed
-      1)                                           # PR-introduced failure
+      0)
+        RUN_STATUS="succeeded"
+        ;;
+      1)
         if [ "${ATTEMPT}" -lt "${MAX_ATTEMPTS}" ]; then
           echo "CI failed on PR #${ISSUE_NUMBER} — retrying (attempt ${ATTEMPT}/${MAX_ATTEMPTS})..." >&2
           continue
@@ -1397,11 +1430,13 @@ ${ERROR_MESSAGE}
         echo "CI failed on PR #${ISSUE_NUMBER} after ${MAX_ATTEMPTS} attempts" >&2
         exit 1
         ;;
-      2) RUN_STATUS="succeeded" ;;               # Pre-existing failure on main
-      3)                                           # Timeout — set to waiting
+      2)
+        RUN_STATUS="succeeded"
+        ;;
+      3)
         RUN_STATUS="waiting"
         # Post comment about CI still pending
-        local ci_pending_comment="CI checks are still pending for PR #${ISSUE_NUMBER}. The agent is waiting for them to complete."
+        ci_pending_comment="CI checks are still pending for PR #${ISSUE_NUMBER}. The agent is waiting for them to complete."
         post_comment "${ISSUE_NUMBER}" "${REPO}" "$ci_pending_comment"
         ;;
     esac
@@ -1413,8 +1448,10 @@ ${ERROR_MESSAGE}
       poll_pr_checks "${PR_NUM}" "${REPO}" || CI_RESULT=$?
 
       case "$CI_RESULT" in
-        0) RUN_STATUS="succeeded" ;;             # CI passed
-        1)                                         # PR-introduced failure
+        0)
+          RUN_STATUS="succeeded"
+          ;;
+        1)
           if [ "${ATTEMPT}" -lt "${MAX_ATTEMPTS}" ]; then
             echo "CI failed on created PR #${PR_NUM} — retrying (attempt ${ATTEMPT}/${MAX_ATTEMPTS})..." >&2
             continue
@@ -1422,23 +1459,24 @@ ${ERROR_MESSAGE}
           echo "CI failed on created PR #${PR_NUM} after ${MAX_ATTEMPTS} attempts" >&2
           exit 1
           ;;
-        2) RUN_STATUS="succeeded" ;;             # Pre-existing failure on main
-        3)                                         # Timeout — set to waiting
+        2)
+          RUN_STATUS="succeeded"
+          ;;
+        3)
           RUN_STATUS="waiting"
           # Post comment about CI still pending
-          local ci_pending_comment="CI checks are still pending for PR #${PR_NUM}. The agent is waiting for them to complete."
+          ci_pending_comment="CI checks are still pending for PR #${PR_NUM}. The agent is waiting for them to complete."
           post_comment "${ISSUE_NUMBER}" "${REPO}" "$ci_pending_comment"
           ;;
       esac
     else
       # PR URL found but couldn't extract PR number — set to waiting
       RUN_STATUS="waiting"
-      local pr_parsing_comment="PR was created but the number couldn't be extracted from the URL. The agent is waiting for manual verification."
+      pr_parsing_comment="PR was created but the number couldn't be extracted from the URL. The agent is waiting for manual verification."
       post_comment "${ISSUE_NUMBER}" "${REPO}" "$pr_parsing_comment"
     fi
   elif issue_was_closed "${ISSUE_NUMBER}" "${REPO}"; then
     # Issue is closed — verify that agent actually pushed code since run start
-    local agent_commits
     agent_commits=$(git log --oneline --since="${RUN_STARTED_AT}" --author="github-agent" --all 2>/dev/null | wc -l)
 
     if [ "$agent_commits" -gt 0 ]; then
@@ -1446,7 +1484,7 @@ ${ERROR_MESSAGE}
     else
       # Issue closed but no agent commits found
       RUN_STATUS="waiting"
-      local no_commit_comment="Issue was closed but no commits from the agent were found since the task started. Waiting for verification."
+      no_commit_comment="Issue was closed but no commits from the agent were found since the task started. Waiting for verification."
       post_comment "${ISSUE_NUMBER}" "${REPO}" "$no_commit_comment"
     fi
   elif has_agent_question_comment "${ISSUE_NUMBER}" "${REPO}" "${RUN_STARTED_AT}"; then

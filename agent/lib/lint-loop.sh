@@ -53,6 +53,17 @@ get_changed_files() {
   git diff --name-only origin/main..HEAD -- '*.ts' '*.tsx' '*.js' '*.jsx' 2>/dev/null || echo ""
 }
 
+read_changed_files() {
+  local files="$1"
+
+  CHANGED_FILES_ARRAY=()
+  if [ -n "$files" ]; then
+    while IFS= read -r file; do
+      [ -n "$file" ] && CHANGED_FILES_ARRAY+=("$file")
+    done <<< "$files"
+  fi
+}
+
 run_lint_fix() {
   local pkg_mgr="$1"
   local changed_files="$2"
@@ -61,17 +72,22 @@ run_lint_fix() {
     return 0
   fi
 
+  read_changed_files "$changed_files"
+  if [ ${#CHANGED_FILES_ARRAY[@]} -eq 0 ]; then
+    return 0
+  fi
+
   echo "[lint-loop] Running auto-fix pass on changed files..."
 
   case "$pkg_mgr" in
     pnpm)
-      pnpm exec eslint --fix --max-warnings 0 $changed_files 2>&1
+      pnpm exec eslint --fix --max-warnings 0 -- "${CHANGED_FILES_ARRAY[@]}" 2>&1
       ;;
     yarn)
-      yarn eslint --fix --max-warnings 0 $changed_files 2>&1
+      yarn eslint --fix --max-warnings 0 -- "${CHANGED_FILES_ARRAY[@]}" 2>&1
       ;;
     npm)
-      npm exec eslint -- --fix --max-warnings 0 $changed_files 2>&1
+      npm exec eslint -- --fix --max-warnings 0 -- "${CHANGED_FILES_ARRAY[@]}" 2>&1
       ;;
   esac
 
@@ -86,15 +102,20 @@ run_lint_check() {
     return 0
   fi
 
+  read_changed_files "$changed_files"
+  if [ ${#CHANGED_FILES_ARRAY[@]} -eq 0 ]; then
+    return 0
+  fi
+
   case "$pkg_mgr" in
     pnpm)
-      pnpm exec eslint --max-warnings 0 $changed_files 2>&1
+      pnpm exec eslint --max-warnings 0 -- "${CHANGED_FILES_ARRAY[@]}" 2>&1
       ;;
     yarn)
-      yarn eslint --max-warnings 0 $changed_files 2>&1
+      yarn eslint --max-warnings 0 -- "${CHANGED_FILES_ARRAY[@]}" 2>&1
       ;;
     npm)
-      npm exec eslint -- --max-warnings 0 $changed_files 2>&1
+      npm exec eslint -- --max-warnings 0 -- "${CHANGED_FILES_ARRAY[@]}" 2>&1
       ;;
   esac
 

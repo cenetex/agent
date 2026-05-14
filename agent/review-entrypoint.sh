@@ -59,29 +59,35 @@ update_review_status() {
   local decision="$2"
   local findings="$3"
   local error_message="$4"
-  local completed_timestamp=""
+  local completed_at=""
 
   if [ "$status" != "running" ]; then
-    completed_timestamp="\"completed_at\": \"$(date -u +"%Y-%m-%dT%H:%M:%SZ")\","
+    completed_at="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
   fi
 
   # Create updated metadata JSON
   local metadata_json
-  metadata_json=$(cat <<EOF
-{
-  "task_id": "${TASK_ID}",
-  "pr_number": ${PR_NUMBER},
-  "repo_slug": "${REPO_SLUG}",
-  "status": "${status}",
-  "decision": $(if [ -n "$decision" ]; then echo "\"$decision\""; else echo "null"; fi),
-  "task_arn": "",
-  "created_at": "${CREATED_AT}",
-  "started_at": "${RUN_STARTED_AT}",
-  ${completed_timestamp}
-  "error_message": $(if [ -n "$error_message" ]; then echo "\"$error_message\""; else echo "null"; fi)
-}
-EOF
-)
+  metadata_json=$(jq -n \
+    --arg task_id "${TASK_ID}" \
+    --arg pr_number "${PR_NUMBER}" \
+    --arg repo_slug "${REPO_SLUG}" \
+    --arg status "${status}" \
+    --arg decision "${decision}" \
+    --arg created_at "${CREATED_AT}" \
+    --arg started_at "${RUN_STARTED_AT}" \
+    --arg completed_at "${completed_at}" \
+    --arg error_message "${error_message}" \
+    '{
+      task_id: $task_id,
+      pr_number: ($pr_number | tonumber),
+      repo_slug: $repo_slug,
+      status: $status,
+      decision: (if $decision == "" then null else $decision end),
+      task_arn: "",
+      created_at: $created_at,
+      started_at: $started_at,
+      error_message: (if $error_message == "" then null else $error_message end)
+    } + (if $completed_at == "" then {} else {completed_at: $completed_at} end)')
 
   # Upload metadata and findings to S3 using common helpers
   upload_artifact_from_stdin "$metadata_json" "${METADATA_KEY}" "application/json"
@@ -563,17 +569,21 @@ if [ "$REVIEW_DECISION" != "approved" ] && [ "$REVIEW_DECISION" != "changes_requ
 fi
 
 # Create structured findings JSON for upload to S3
-FINDINGS_JSON=$(cat <<EOF
-{
-  "task_id": "${TASK_ID}",
-  "pr_number": ${PR_NUMBER},
-  "decision": "${REVIEW_DECISION}",
-  "findings": $(echo "$FINDINGS_DATA" | jq '.findings'),
-  "summary": $(echo "$FINDINGS_DATA" | jq -r '.summary // "No summary"'),
-  "completed_at": "$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
-}
-EOF
-)
+FINDINGS_JSON=$(jq -n \
+  --arg task_id "${TASK_ID}" \
+  --arg pr_number "${PR_NUMBER}" \
+  --arg decision "${REVIEW_DECISION}" \
+  --argjson findings "$(echo "$FINDINGS_DATA" | jq '.findings')" \
+  --arg summary "${FINDINGS_SUMMARY}" \
+  --arg completed_at "$(date -u +"%Y-%m-%dT%H:%M:%SZ")" \
+  '{
+    task_id: $task_id,
+    pr_number: ($pr_number | tonumber),
+    decision: $decision,
+    findings: $findings,
+    summary: $summary,
+    completed_at: $completed_at
+  }')
 
 echo "=== Review Analysis Complete ==="
 echo "Decision: ${REVIEW_DECISION}"
