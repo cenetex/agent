@@ -1,0 +1,57 @@
+id: cab-priya
+display_name: "Priya — AppSec Engineer"
+board: cab
+description: >
+  Application Security persona on the Change Advisory Board.
+  Reviews threat surface, dep vulns, secrets handling, IAM blast radius,
+  auth flow changes. Treats everything as hostile until proven safe.
+
+prompt_file: cab-priya.md
+
+output:
+  type: comment
+  target_repo: cenetex/governance
+  target_issue: 57
+
+tools:
+  bash: true        # gh + aws read for IAM / Secrets audit
+  read: true
+  grep: true
+  glob: true
+  edit: false
+  write: false
+
+sources:
+  read:
+    - cenetex/aws-swarm
+    - cenetex/agent
+    - cenetex/kyro
+    - cenetex/ratibot
+    - cenetex/raticross
+    - cenetex/signal
+    - cenetex/governance
+    - cenetex/app-ruby-high
+    - cenetex/cosyworld
+  write:
+    - cenetex/governance
+
+aws:
+  iam_role: arn:aws:iam::332730082708:role/governance-cab-appsec
+  permissions:
+    # read-only audit on auth-relevant resources
+    - iam:ListRoles
+    - iam:ListPolicies
+    - iam:GetRole
+    - iam:GetPolicy
+    - iam:GetPolicyVersion
+    - secretsmanager:ListSecrets
+    - secretsmanager:DescribeSecret  # NOT GetSecretValue — auditor not consumer
+    - cloudtrail:LookupEvents
+
+github_extra_apis:
+  # Read-only access to security-scanning APIs
+  - dependabot/alerts
+  - secret-scanning/alerts
+  - code-scanning/alerts
+
+mcp_connectors: []

@@ -540,6 +540,41 @@ set_signal_label "${SIGNAL_LABEL_RUNNING}"
 # Update task status to running
 update_task_metadata "running" "" ""
 
+# --- Persona dispatch (early-exit branch) ---
+# When TASK_PAYLOAD.persona_id is set, this is a persona-typed dispatch
+# (CAB / ARB / CTO / Board). The persona runs claude with its own system
+# prompt and tool allowlist (from /agents/<board>/<id>.yaml) and posts its
+# review as a comment on a target governance issue — not the trigger issue.
+#
+# Personas don't clone the trigger repo, don't run pre-flight code checks,
+# don't open PRs. They produce comments. Skip the rest of the default flow.
+PERSONA_ID=$(echo "$TASK_PAYLOAD" | jq -r '.persona_id // empty')
+if [ -n "${PERSONA_ID}" ]; then
+  CURRENT_STAGE="persona dispatch: ${PERSONA_ID}"
+  echo "=== Persona-typed dispatch: ${PERSONA_ID} ==="
+  export PERSONA_ID TASK_PAYLOAD TASK_ID ISSUE_NUMBER REPO AGENT_LOG \
+         GITHUB_TOKEN OPENROUTER_API_KEY ARTIFACTS_BUCKET ARTIFACT_PREFIX
+
+  PERSONA_EXIT=0
+  /lib/persona-runner.sh || PERSONA_EXIT=$?
+
+  if [ "${PERSONA_EXIT}" -eq 0 ]; then
+    echo "Persona run succeeded"
+    RUN_STATUS="succeeded"
+    set_signal_label "${SIGNAL_LABEL_SUCCEEDED}"
+    update_task_metadata "succeeded" "" ""
+    upload_artifacts 0 ""
+    exit 0
+  else
+    echo "Persona run failed with exit ${PERSONA_EXIT}"
+    RUN_STATUS="failed"
+    set_signal_label "${SIGNAL_LABEL_FAILED}"
+    update_task_metadata "failed" "Persona runner exit ${PERSONA_EXIT}" "" "persona_runner_failed"
+    upload_artifacts "${PERSONA_EXIT}" ""
+    exit 1
+  fi
+fi
+
 # --- Clone repo ---
 CURRENT_STAGE="clone repository"
 echo "Cloning ${REPO}..."

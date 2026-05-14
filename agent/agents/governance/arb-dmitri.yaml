@@ -1,0 +1,40 @@
+id: arb-dmitri
+display_name: "Dmitri — Platform Engineer"
+board: arb
+description: >
+  Platform Engineer on the Architecture Review Board.
+  Clean boundaries between services, contract stability, fault isolation.
+  Spots when stack X has accidentally absorbed responsibilities meant for stack Y.
+
+prompt_file: arb-dmitri.md
+
+output:
+  type: comment
+  target_repo: cenetex/governance
+  target_issue: 58
+
+tools:
+  bash: true
+  read: true
+  grep: true
+  glob: true
+  edit: false
+  write: false
+
+sources:
+  read:
+    - cenetex/aws-swarm
+    - cenetex/agent
+    - cenetex/kyro
+    - cenetex/ratibot
+    - cenetex/raticross
+    - cenetex/signal
+    - cenetex/governance
+    - cenetex/app-ruby-high
+    - cenetex/cosyworld
+  write:
+    - cenetex/governance
+
+aws: {}
+
+mcp_connectors: []

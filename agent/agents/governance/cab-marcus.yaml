@@ -1,0 +1,53 @@
+id: cab-marcus
+display_name: "Marcus — SRE Lead"
+board: cab
+description: >
+  Site Reliability Engineering persona on the Change Advisory Board.
+  Reviews operational health: deploys, error budgets, on-call toil,
+  alarm states. Skeptical of new abstractions until they prove their
+  reliability cost.
+
+prompt_file: cab-marcus.md
+
+output:
+  type: comment
+  target_repo: cenetex/governance
+  target_issue: 57
+
+tools:
+  bash: true        # gh + aws read for CloudWatch / Logs
+  read: true
+  grep: true
+  glob: true
+  edit: false       # SRE in review role does not edit code
+  write: false
+
+sources:
+  read:
+    - cenetex/aws-swarm
+    - cenetex/agent
+    - cenetex/kyro
+    - cenetex/ratibot
+    - cenetex/raticross
+    - cenetex/signal
+    - cenetex/governance
+    - cenetex/app-ruby-high
+    - cenetex/cosyworld
+  write:
+    - cenetex/governance        # post review comments here
+    # review:flagged labeling on any cenetex repo (handled by GitHub App scope)
+
+aws:
+  # Future: assume this role in entrypoint.sh for AWS read access
+  iam_role: arn:aws:iam::332730082708:role/governance-cab-sre
+  permissions:
+    - cloudwatch:GetMetricStatistics
+    - cloudwatch:DescribeAlarms
+    - cloudwatch:DescribeAlarmHistory
+    - logs:FilterLogEvents
+    - logs:DescribeLogGroups
+    - ecs:DescribeClusters
+    - ecs:ListServices
+    - ecs:DescribeServices
+
+mcp_connectors: []

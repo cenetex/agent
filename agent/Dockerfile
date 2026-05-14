@@ -2,6 +2,11 @@ FROM node:20
 
 RUN apt-get update && apt-get install -y git jq curl unzip && rm -rf /var/lib/apt/lists/*
 
+# Install yq (Go) for YAML parsing in persona-runner.sh
+RUN curl -sL https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64 \
+      -o /usr/local/bin/yq \
+  && chmod +x /usr/local/bin/yq
+
 # Install AWS CLI v2 (needed for S3 artifact uploads)
 RUN curl -sf "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o /tmp/awscliv2.zip \
   && unzip -q /tmp/awscliv2.zip -d /tmp \
@@ -28,7 +33,14 @@ WORKDIR /work
 COPY lib/common.sh /lib/common.sh
 COPY lib/orchestrate-lint.sh /lib/orchestrate-lint.sh
 COPY lib/lint-loop.sh /lib/lint-loop.sh
-RUN chmod +x /lib/common.sh /lib/orchestrate-lint.sh /lib/lint-loop.sh
+COPY lib/persona-runner.sh /lib/persona-runner.sh
+RUN chmod +x /lib/common.sh /lib/orchestrate-lint.sh /lib/lint-loop.sh /lib/persona-runner.sh
+
+# Persona profiles (governance CAB/ARB/CTO/Board, plus future role templates).
+# YAML defines metadata (target issue, tools, sources, IAM); MD is the prompt.
+# Loaded at runtime by /lib/persona-runner.sh when TASK_PAYLOAD.persona_id is set.
+COPY agents/ /agents/
+RUN chmod -R a+r /agents
 
 COPY entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh

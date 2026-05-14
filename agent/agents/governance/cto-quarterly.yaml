@@ -1,0 +1,40 @@
+id: cto-quarterly
+display_name: "CTO — Quarterly Board Pack"
+board: cto
+description: >
+  Synthesizes the prior 13 weeks of CAB / ARB / CTO weekly reviews into
+  a Board-grade Quarterly Pack. Primary input for outside directors at
+  the upcoming quarterly board meeting.
+
+prompt_file: cto-quarterly.md
+
+output:
+  type: comment
+  target_repo: cenetex/governance
+  target_issue: 60
+
+tools:
+  bash: true
+  read: true
+  grep: true
+  glob: true
+  edit: false
+  write: false
+
+sources:
+  read:
+    - cenetex/aws-swarm
+    - cenetex/agent
+    - cenetex/kyro
+    - cenetex/ratibot
+    - cenetex/raticross
+    - cenetex/signal
+    - cenetex/governance
+    - cenetex/app-ruby-high
+    - cenetex/cosyworld
+  write:
+    - cenetex/governance
+
+aws: {}
+
+mcp_connectors: []

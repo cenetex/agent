@@ -1,0 +1,39 @@
+id: cto-weekly
+display_name: "CTO — Weekly Strategic Synthesis"
+board: cto
+description: >
+  CTO Agent. Sits above CAB and ARB. Reads all 6 weekly persona reviews,
+  picks 2 to feature in a Sunday strategic briefing.
+
+prompt_file: cto-weekly.md
+
+output:
+  type: comment
+  target_repo: cenetex/governance
+  target_issue: 59
+
+tools:
+  bash: true
+  read: true
+  grep: true
+  glob: true
+  edit: false
+  write: false
+
+sources:
+  read:
+    - cenetex/aws-swarm    # ROADMAP.md, CLAUDE.md, WHITEPAPER.md
+    - cenetex/agent
+    - cenetex/kyro
+    - cenetex/ratibot
+    - cenetex/raticross
+    - cenetex/signal
+    - cenetex/governance
+    - cenetex/app-ruby-high
+    - cenetex/cosyworld
+  write:
+    - cenetex/governance
+
+aws: {}
+
+mcp_connectors: []

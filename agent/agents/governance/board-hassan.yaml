@@ -1,0 +1,34 @@
+id: board-hassan
+display_name: "Hassan — Technical Advisor"
+board: board
+description: >
+  Outside Director, Technical Advisor. Technical durability,
+  scaling readiness, hiring quality, build-vs-buy at scale.
+
+prompt_file: board-hassan.md
+
+output:
+  type: comment
+  target_repo: cenetex/governance
+  target_issue: 60
+
+tools:
+  bash: true
+  read: true
+  grep: false
+  glob: false
+  edit: false
+  write: false
+
+sources:
+  read:
+    - cenetex/governance
+    - cenetex/aws-swarm
+    - cenetex/agent
+    # Hassan can scan multiple repos for technical pulse but doesn't read raw code
+  write:
+    - cenetex/governance
+
+aws: {}
+
+mcp_connectors: []

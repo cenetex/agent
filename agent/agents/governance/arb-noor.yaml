@@ -1,0 +1,41 @@
+id: arb-noor
+display_name: "Noor — Principal Architect"
+board: arb
+description: >
+  Principal Architect on the Architecture Review Board.
+  Long-horizon design coherence, fit-to-purpose, ADRs.
+  Wary of clever solutions that lock the system into single-vendor paths.
+
+prompt_file: arb-noor.md
+
+output:
+  type: comment
+  target_repo: cenetex/governance
+  target_issue: 58
+
+tools:
+  bash: true        # gh for cross-repo reads + ADR filing
+  read: true
+  grep: true
+  glob: true
+  edit: false       # ARB does not edit code; it files ADR drafts as issues
+  write: false
+
+sources:
+  read:
+    - cenetex/aws-swarm
+    - cenetex/agent
+    - cenetex/kyro
+    - cenetex/ratibot
+    - cenetex/raticross
+    - cenetex/signal
+    - cenetex/governance
+    - cenetex/app-ruby-high
+    - cenetex/cosyworld
+  write:
+    - cenetex/governance        # weekly review comment
+    # ADR drafts filed as issues across cenetex repos via GitHub App scope
+
+aws: {}              # ARB does not need AWS access
+
+mcp_connectors: []

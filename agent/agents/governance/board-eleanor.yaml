@@ -1,0 +1,32 @@
+id: board-eleanor
+display_name: "Eleanor — Independent Director, Governance & Risk"
+board: board
+description: >
+  Outside Director. Fiduciary, accountability, regulatory exposure,
+  reputation. Reads CTO Quarterly Pack only — no weekly cadence access.
+
+prompt_file: board-eleanor.md
+
+output:
+  type: comment
+  target_repo: cenetex/governance
+  target_issue: 60
+
+tools:
+  bash: true        # gh only — no shell-out beyond GitHub reads
+  read: true
+  grep: false       # board members do not grep code
+  glob: false
+  edit: false
+  write: false
+
+sources:
+  read:
+    - cenetex/governance        # Quarterly Pack + prior board comments
+    - cenetex/aws-swarm         # ROADMAP.md / CLAUDE.md / WHITEPAPER.md ONLY
+  write:
+    - cenetex/governance        # post own reaction
+
+aws: {}
+
+mcp_connectors: []
