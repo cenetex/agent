@@ -33,7 +33,7 @@ docker push $REPO_URI:latest
 
 ## Key Files
 
-- `infra/lib/webhook-handler.ts` - Main webhook handler (1400+ lines, handles all GitHub events)
+- `infra/lib/webhook-handler.ts` - Main webhook handler (~4,400 lines, handles all GitHub events)
 - `infra/lib/stack.ts` - CDK stack definition (Lambda, Fargate, VPC setup)
 - `agent/entrypoint.sh` - Wrapper script for Claude Code
 - `deploy.sh` - Deployment automation script
