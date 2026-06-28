@@ -26,10 +26,6 @@ import {
   createRunTaskInput,
   parseTaskAssignPublicIp,
 } from "./fargate-task";
-import {
-  hasCurrentHumanApproval,
-  hasBlockingAutoMergeLabel,
-} from "./review-policy";
 
 const ecs = new ECSClient({});
 const ssm = new SSMClient({});
@@ -414,149 +410,6 @@ async function startReviewTask(
 }
 
 /**
- * Merges PRs with review:approved label that have been approved for >1 hour
- */
-async function mergeApprovedPRs(token: string): Promise<void> {
-  console.log("Checking for PRs ready for auto-merge...");
-
-  const repos = MONITORED_REPOS.length > 0 ? MONITORED_REPOS : DEFAULT_REPOS;
-
-  for (const repo of repos) {
-    try {
-      console.log(`Checking repository for approved PRs: ${repo}`);
-
-      const response = await githubRequest(
-        `/repos/${repo}/pulls?state=open&per_page=100`,
-        token,
-        { method: "GET" },
-        [200]
-      );
-
-      const prs = await response.json() as any[];
-
-      // Filter PRs with review:approved label
-      const approvedPRs = prs.filter((pr: any) => {
-        const labels = pr.labels.map((label: any) => label.name);
-        const hasApprovedLabel = pr.labels.some((label: any) =>
-          label.name === "review:approved"
-        );
-
-        return hasApprovedLabel && !hasBlockingAutoMergeLabel(labels);
-      });
-
-      for (const pr of approvedPRs) {
-        try {
-          const reviewsResponse = await githubRequest(
-            `/repos/${repo}/pulls/${pr.number}/reviews?per_page=100`,
-            token,
-            { method: "GET" },
-            [200]
-          );
-          const reviews = await reviewsResponse.json() as any[];
-          const hasHumanApproval = hasCurrentHumanApproval(reviews);
-
-          if (!hasHumanApproval) {
-            console.log(`PR ${pr.number}: review:approved label exists but no human approving review was found, skipping auto-merge`);
-            continue;
-          }
-
-          // Get the label events to check when review:approved was added
-          const labelsResponse = await githubRequest(
-            `/repos/${repo}/issues/${pr.number}/events`,
-            token,
-            { method: "GET" },
-            [200]
-          );
-
-          const events = await labelsResponse.json() as any[];
-
-          // Find the most recent "labeled" event for "review:approved"
-          const approvedEvent = events
-            .filter((event: any) =>
-              event.event === "labeled" &&
-              event.label?.name === "review:approved"
-            )
-            .sort((a: any, b: any) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime())[0];
-
-          if (!approvedEvent) {
-            console.log(`PR ${pr.number}: No review:approved label event found, skipping`);
-            continue;
-          }
-
-          const labeledAt = new Date(approvedEvent.created_at);
-          const now = new Date();
-          const hoursSinceApproval = (now.getTime() - labeledAt.getTime()) / (1000 * 60 * 60);
-
-          if (hoursSinceApproval < 1) {
-            console.log(`PR ${pr.number}: Only ${hoursSinceApproval.toFixed(2)} hours since approval, waiting`);
-            continue;
-          }
-
-          console.log(`PR ${pr.number}: ${hoursSinceApproval.toFixed(2)} hours since approval, merging...`);
-
-          // Attempt to merge the PR
-          const mergeResponse = await githubRequest(
-            `/repos/${repo}/pulls/${pr.number}/merge`,
-            token,
-            {
-              method: "PUT",
-              body: JSON.stringify({
-                commit_title: `Auto-merge: ${pr.title}`,
-                commit_message: `Auto-merged by review agent after 1-hour hold period.`,
-                merge_method: "squash"
-              })
-            },
-            [200]
-          );
-
-          const mergeResult = await mergeResponse.json() as any;
-
-          if (mergeResult.merged) {
-            console.log(`Successfully auto-merged PR ${pr.number}: ${pr.title}`);
-
-            // Add a final comment
-            await githubRequest(
-              `/repos/${repo}/issues/${pr.number}/comments`,
-              token,
-              {
-                method: "POST",
-                body: JSON.stringify({
-                  body: `✅ **Auto-merged successfully**\n\nThis PR was automatically merged after the 1-hour hold period.\n\n🔗 **Merge SHA:** \`${mergeResult.sha}\``
-                }),
-              },
-              [201]
-            );
-          }
-
-        } catch (error) {
-          console.error(`Error auto-merging PR ${pr.number}:`, error);
-
-          // Add comment about merge failure
-          try {
-            await githubRequest(
-              `/repos/${repo}/issues/${pr.number}/comments`,
-              token,
-              {
-                method: "POST",
-                body: JSON.stringify({
-                  body: `⚠️ **Auto-merge failed**\n\nThe automatic merge failed. Manual intervention required.\n\n**Error:** ${error instanceof Error ? error.message : "Unknown error"}`
-                }),
-              },
-              [201]
-            );
-          } catch (commentError) {
-            console.error(`Failed to add merge failure comment:`, commentError);
-          }
-        }
-      }
-
-    } catch (error) {
-      console.error(`Error checking repository ${repo} for auto-merge:`, error);
-    }
-  }
-}
-
-/**
  * Main handler function triggered by EventBridge
  */
 export async function handler() {
@@ -585,8 +438,8 @@ export async function handler() {
     // Discover reviewable PRs
     const reviewablePRs = await discoverReviewablePRs(githubToken);
 
-    // After discovering and reviewing new PRs, also merge approved ones
-    await mergeApprovedPRs(githubToken);
+    // Merge execution is owned by merge-triage-handler.ts so approved PRs are
+    // ordered against the rest of the repository queue before anything lands.
 
     if (reviewablePRs.length === 0) {
       console.log("No PRs need review at this time");

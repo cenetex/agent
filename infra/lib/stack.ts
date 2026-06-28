@@ -508,6 +508,51 @@ export class GitHubAgentStack extends cdk.Stack {
     reviewRule.addTarget(new targets.LambdaFunction(reviewHandler));
 
     // -------------------------------------------------------
+    // Lambda — Merge Triage Handler
+    // -------------------------------------------------------
+    const mergeTriageHandler = new NodejsFunction(this, "MergeTriageHandler", {
+      entry: path.join(__dirname, "merge-triage-handler.ts"),
+      handler: "handler",
+      runtime: lambda.Runtime.NODEJS_20_X,
+      architecture: lambda.Architecture.ARM_64,
+      timeout: cdk.Duration.minutes(5),
+      memorySize: 512,
+      bundling: {
+        minify: true,
+        sourceMap: true,
+        target: "node20",
+        externalModules: [],
+      },
+      environment: {
+        ARTIFACTS_BUCKET: artifactsBucket.bucketName,
+        GITHUB_APP_ID_PARAM: PARAM_GITHUB_APP_ID,
+        GITHUB_APP_PRIVATE_KEY_PARAM: PARAM_GITHUB_APP_PRIVATE_KEY,
+        MONITORED_REPOS,
+        MERGE_TRIAGE_AUTO_MERGE: "true",
+        MERGE_TRIAGE_MAX_MERGES_PER_RUN: "1",
+      },
+    });
+
+    mergeTriageHandler.addToRolePolicy(
+      new iam.PolicyStatement({
+        actions: ["ssm:GetParameter"],
+        resources: ssmParamArns,
+      })
+    );
+
+    artifactsBucket.grantReadWrite(mergeTriageHandler);
+
+    // -------------------------------------------------------
+    // EventBridge rule to trigger merge triage
+    // -------------------------------------------------------
+    const mergeTriageRule = new events.Rule(this, "MergeTriageRule", {
+      description: "Plan and safely advance merge-ready coding-agent PRs every 15 minutes",
+      schedule: events.Schedule.rate(cdk.Duration.minutes(15)),
+    });
+
+    mergeTriageRule.addTarget(new targets.LambdaFunction(mergeTriageHandler));
+
+    // -------------------------------------------------------
     // Daily Digest Lambda
     // -------------------------------------------------------
     const dailyDigestFunction = new NodejsFunction(this, "DailyDigestFunction", {

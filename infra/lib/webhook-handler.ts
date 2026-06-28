@@ -379,7 +379,7 @@ async function scheduleAutoMerge(
   token: string,
   holdPeriodMinutes: number
 ): Promise<void> {
-  // The actual auto-merge is handled by the review handler Lambda which runs every 15 minutes
+  // The actual auto-merge is handled by the merge triage Lambda which runs every 15 minutes.
   // This function just posts an informational comment about the scheduled merge
 
   const mergeTime = new Date(Date.now() + holdPeriodMinutes * 60 * 1000);

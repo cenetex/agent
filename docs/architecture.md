@@ -16,10 +16,11 @@ flowchart TD
 
   AgentTask --> PullRequest["Bot branch + PR"]
   ReviewTask --> ReviewLabels["review labels<br/>review:approved<br/>review:changes-requested<br/>review:human-required"]
-  ReviewLabels --> MergeGate["Review Handler<br/>merge gate + auto-merge sweep"]
+  ReviewLabels --> MergeTriage["Merge Triage Handler<br/>queue plan + safe auto-merge"]
 
   subgraph Scheduled["EventBridge scheduled operators"]
     ReviewSweep["Review Handler<br/>every 15 min"]
+    MergeSweep["Merge Triage<br/>every 15 min"]
     Cleanup["Cleanup/Reaper<br/>every 2 hr"]
     DailyDigest["Daily Digest<br/>09:00 UTC"]
     CreditRescan["Credit Rescan<br/>hourly"]
@@ -32,6 +33,8 @@ flowchart TD
   end
 
   ReviewSweep --> ReviewTask
+  MergeSweep --> MergeTriage
+  MergeTriage --> GitHub
   Cleanup --> GitHub
   CreditRescan --> GitHub
   QA --> GitHub
@@ -48,6 +51,7 @@ flowchart TD
   S3["S3 artifacts bucket<br/>task metadata, logs, review payloads,<br/>credits, escalation queues"] <--> Webhook
   S3 <--> AgentTask
   S3 <--> ReviewTask
+  S3 <--> MergeTriage
   S3 <--> Scheduled
 
   CloudWatch["CloudWatch Logs"] <-->|logs| AgentTask
@@ -95,14 +99,18 @@ stateDiagram-v2
 
   Approved --> WaitingForHuman: no current human approval
   Approved --> HoldPeriod: current human approval exists
-  HoldPeriod --> MergeChecks: hold elapsed
+  HoldPeriod --> MergeTriage: hold elapsed
 
-  MergeChecks --> MergeReady: CI green and mergeable
-  MergeChecks --> ConflictHandling: merge conflict
-  MergeChecks --> Paused: pause-agent or human-required
+  MergeTriage --> MergeReady: CI green, mergeable, first safe slot
+  MergeTriage --> MergeQueued: overlaps another ready PR or queue cap reached
+  MergeTriage --> ConflictHandling: merge conflict
+  MergeTriage --> StaleBranch: branch behind base
+  MergeTriage --> Paused: pause-agent or human-required
 
+  StaleBranch --> MergeTriage: update branch requested
   ConflictHandling --> MergeReady: update branch succeeds
   ConflictHandling --> ConflictIssue: update branch fails
+  MergeQueued --> MergeTriage: next scheduled pass
 
   MergeReady --> Merged: auto-merge
   ChangesRequested --> AgentFollowup: re-label agent if fixes are wanted
@@ -123,7 +131,9 @@ stateDiagram-v2
 | Webhook handler | `infra/lib/webhook-handler.ts` | Handles GitHub events, dispatches agent/diagnostic/review tasks, checks gates, processes PR lifecycle events. |
 | Agent container | `agent/entrypoint.sh` | Runs the custom executor for issues and PR work, creates branches/PRs, polls CI, writes task artifacts, updates labels. |
 | Review container | `agent/review-entrypoint.sh` | Loads review payloads, runs Codex review analysis, posts feedback, applies review labels. |
-| Review handler | `infra/lib/review-handler.ts` | Scheduled review sweep and merge gate for approved PRs. |
+| Review handler | `infra/lib/review-handler.ts` | Scheduled review sweep that launches review tasks for coding-agent PRs. |
+| Merge triage handler | `infra/lib/merge-triage-handler.ts` | Scheduled merge queue planner; labels merge readiness, stores queue snapshots, updates stale branches, and auto-merges one safe PR per repo pass. |
+| Merge triage policy | `infra/lib/merge-triage-policy.ts` | Deterministic queue policy for hold-period, approval, overlap, conflict, and risk decisions. |
 | Triage handler | `infra/lib/triage-handler.ts` | Labels and sizes open issues; can split or flag work that is too broad. |
 | Grooming handler | `infra/lib/grooming-handler.ts` | Enforces issue-shape and acceptance-criteria limits. |
 | Cleanup handler | `infra/lib/cleanup-handler.ts` | Reaps stale tasks, retries recoverable failures, refunds timed-out runs, drains queued work. |
@@ -145,8 +155,16 @@ stateDiagram-v2
 - CI visibility failures from missing GitHub App scopes are not treated as
   pending CI inside the agent task. They mark the coding work as complete and
   defer final safety to review and branch protection.
+- Merge triage applies exactly one `merge:*` label to tracked coding-agent PRs:
+  `merge:ready`, `merge:queued`, `merge:waiting`, `merge:blocked`,
+  `merge:conflict`, or `merge:stale`.
 - Merge requires `review:approved`, no blocking labels, elapsed hold period, an
-  open and mergeable PR, and a current human approval.
+  open and mergeable PR, a current human approval, no protected paths, and the
+  first safe merge slot for the PR's overlapping file group.
+- Merge triage merges at most one ready PR per repository per scheduled pass,
+  then rechecks the remaining queue after GitHub updates the base branch.
+- Merge triage writes the latest plan to
+  `merge-triage/<owner>/<repo>/latest.json` in the artifacts bucket.
 - Protected paths such as workflows, infra, secrets, keys, and deploy scripts
   force `review:human-required`.
 

@@ -18,9 +18,11 @@ The agent system consists of multiple independently-deployed containers and sche
 - **Review Container** - Separate Fargate task definition; auto-reviews completed PRs every 15 minutes
 - **Diagnostic Container** - Same image as agent but with read-only CloudWatch access; triggered by `diagnose` label
 - **Webhook Handler Lambda** - Listens for GitHub webhook events (issues/PRs labeled `agent` or `diagnose`, PR reviews)
-- **Review Handler Lambda** - Discovers PRS with `agent:succeeded` label, evaluates quality, posts feedback
+- **Review Handler Lambda** - Discovers PRs with `agent:succeeded` label and launches review tasks
+- **Merge Triage Handler Lambda** - Plans merge order, labels merge readiness, updates stale branches, and safely lands approved PRs
 - **Scheduled Operators** (EventBridge rules):
   - **Review runner** (15 minutes) - Trigger review handler for completed agent PRs
+  - **Merge triage** (15 minutes) - Plan and advance the approved PR merge queue
   - **Cleanup handler** (every 2 hours) - Stop stale agent tasks, remove old metadata
   - **Daily digest** (9am UTC) - Post GitHub issue summarizing agent activity and credits
   - **QA trigger** (2am UTC) - Run nightly end-to-end tests
@@ -57,7 +59,11 @@ GitHub Issue
     ↓
   [review:approved] or [review:changes-requested] label
     ↓
-  Merge after hold period only if a human approval exists
+  Merge Triage Handler plans queue and file-overlap order
+    ↓
+  [merge:ready] / [merge:queued] / [merge:waiting] label
+    ↓
+  Merge after hold period only if a current human approval exists
 ```
 
 ### Label Semantics
@@ -79,6 +85,14 @@ The agent uses a trigger + status label system:
 - `review:approved` - Review agent approved the PR quality
 - `review:changes-requested` - Review agent found issues needing fixes
 - `review:human-required` - Protected files or policy require manual review; auto-merge is blocked
+
+**Merge Labels:**
+- `merge:ready` - PR is the next safe merge candidate for its repo
+- `merge:queued` - PR is mergeable but waiting behind another overlapping PR or queue slot
+- `merge:waiting` - PR is waiting for approval, checks, mergeability, or hold-period gates
+- `merge:blocked` - PR has a policy or check blocker
+- `merge:conflict` - PR has merge conflicts
+- `merge:stale` - PR branch needs a base-branch update
 
 **Status Labels:**
 - `status:blocked` - Indicates task is blocked (credit-aware throttling)
@@ -187,8 +201,8 @@ The agent system includes several advanced orchestration capabilities:
 - Blocked PRs won't be processed until dependencies are resolved
 
 ### Merge Conflict Detection
-- Agent automatically rebases PR branch if merge conflicts are detected
-- Prevents wasted review cycles on conflicted code
+- Merge triage labels conflicted PRs and requests branch updates for stale branches
+- Prevents overlapping or stale PRs from being merged without a fresh queue pass
 
 ### Escalation Routing
 - Complex decisions (security policies, breaking changes) route to human admins
@@ -206,7 +220,8 @@ All scheduled operations use EventBridge rules. Times listed are in UTC:
 
 | Handler | Schedule | Purpose |
 |---------|----------|---------|
-| Review Handler | Every 15 minutes | Discover and evaluate PRs with `agent:succeeded` |
+| Review Handler | Every 15 minutes | Discover completed agent PRs and launch review tasks |
+| Merge Triage Handler | Every 15 minutes | Plan merge order, sync `merge:*` labels, and land one safe PR per repo pass |
 | Cleanup Handler | Every 2 hours | Stop stale tasks, remove old metadata after 30 days |
 | Daily Digest | 9am daily | Post GitHub issue summarizing agent activity |
 | QA Trigger | 2am daily | Run nightly end-to-end tests |
