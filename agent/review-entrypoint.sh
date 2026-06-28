@@ -337,11 +337,8 @@ FORBIDDEN_PATTERNS=(
   '__pycache__/'
 )
 
-# Get list of changed files
-CHANGED_FILES=$(echo "$PR_JSON" | jq -r '.files[].path' 2>/dev/null || echo "")
-
 # Check for forbidden patterns
-for file in $CHANGED_FILES; do
+while IFS= read -r file; do
   # Skip binary/symlink detection issues
   [[ -z "$file" ]] && continue
 
@@ -354,16 +351,14 @@ for file in $CHANGED_FILES; do
   done
 
   # Also check for large files (> 500KB)
-  # Get file size from diff statistics if available
-  if echo "$DIFF" | grep -q "^diff --git.*$file"; then
-    # Count additions in the diff for this file as rough size estimate
-    file_additions=$(echo "$DIFF" | awk "/^diff --git.*$file/,/^diff --git/ {print}" | grep -c "^+")
-    # If more than ~6000 additions (very rough estimate for 500KB), flag it
-    if [ "$file_additions" -gt 6000 ]; then
-      FORBIDDEN_FILES+=("$file (large file: ~$((file_additions / 10))KB)")
-    fi
+  # Use structured PR metadata; never interpolate file paths into regexes.
+  file_additions=$(echo "$PR_JSON" | jq -r --arg path "$file" '.files[] | select(.path == $path) | (.additions // 0)' | head -n 1)
+  file_additions=${file_additions:-0}
+  # If more than ~6000 additions (very rough estimate for 500KB), flag it
+  if [ "$file_additions" -gt 6000 ]; then
+    FORBIDDEN_FILES+=("$file (large file: ~$((file_additions / 10))KB)")
   fi
-done
+done < <(echo "$PR_JSON" | jq -r '.files[].path' 2>/dev/null || true)
 
 if [ ${#FORBIDDEN_FILES[@]} -gt 0 ]; then
   echo "ERROR: Forbidden files detected:"
