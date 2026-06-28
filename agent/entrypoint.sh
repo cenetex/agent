@@ -16,6 +16,15 @@ set -Eeuo pipefail
 : "${SIGNAL_LABEL_SUCCEEDED:=agent:succeeded}"
 : "${AWS_REGION:=us-east-1}"  # Optional, used for diagnostic tasks
 : "${LINT_RETRY_MAX_ATTEMPTS:=3}"  # Optional, max retries for lint loop
+: "${AGENT_EXECUTOR:=custom}"  # custom or codex
+: "${AGENT_EXECUTOR_PATH:=agent-executor}"
+: "${EXECUTOR_MAX_RESPONSE_TOKENS:=5000}"
+: "${EXECUTOR_HTTP_TIMEOUT_SECONDS:=300}"
+: "${EXECUTOR_MAX_TOOL_OUTPUT_CHARS:=12000}"
+
+export EXECUTOR_MAX_RESPONSE_TOKENS
+export EXECUTOR_HTTP_TIMEOUT_SECONDS
+export EXECUTOR_MAX_TOOL_OUTPUT_CHARS
 
 # --- Fetch task payload from S3 if S3 key provided (avoids ECS override limit) ---
 if [ -n "${TASK_PAYLOAD_S3_KEY:-}" ]; then
@@ -75,6 +84,8 @@ LOG_KEY="${ARTIFACT_PREFIX}/agent.log"
 SUMMARY_KEY="${ARTIFACT_PREFIX}/summary.md"
 MANIFEST_KEY="${ARTIFACT_PREFIX}/manifest.json"
 DECISION_LOG_KEY="${ARTIFACT_PREFIX}/decision-log.json"
+EXECUTOR_RESULT_KEY="${ARTIFACT_PREFIX}/executor-result.json"
+EXECUTOR_TRACE_KEY="${ARTIFACT_PREFIX}/executor-trace.jsonl"
 
 set_signal_label() {
   local target_label="$1"
@@ -159,10 +170,21 @@ upload_artifacts() {
     upload_artifact "/tmp/lint-loop-telemetry.json" "${ARTIFACT_PREFIX}/lint-loop-telemetry.json" "application/json"
   fi
 
+  # Upload custom executor artifacts if they exist
+  if [ -f "/tmp/executor-result.json" ]; then
+    upload_artifact "/tmp/executor-result.json" "${EXECUTOR_RESULT_KEY}" "application/json"
+  fi
+
+  if [ -f "/tmp/executor-trace.jsonl" ]; then
+    upload_artifact "/tmp/executor-trace.jsonl" "${EXECUTOR_TRACE_KEY}" "application/jsonl"
+  fi
+
   # Create and upload task manifest
   local manifest_json
   local log_key=""
   local decision_log_key=""
+  local executor_result_key=""
+  local executor_trace_key=""
   local total_size_bytes="0"
 
   if [ -f "${AGENT_LOG}" ] && [ -s "${AGENT_LOG}" ]; then
@@ -174,11 +196,21 @@ upload_artifacts() {
     decision_log_key="${DECISION_LOG_KEY}"
   fi
 
+  if [ -f "/tmp/executor-result.json" ] && [ -s "/tmp/executor-result.json" ]; then
+    executor_result_key="${EXECUTOR_RESULT_KEY}"
+  fi
+
+  if [ -f "/tmp/executor-trace.jsonl" ] && [ -s "/tmp/executor-trace.jsonl" ]; then
+    executor_trace_key="${EXECUTOR_TRACE_KEY}"
+  fi
+
   manifest_json=$(jq -n \
     --arg task_id "${TASK_ID}" \
     --arg metadata_key "${METADATA_KEY}" \
     --arg log_key "${log_key}" \
     --arg decision_log_key "${decision_log_key}" \
+    --arg executor_result_key "${executor_result_key}" \
+    --arg executor_trace_key "${executor_trace_key}" \
     --arg exit_code "${exit_code}" \
     --arg total_size_bytes "${total_size_bytes}" \
     --arg created_at "$(date -u +"%Y-%m-%dT%H:%M:%SZ")" \
@@ -188,6 +220,8 @@ upload_artifacts() {
       log_key: (if $log_key == "" then null else $log_key end),
       summary_key: null,
       decision_log_key: (if $decision_log_key == "" then null else $decision_log_key end),
+      executor_result_key: (if $executor_result_key == "" then null else $executor_result_key end),
+      executor_trace_key: (if $executor_trace_key == "" then null else $executor_trace_key end),
       exit_code: ($exit_code | tonumber),
       total_size_bytes: ($total_size_bytes | tonumber),
       created_at: $created_at
@@ -1250,8 +1284,37 @@ At the end of your run, write a decision log JSON to /tmp/decision-log.json with
 IMPORTANT: Do not ask for confirmation or approval. Do not say 'Ready to implement?' or 'Shall I proceed?'. Execute immediately. Create the branch, commit, push, and open the PR."
 fi
 
-configure_codex_openrouter
 start_virtual_display
+
+MODEL=$(echo "$TASK_PAYLOAD" | jq -r '.model // "z-ai/glm-5.2"')
+AGENT_EXECUTOR=$(printf "%s" "${AGENT_EXECUTOR}" | tr '[:upper:]' '[:lower:]')
+
+case "${AGENT_EXECUTOR}" in
+  custom|agent-executor|codex)
+    ;;
+  *)
+    echo "ERROR: Unsupported AGENT_EXECUTOR='${AGENT_EXECUTOR}'. Use 'custom' or 'codex'." >&2
+    exit 1
+    ;;
+esac
+
+if [ "${AGENT_EXECUTOR}" = "agent-executor" ]; then
+  AGENT_EXECUTOR="custom"
+fi
+
+if [ "${AGENT_EXECUTOR}" = "codex" ]; then
+  configure_codex_openrouter
+fi
+
+executor_command_available() {
+  local command_name="$1"
+
+  if command -v "${command_name}" >/dev/null 2>&1; then
+    return 0
+  fi
+
+  [ -x "${command_name}" ]
+}
 
 # =============================================================
 # PRE-FLIGHT CHECKS — fail fast before burning an LLM call
@@ -1295,9 +1358,9 @@ fi
 # 2. Model availability
 echo "[preflight] Checking model availability..."
 MODEL_CHECK=$(curl -sf "https://openrouter.ai/api/v1/models" 2>&1 | \
-  jq -r '.data[] | select(.id == "z-ai/glm-5.2") | .id' 2>/dev/null) || true
+  jq -r --arg model "${MODEL}" '.data[] | select(.id == $model) | .id' 2>/dev/null) || true
 if [ -z "$MODEL_CHECK" ]; then
-  echo "[preflight] WARN: Could not verify model z-ai/glm-5.2 on OpenRouter" >&2
+  echo "[preflight] WARN: Could not verify model ${MODEL} on OpenRouter" >&2
   # Warning only — model list endpoint may be slow/unavailable
 fi
 
@@ -1324,9 +1387,15 @@ if ! command -v aws >/dev/null 2>&1; then
   # Warning only — agent can still function without artifacts
 fi
 
-# 6. Check codex CLI exists
-if ! command -v codex >/dev/null 2>&1; then
-  echo "[preflight] FAIL: codex CLI not found in PATH" >&2
+# 6. Check selected executor exists
+echo "[preflight] Checking selected executor (${AGENT_EXECUTOR})..."
+if [ "${AGENT_EXECUTOR}" = "codex" ]; then
+  if ! command -v codex >/dev/null 2>&1; then
+    echo "[preflight] FAIL: codex CLI not found in PATH" >&2
+    PREFLIGHT_FAILURES=$((PREFLIGHT_FAILURES + 1))
+  fi
+elif ! executor_command_available "${AGENT_EXECUTOR_PATH}"; then
+  echo "[preflight] FAIL: custom executor not found or not executable: ${AGENT_EXECUTOR_PATH}" >&2
   PREFLIGHT_FAILURES=$((PREFLIGHT_FAILURES + 1))
 fi
 
@@ -1337,7 +1406,7 @@ if [ "${PREFLIGHT_FAILURES}" -gt 0 ]; then
   exit 1
 fi
 
-# --- Run Codex with OpenRouter ---
+# --- Run selected executor with OpenRouter ---
 export CODEX_DISABLE_NONESSENTIAL_TRAFFIC=1
 
 MAX_ATTEMPTS=2
@@ -1347,37 +1416,58 @@ RUN_STATUS=""
 while [ -z "${RUN_STATUS}" ] && [ "${ATTEMPT}" -lt "${MAX_ATTEMPTS}" ]; do
   ATTEMPT=$((ATTEMPT + 1))
   CURRENT_STAGE="run agent (attempt ${ATTEMPT}/${MAX_ATTEMPTS})"
-  echo "=== Starting Codex (attempt ${ATTEMPT}/${MAX_ATTEMPTS}) ==="
+  echo "=== Starting ${AGENT_EXECUTOR} executor (attempt ${ATTEMPT}/${MAX_ATTEMPTS}) ==="
   echo "Task ID: ${TASK_ID}"
   echo "Mission: Working on #${ISSUE_NUMBER} in ${REPO}"
   echo "Commit SHA: ${RESOLVED_COMMIT_SHA}"
   echo "Requested ref: ${REQUESTED_REF}"
 
-  # Run in non-interactive mode with the mission prompt
-  # The container is isolated by Fargate, so Codex can run with full local sandbox access.
+  # Run in non-interactive mode with the mission prompt.
+  # The container is isolated by Fargate, so the executor can run with full local access.
   # Capture output for debugging failed runs
-  MODEL=$(echo "$TASK_PAYLOAD" | jq -r '.model // "z-ai/glm-5.2"')
   echo "Using model: ${MODEL}"
+  echo "Using executor: ${AGENT_EXECUTOR}"
 
   # Add 45-minute (2700 second) hard timeout to prevent token expiration race condition
   # GitHub App tokens expire after 1 hour; this ensures we fail gracefully before that window
   TIMEOUT_SECONDS=2700
-  CODEX_EXIT_CODE=0
-  timeout ${TIMEOUT_SECONDS} codex exec --ephemeral --skip-git-repo-check \
-    --sandbox danger-full-access \
-    --model "${MODEL}" \
-    "${MISSION}" 2>&1 | tee "${AGENT_LOG}" || CODEX_EXIT_CODE=$?
+  EXECUTOR_EXIT_CODE=0
 
-  CODEX_EXIT_CODE=${CODEX_EXIT_CODE:-${PIPESTATUS[0]}}
+  if [ "${AGENT_EXECUTOR}" = "codex" ]; then
+    timeout ${TIMEOUT_SECONDS} codex exec --ephemeral --skip-git-repo-check \
+      --sandbox danger-full-access \
+      --model "${MODEL}" \
+      "${MISSION}" 2>&1 | tee "${AGENT_LOG}" || EXECUTOR_EXIT_CODE=$?
+  else
+    MISSION_FILE=$(mktemp /tmp/agent-mission.XXXXXX.md)
+    printf "%s" "${MISSION}" > "${MISSION_FILE}"
+
+    EXECUTOR_ARGS=(
+      "--mission-file" "${MISSION_FILE}"
+      "--model" "${MODEL}"
+      "--mode" "task"
+      "--result-file" "/tmp/executor-result.json"
+      "--trace-file" "/tmp/executor-trace.jsonl"
+      "--repo" "$(pwd)"
+    )
+
+    if [ -n "${EXECUTOR_MAX_TURNS:-}" ]; then
+      EXECUTOR_ARGS+=("--max-turns" "${EXECUTOR_MAX_TURNS}")
+    fi
+
+    timeout ${TIMEOUT_SECONDS} "${AGENT_EXECUTOR_PATH}" "${EXECUTOR_ARGS[@]}" 2>&1 | tee "${AGENT_LOG}" || EXECUTOR_EXIT_CODE=$?
+  fi
+
+  EXECUTOR_EXIT_CODE=${EXECUTOR_EXIT_CODE:-${PIPESTATUS[0]}}
 
   # Check if timeout occurred (exit code 124 is the timeout command's exit code)
-  if [ "${CODEX_EXIT_CODE}" -eq 124 ]; then
-    echo "ERROR: Codex execution exceeded 45-minute timeout" | tee -a "${AGENT_LOG}"
+  if [ "${EXECUTOR_EXIT_CODE}" -eq 124 ]; then
+    echo "ERROR: Agent executor exceeded 45-minute timeout" | tee -a "${AGENT_LOG}"
     echo "This prevents token expiration failures where the final git push/PR creation would fail." | tee -a "${AGENT_LOG}"
     exit 1
   fi
 
-  echo "--- Codex exit status: ${CODEX_EXIT_CODE} ---" | tee -a "${AGENT_LOG}"
+  echo "--- Executor exit status: ${EXECUTOR_EXIT_CODE} ---" | tee -a "${AGENT_LOG}"
 
   # --- Check for non-retryable permission errors ---
   if NON_RETRYABLE_INFO=$(detect_non_retryable_error "${AGENT_LOG}"); then

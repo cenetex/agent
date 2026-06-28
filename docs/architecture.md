@@ -1,7 +1,7 @@
 # GitHub Agent Architecture
 
-This document maps the deployed agent system: the webhook control plane, Codex
-runtime tasks, scheduled operators, review/merge gates, and artifact stores.
+This document maps the deployed agent system: the webhook control plane, custom
+executor runtime tasks, scheduled operators, review/merge gates, and artifact stores.
 
 ## System Overview
 
@@ -10,7 +10,7 @@ flowchart TD
   GitHub["GitHub App<br/>issues, PRs, labels, checks, webhooks"] --> Api["API Gateway<br/>/webhook"]
   Api --> Webhook["Webhook Handler Lambda"]
 
-  Webhook -->|agent label| AgentTask["Agent ECS Task<br/>Codex CLI + GLM 5.2"]
+  Webhook -->|agent label| AgentTask["Agent ECS Task<br/>custom executor + GLM 5.2"]
   Webhook -->|diagnose label| DiagnosticTask["Diagnostic ECS Task<br/>read-only CloudWatch access"]
   Webhook -->|bot PR opened or agent:succeeded| ReviewTask["Review ECS Task<br/>Codex CLI + GLM 5.2"]
 
@@ -65,8 +65,8 @@ flowchart TD
   DispatchGates -->|capacity full| Queued["agent:queued"]
   DispatchGates -->|blocked| Blocked["status:blocked or blocked:main-broken"]
 
-  AgentTask --> Codex["Codex exec<br/>OpenRouter z-ai/glm-5.2"]
-  Codex --> Branch["Feature branch + commit"]
+  AgentTask --> Executor["agent-executor<br/>OpenRouter z-ai/glm-5.2"]
+  Executor --> Branch["Feature branch + commit"]
   Branch --> PR["Pull request"]
   PR --> CIPoll["Agent CI poll"]
 
@@ -121,7 +121,7 @@ stateDiagram-v2
 | --- | --- | --- |
 | CDK stack | `infra/lib/stack.ts` | Defines VPC, ECS, ECR, S3, API Gateway, Lambdas, EventBridge rules, and shared monitored repo configuration. |
 | Webhook handler | `infra/lib/webhook-handler.ts` | Handles GitHub events, dispatches agent/diagnostic/review tasks, checks gates, processes PR lifecycle events. |
-| Agent container | `agent/entrypoint.sh` | Runs Codex for issues and PR work, creates branches/PRs, polls CI, writes task artifacts, updates labels. |
+| Agent container | `agent/entrypoint.sh` | Runs the custom executor for issues and PR work, creates branches/PRs, polls CI, writes task artifacts, updates labels. |
 | Review container | `agent/review-entrypoint.sh` | Loads review payloads, runs Codex review analysis, posts feedback, applies review labels. |
 | Review handler | `infra/lib/review-handler.ts` | Scheduled review sweep and merge gate for approved PRs. |
 | Triage handler | `infra/lib/triage-handler.ts` | Labels and sizes open issues; can split or flag work that is too broad. |

@@ -212,6 +212,10 @@ export class GitHubAgentStack extends cdk.Stack {
         streamPrefix: "github-agent",
         logRetention: logs.RetentionDays.TWO_WEEKS,
       }),
+      environment: {
+        AGENT_EXECUTOR: "custom",
+        AGENT_EXECUTOR_PATH: "/usr/local/bin/agent-executor",
+      },
     });
 
     // -------------------------------------------------------
@@ -297,6 +301,8 @@ export class GitHubAgentStack extends cdk.Stack {
         logRetention: logs.RetentionDays.TWO_WEEKS,
       }),
       environment: {
+        AGENT_EXECUTOR: "custom",
+        AGENT_EXECUTOR_PATH: "/usr/local/bin/agent-executor",
         AWS_REGION: this.region,
       },
     });

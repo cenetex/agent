@@ -1,6 +1,6 @@
 # GitHub Agent
 
-Autonomous AI agent that automatically implements features, fixes bugs, and reviews code on GitHub. Built on Codex CLI + AWS Fargate.
+Autonomous AI agent that automatically implements features, fixes bugs, and reviews code on GitHub. Built on a custom headless executor, Codex review runner, and AWS Fargate.
 
 ## Quick Start
 
@@ -14,7 +14,7 @@ To trigger the agent on an issue or PR:
 
 The agent system consists of multiple independently-deployed containers and scheduled handlers:
 
-- **Agent Container** - Runs Codex CLI in AWS Fargate; triggered by `agent` label on issues/PRs
+- **Agent Container** - Runs the custom headless executor in AWS Fargate; triggered by `agent` label on issues/PRs
 - **Review Container** - Separate Fargate task definition; auto-reviews completed PRs every 15 minutes
 - **Diagnostic Container** - Same image as agent but with read-only CloudWatch access; triggered by `diagnose` label
 - **Webhook Handler Lambda** - Listens for GitHub webhook events (issues/PRs labeled `agent` or `diagnose`, PR reviews)

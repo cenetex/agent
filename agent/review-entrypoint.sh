@@ -262,6 +262,30 @@ cd repo
 # Fix git remote URL for authenticated access
 git remote set-url origin "https://x-access-token:${GITHUB_TOKEN}@github.com/${REPO}.git"
 
+# Ensure the exact base and PR head commits are present after the shallow clone.
+# GitHub exposes PR heads through refs/pull/<number>/head even when the branch is
+# from a fork or is not part of the default clone refspec.
+ensure_commit_available() {
+  local sha="$1"
+  local fetch_ref="$2"
+  local label="$3"
+
+  if git cat-file -e "${sha}^{commit}" 2>/dev/null; then
+    return 0
+  fi
+
+  echo "Fetching ${label} commit ${sha} from ${fetch_ref}..."
+  git fetch --depth=100 origin "${fetch_ref}" 2>&1 | tee -a "${REVIEW_LOG}"
+
+  if ! git cat-file -e "${sha}^{commit}" 2>/dev/null; then
+    echo "ERROR: Could not fetch ${label} commit ${sha}" | tee -a "${REVIEW_LOG}"
+    return 1
+  fi
+}
+
+ensure_commit_available "${BASE_SHA}" "${BASE_SHA}" "base"
+ensure_commit_available "${HEAD_SHA}" "pull/${PR_NUMBER}/head" "PR head"
+
 # --- Create worktrees for base and head ---
 CURRENT_STAGE="setup worktrees"
 echo "Setting up worktrees for comparison..."

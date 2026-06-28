@@ -1,4 +1,12 @@
 ARG NODE_IMAGE=node:20.20.2-bookworm-slim
+ARG RUST_IMAGE=rust:1.88-bookworm
+FROM ${RUST_IMAGE} AS executor-builder
+
+WORKDIR /executor
+COPY executor/Cargo.toml executor/Cargo.lock ./
+COPY executor/src ./src
+RUN cargo build --release --locked
+
 FROM ${NODE_IMAGE}
 
 ARG CODEX_CLI_VERSION=0.142.3
@@ -25,6 +33,9 @@ RUN curl -fsSL "https://github.com/cli/cli/releases/download/v${GH_CLI_VERSION}/
 
 # Install Codex CLI
 RUN npm install -g "@openai/codex@${CODEX_CLI_VERSION}"
+
+# Install the headless custom executor used by the main agent task.
+COPY --from=executor-builder /executor/target/release/agent-executor /usr/local/bin/agent-executor
 
 RUN useradd --create-home --shell /bin/bash agent \
   && mkdir -p /work \
