@@ -31,6 +31,7 @@ const DEFAULT_REPOS = [
   "cenetex/litigation",
   "cenetex/agent",
   "cenetex/governance",
+  "atimics/AutoForwarder",
 ];
 
 const AGENT_LABEL = "agent";

@@ -48,6 +48,16 @@ const ARTIFACTS_BUCKET = process.env.ARTIFACTS_BUCKET!;
 
 // Monitored repositories for automated review (comma-separated)
 const MONITORED_REPOS = (process.env.MONITORED_REPOS || "").split(",").filter(r => r.trim());
+const DEFAULT_REPOS = [
+  "cenetex/aws-swarm",
+  "cenetex/kyro",
+  "cenetex/raticross",
+  "cenetex/ratibot",
+  "cenetex/litigation",
+  "cenetex/agent",
+  "cenetex/governance",
+  "atimics/AutoForwarder",
+];
 
 // PROTECTED_PATHS and CODING_AGENT_BOT_LOGINS imported from types.ts
 
@@ -93,15 +103,7 @@ async function discoverReviewablePRs(token: string): Promise<any[]> {
 
   // Get all open PRs across monitored repositories
   // The repo list is configured via MONITORED_REPOS environment variable
-  const repos = MONITORED_REPOS.length > 0 ? MONITORED_REPOS : [
-    "cenetex/aws-swarm",
-    "cenetex/kyro",
-    "cenetex/raticross",
-    "cenetex/ratibot",
-    "cenetex/litigation",
-    "cenetex/agent",
-    "cenetex/governance",
-  ];
+  const repos = MONITORED_REPOS.length > 0 ? MONITORED_REPOS : DEFAULT_REPOS;
 
   const reviewablePRs: any[] = [];
 
@@ -157,15 +159,7 @@ async function discoverReviewablePRs(token: string): Promise<any[]> {
 async function cleanupStaleReviewLabels(token: string): Promise<void> {
   console.log("Cleaning up stale review:in-progress labels...");
 
-  const repos = [
-    "cenetex/aws-swarm",
-    "cenetex/kyro",
-    "cenetex/raticross",
-    "cenetex/ratibot",
-    "cenetex/litigation",
-    "cenetex/agent",
-    "cenetex/governance",
-  ];
+  const repos = MONITORED_REPOS.length > 0 ? MONITORED_REPOS : DEFAULT_REPOS;
 
   const STALE_THRESHOLD_MINUTES = 90;
 
@@ -403,6 +397,7 @@ async function startReviewTask(
     repo_slug: repoSlug,
     status: "running",
     task_arn: taskArn,
+    review_payload_s3_key: reviewPayloadS3Key,
     created_at: reviewPayload.created_at,
     started_at: new Date().toISOString(),
   };
@@ -424,15 +419,7 @@ async function startReviewTask(
 async function mergeApprovedPRs(token: string): Promise<void> {
   console.log("Checking for PRs ready for auto-merge...");
 
-  const repos = MONITORED_REPOS.length > 0 ? MONITORED_REPOS : [
-    "cenetex/aws-swarm",
-    "cenetex/kyro",
-    "cenetex/raticross",
-    "cenetex/ratibot",
-    "cenetex/litigation",
-    "cenetex/agent",
-    "cenetex/governance",
-  ];
+  const repos = MONITORED_REPOS.length > 0 ? MONITORED_REPOS : DEFAULT_REPOS;
 
   for (const repo of repos) {
     try {

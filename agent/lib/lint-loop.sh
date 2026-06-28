@@ -129,11 +129,11 @@ llm_fix_lint_errors() {
 
   echo "[lint-loop] Calling LLM to fix lint errors (attempt $attempt/$LINT_RETRY_MAX_ATTEMPTS)..."
 
-  # Pass lint output to Claude Code via stdin or environment
-  # This should be called from within a Claude Code session
+  # Pass lint output to Codex via stdin or environment
+  # This should be called from within a Codex session
   # For now, we'll just log that this would happen
 
-  # The actual fix should be done by Claude Code reading the lint output
+  # The actual fix should be done by Codex reading the lint output
   # and making code changes to fix the issues
 
   # Return non-zero to indicate LLM was needed
@@ -208,7 +208,7 @@ lint_loop_main() {
       echo ""
       echo "[lint-loop] The agent will now attempt to fix these lint errors..."
 
-      # Create a marker file that Claude will detect to know it should fix lint
+      # Create a marker file that Codex will detect to know it should fix lint
       echo "$lint_output" > /tmp/lint-errors-to-fix.txt
 
       # Return non-zero to signal need for LLM intervention

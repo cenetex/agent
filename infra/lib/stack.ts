@@ -23,6 +23,16 @@ const PARAM_ANTHROPIC_KEY = "/github-agent/ANTHROPIC_API_KEY";
 const PARAM_TWITTER_BEARER_TOKEN = "/github-agent/TWITTER_BEARER_TOKEN";
 const PARAM_TELEGRAM_BOT_TOKEN = "/github-agent/TELEGRAM_BOT_TOKEN";
 const PARAM_TELEGRAM_CHANNEL_ID = "/github-agent/TELEGRAM_CHANNEL_ID";
+const MONITORED_REPOS = [
+  "cenetex/aws-swarm",
+  "cenetex/kyro",
+  "cenetex/raticross",
+  "cenetex/ratibot",
+  "cenetex/litigation",
+  "cenetex/agent",
+  "cenetex/governance",
+  "atimics/AutoForwarder",
+].join(",");
 
 export class GitHubAgentStack extends cdk.Stack {
   constructor(scope: Construct, id: string, props?: cdk.StackProps) {
@@ -388,7 +398,7 @@ export class GitHubAgentStack extends cdk.Stack {
         GITHUB_APP_PRIVATE_KEY_PARAM: PARAM_GITHUB_APP_PRIVATE_KEY,
         OPENROUTER_API_KEY_PARAM: PARAM_OPENROUTER_KEY,
         ARTIFACTS_BUCKET: artifactsBucket.bucketName,
-        MONITORED_REPOS: "cenetex/aws-swarm,cenetex/kyro,cenetex/raticross,cenetex/ratibot,cenetex/litigation,cenetex/agent,cenetex/governance",
+        MONITORED_REPOS,
       },
     });
 
@@ -718,7 +728,7 @@ export class GitHubAgentStack extends cdk.Stack {
       environment: {
         GITHUB_APP_ID_PARAM: PARAM_GITHUB_APP_ID,
         GITHUB_APP_PRIVATE_KEY_PARAM: PARAM_GITHUB_APP_PRIVATE_KEY,
-        MONITORED_REPOS: "cenetex/aws-swarm,cenetex/kyro,cenetex/raticross,cenetex/ratibot,cenetex/litigation,cenetex/agent,cenetex/governance",
+        MONITORED_REPOS,
       },
     });
 
@@ -759,7 +769,7 @@ export class GitHubAgentStack extends cdk.Stack {
         ARTIFACTS_BUCKET: artifactsBucket.bucketName,
         GITHUB_APP_ID_PARAM: PARAM_GITHUB_APP_ID,
         GITHUB_APP_PRIVATE_KEY_PARAM: PARAM_GITHUB_APP_PRIVATE_KEY,
-        MONITORED_REPOS: "cenetex/aws-swarm,cenetex/kyro,cenetex/raticross,cenetex/ratibot,cenetex/litigation,cenetex/agent,cenetex/governance",
+        MONITORED_REPOS,
       },
     });
 
@@ -860,7 +870,7 @@ export class GitHubAgentStack extends cdk.Stack {
         ARTIFACTS_BUCKET: artifactsBucket.bucketName,
         GITHUB_APP_ID_PARAM: PARAM_GITHUB_APP_ID,
         GITHUB_APP_PRIVATE_KEY_PARAM: PARAM_GITHUB_APP_PRIVATE_KEY,
-        MONITORED_REPOS: "cenetex/aws-swarm,cenetex/kyro,cenetex/raticross,cenetex/ratibot,cenetex/litigation,cenetex/agent,cenetex/governance",
+        MONITORED_REPOS,
       },
     });
 

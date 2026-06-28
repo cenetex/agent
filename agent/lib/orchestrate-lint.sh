@@ -2,7 +2,7 @@
 set -Eeuo pipefail
 
 # Orchestrate the lint loop within the agent's worktree
-# This script is called by Claude Code as part of the PR finalization step
+# This script is called by Codex as part of the PR finalization step
 #
 # It manages:
 # 1. Running auto-fix passes

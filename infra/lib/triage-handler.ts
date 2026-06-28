@@ -40,6 +40,7 @@ const DEFAULT_REPOS = [
   "cenetex/litigation",
   "cenetex/agent",
   "cenetex/governance",
+  "atimics/AutoForwarder",
 ];
 
 // Labels to skip during triage

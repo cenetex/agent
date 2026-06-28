@@ -7,7 +7,6 @@ set -Eeuo pipefail
 # --- Required env vars (passed by Lambda via Fargate overrides) ---
 : "${GITHUB_TOKEN:?Missing GITHUB_TOKEN}"
 : "${OPENROUTER_API_KEY:?Missing OPENROUTER_API_KEY}"
-: "${REVIEW_PAYLOAD_S3_KEY:?Missing REVIEW_PAYLOAD_S3_KEY}"
 : "${ARTIFACTS_BUCKET:?Missing ARTIFACTS_BUCKET}"
 : "${ARTIFACT_PREFIX:?Missing ARTIFACT_PREFIX}"
 : "${REPO:?Missing REPO}"
@@ -15,12 +14,19 @@ set -Eeuo pipefail
 : "${REVIEW_CRITERIA:?Missing REVIEW_CRITERIA}"
 : "${AWS_REGION:=us-east-1}"
 
-# --- Fetch and parse review payload from S3 ---
-echo "Fetching review payload from S3: ${REVIEW_PAYLOAD_S3_KEY}"
-REVIEW_PAYLOAD=$(aws s3 cp "s3://${ARTIFACTS_BUCKET}/${REVIEW_PAYLOAD_S3_KEY}" - --region "${AWS_REGION}" 2>/dev/null) || {
-  echo "ERROR: Failed to fetch review payload from S3"
+# --- Fetch and parse review payload ---
+if [ -n "${REVIEW_PAYLOAD_S3_KEY:-}" ]; then
+  echo "Fetching review payload from S3: ${REVIEW_PAYLOAD_S3_KEY}"
+  REVIEW_PAYLOAD=$(aws s3 cp "s3://${ARTIFACTS_BUCKET}/${REVIEW_PAYLOAD_S3_KEY}" - --region "${AWS_REGION}" 2>/dev/null) || {
+    echo "ERROR: Failed to fetch review payload from S3"
+    exit 1
+  }
+elif [ -n "${REVIEW_PAYLOAD:-}" ]; then
+  echo "Using inline review payload from environment"
+else
+  echo "ERROR: Missing REVIEW_PAYLOAD_S3_KEY or REVIEW_PAYLOAD"
   exit 1
-}
+fi
 
 echo "Parsing review payload..."
 TASK_ID=$(echo "$REVIEW_PAYLOAD" | jq -r '.task_id')
@@ -528,24 +534,23 @@ You are in the PR head worktree (${HEAD_SHA}). The base version is available at 
 
 Begin your review now."
 
-# --- Run Claude with OpenRouter API ---
-echo "Running review analysis with Claude Opus..."
-export ANTHROPIC_BASE_URL="https://openrouter.ai/api/v1"
-export ANTHROPIC_AUTH_TOKEN="${OPENROUTER_API_KEY}"
-export ANTHROPIC_API_KEY=""
+# --- Run Codex with OpenRouter API ---
+echo "Running review analysis with Codex on GLM 5.2..."
+configure_codex_openrouter
+start_virtual_display
 
 # Change to the PR head worktree for analysis
 cd ../pr-worktree
 
-# Run Claude Code with the review mission
+# Run Codex with the review mission
 # Add 30-minute (1800 second) hard timeout to prevent stuck reviews from burning credits
-CLAUDE_EXIT_CODE=0
-timeout 1800 claude --dangerously-skip-permissions \
-  --model "anthropic/claude-opus-4-6" \
-  --print \
-  "${REVIEW_MISSION}" 2>&1 | tee "${REVIEW_LOG}" || CLAUDE_EXIT_CODE=$?
+CODEX_EXIT_CODE=0
+timeout 1800 codex exec --ephemeral --skip-git-repo-check \
+  --sandbox danger-full-access \
+  --model "z-ai/glm-5.2" \
+  "${REVIEW_MISSION}" 2>&1 | tee "${REVIEW_LOG}" || CODEX_EXIT_CODE=$?
 
-# Check if the findings file exists and was written by Claude
+# Check if the findings file exists and was written by Codex
 if [ ! -f "${REVIEW_FINDINGS_FILE}" ]; then
   echo "ERROR: Review analysis did not write findings file to ${REVIEW_FINDINGS_FILE}"
   REVIEW_STATUS="error"

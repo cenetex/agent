@@ -587,7 +587,7 @@ echo "Successfully checked out commit $RESOLVED_COMMIT_SHA"
 
 # poll_pr_checks <pr_number> <repo>
 # Polls CI status for a PR for up to 10 minutes (600s), checking every 10 seconds.
-# Returns: 0=passed, 1=PR-introduced failure, 2=pre-existing on main, 3=timeout
+# Returns: 0=passed, 1=PR-introduced failure, 2=pre-existing on main, 3=timeout, 4=CI unreadable
 poll_pr_checks() {
   local pr_number="$1"
   local repo="$2"
@@ -601,10 +601,16 @@ poll_pr_checks() {
     sleep "$interval"
     elapsed=$((elapsed + interval))
 
-    # Fetch combined status via the checks API
-    local checks_json
-    checks_json=$(gh api "repos/${repo}/pulls/${pr_number}/commits" --jq '.[0].sha' 2>/dev/null) || continue
-    local head_sha="$checks_json"
+    local head_sha
+    local api_error="/tmp/ci-poll-${pr_number}.err"
+    head_sha=$(gh api "repos/${repo}/pulls/${pr_number}" --jq '.head.sha' 2>"${api_error}") || {
+      if grep -qiE "HTTP 403|Resource not accessible|not accessible by integration|requires.*permission|requires authentication" "${api_error}" 2>/dev/null; then
+        echo "[CI poll] GitHub token cannot read PR metadata; CI visibility unavailable." >&2
+        cat "${api_error}" >&2 || true
+        return 4
+      fi
+      continue
+    }
 
     if [ -z "$head_sha" ]; then
       echo "[CI poll] Could not determine head SHA, retrying..." >&2
@@ -612,7 +618,14 @@ poll_pr_checks() {
     fi
 
     local status_json
-    status_json=$(gh api "repos/${repo}/commits/${head_sha}/check-runs" 2>/dev/null) || continue
+    status_json=$(gh api "repos/${repo}/commits/${head_sha}/check-runs" 2>"${api_error}") || {
+      if grep -qiE "HTTP 403|Resource not accessible|not accessible by integration|checks.*permission|requires.*permission|requires authentication" "${api_error}" 2>/dev/null; then
+        echo "[CI poll] GitHub token cannot read check-runs for ${head_sha}; CI visibility unavailable." >&2
+        cat "${api_error}" >&2 || true
+        return 4
+      fi
+      continue
+    }
 
     local total_count in_progress_count success_count failure_count
     total_count=$(echo "$status_json" | jq '.total_count // 0')
@@ -1237,6 +1250,9 @@ At the end of your run, write a decision log JSON to /tmp/decision-log.json with
 IMPORTANT: Do not ask for confirmation or approval. Do not say 'Ready to implement?' or 'Shall I proceed?'. Execute immediately. Create the branch, commit, push, and open the PR."
 fi
 
+configure_codex_openrouter
+start_virtual_display
+
 # =============================================================
 # PRE-FLIGHT CHECKS — fail fast before burning an LLM call
 # =============================================================
@@ -1279,9 +1295,9 @@ fi
 # 2. Model availability
 echo "[preflight] Checking model availability..."
 MODEL_CHECK=$(curl -sf "https://openrouter.ai/api/v1/models" 2>&1 | \
-  jq -r '.data[] | select(.id == "anthropic/claude-sonnet-4") | .id' 2>/dev/null) || true
+  jq -r '.data[] | select(.id == "z-ai/glm-5.2") | .id' 2>/dev/null) || true
 if [ -z "$MODEL_CHECK" ]; then
-  echo "[preflight] WARN: Could not verify model anthropic/claude-sonnet-4 on OpenRouter" >&2
+  echo "[preflight] WARN: Could not verify model z-ai/glm-5.2 on OpenRouter" >&2
   # Warning only — model list endpoint may be slow/unavailable
 fi
 
@@ -1308,9 +1324,9 @@ if ! command -v aws >/dev/null 2>&1; then
   # Warning only — agent can still function without artifacts
 fi
 
-# 6. Check claude CLI exists
-if ! command -v claude >/dev/null 2>&1; then
-  echo "[preflight] FAIL: claude CLI not found in PATH" >&2
+# 6. Check codex CLI exists
+if ! command -v codex >/dev/null 2>&1; then
+  echo "[preflight] FAIL: codex CLI not found in PATH" >&2
   PREFLIGHT_FAILURES=$((PREFLIGHT_FAILURES + 1))
 fi
 
@@ -1321,12 +1337,8 @@ if [ "${PREFLIGHT_FAILURES}" -gt 0 ]; then
   exit 1
 fi
 
-# --- Run Claude Code with OpenRouter ---
-# OpenRouter's Claude Code compatibility layer expects the base API path and auth token envs.
-export ANTHROPIC_BASE_URL="https://openrouter.ai/api"
-export ANTHROPIC_AUTH_TOKEN="${OPENROUTER_API_KEY}"
-export ANTHROPIC_API_KEY=""
-export CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1
+# --- Run Codex with OpenRouter ---
+export CODEX_DISABLE_NONESSENTIAL_TRAFFIC=1
 
 MAX_ATTEMPTS=2
 ATTEMPT=0
@@ -1335,37 +1347,37 @@ RUN_STATUS=""
 while [ -z "${RUN_STATUS}" ] && [ "${ATTEMPT}" -lt "${MAX_ATTEMPTS}" ]; do
   ATTEMPT=$((ATTEMPT + 1))
   CURRENT_STAGE="run agent (attempt ${ATTEMPT}/${MAX_ATTEMPTS})"
-  echo "=== Starting Claude Code (attempt ${ATTEMPT}/${MAX_ATTEMPTS}) ==="
+  echo "=== Starting Codex (attempt ${ATTEMPT}/${MAX_ATTEMPTS}) ==="
   echo "Task ID: ${TASK_ID}"
   echo "Mission: Working on #${ISSUE_NUMBER} in ${REPO}"
   echo "Commit SHA: ${RESOLVED_COMMIT_SHA}"
   echo "Requested ref: ${REQUESTED_REF}"
 
   # Run in non-interactive mode with the mission prompt
-  # --dangerously-skip-permissions skips tool approval (we're in an isolated container)
+  # The container is isolated by Fargate, so Codex can run with full local sandbox access.
   # Capture output for debugging failed runs
-  MODEL=$(echo "$TASK_PAYLOAD" | jq -r '.model // "anthropic/claude-haiku-4-5"')
+  MODEL=$(echo "$TASK_PAYLOAD" | jq -r '.model // "z-ai/glm-5.2"')
   echo "Using model: ${MODEL}"
 
   # Add 45-minute (2700 second) hard timeout to prevent token expiration race condition
   # GitHub App tokens expire after 1 hour; this ensures we fail gracefully before that window
   TIMEOUT_SECONDS=2700
-  timeout ${TIMEOUT_SECONDS} claude --dangerously-skip-permissions \
+  CODEX_EXIT_CODE=0
+  timeout ${TIMEOUT_SECONDS} codex exec --ephemeral --skip-git-repo-check \
+    --sandbox danger-full-access \
     --model "${MODEL}" \
-    --effort max \
-    --print \
-    "${MISSION}" 2>&1 | tee "${AGENT_LOG}" || CLAUDE_EXIT_CODE=$?
+    "${MISSION}" 2>&1 | tee "${AGENT_LOG}" || CODEX_EXIT_CODE=$?
 
-  CLAUDE_EXIT_CODE=${CLAUDE_EXIT_CODE:-${PIPESTATUS[0]}}
+  CODEX_EXIT_CODE=${CODEX_EXIT_CODE:-${PIPESTATUS[0]}}
 
   # Check if timeout occurred (exit code 124 is the timeout command's exit code)
-  if [ "${CLAUDE_EXIT_CODE}" -eq 124 ]; then
-    echo "ERROR: Claude Code execution exceeded 45-minute timeout" | tee -a "${AGENT_LOG}"
+  if [ "${CODEX_EXIT_CODE}" -eq 124 ]; then
+    echo "ERROR: Codex execution exceeded 45-minute timeout" | tee -a "${AGENT_LOG}"
     echo "This prevents token expiration failures where the final git push/PR creation would fail." | tee -a "${AGENT_LOG}"
     exit 1
   fi
 
-  echo "--- Claude Code exit status: ${CLAUDE_EXIT_CODE} ---" | tee -a "${AGENT_LOG}"
+  echo "--- Codex exit status: ${CODEX_EXIT_CODE} ---" | tee -a "${AGENT_LOG}"
 
   # --- Check for non-retryable permission errors ---
   if NON_RETRYABLE_INFO=$(detect_non_retryable_error "${AGENT_LOG}"); then
@@ -1439,6 +1451,11 @@ ${ERROR_MESSAGE}
         ci_pending_comment="CI checks are still pending for PR #${ISSUE_NUMBER}. The agent is waiting for them to complete."
         post_comment "${ISSUE_NUMBER}" "${REPO}" "$ci_pending_comment"
         ;;
+      4)
+        RUN_STATUS="succeeded"
+        ci_unavailable_comment="CI checks could not be read by the agent token for PR #${ISSUE_NUMBER}. The agent completed its code work; review and branch protection should make the final merge decision."
+        post_comment "${ISSUE_NUMBER}" "${REPO}" "$ci_unavailable_comment"
+        ;;
     esac
   elif PR_URL="$(find_created_pr_url "${ISSUE_NUMBER}" "${REPO}" "${RUN_STARTED_AT}")" && [ -n "${PR_URL}" ]; then
     # For newly created PRs, extract PR number and poll CI
@@ -1467,6 +1484,11 @@ ${ERROR_MESSAGE}
           # Post comment about CI still pending
           ci_pending_comment="CI checks are still pending for PR #${PR_NUM}. The agent is waiting for them to complete."
           post_comment "${ISSUE_NUMBER}" "${REPO}" "$ci_pending_comment"
+          ;;
+        4)
+          RUN_STATUS="succeeded"
+          ci_unavailable_comment="CI checks could not be read by the agent token for PR #${PR_NUM}. The agent completed its code work; review and branch protection should make the final merge decision."
+          post_comment "${ISSUE_NUMBER}" "${REPO}" "$ci_unavailable_comment"
           ;;
       esac
     else

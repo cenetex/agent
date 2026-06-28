@@ -2,6 +2,21 @@
 
 A command-line tool for managing GitHub Agent credits. Provides balance checking, top-ups, transfers, and transaction history tracking.
 
+## GitHub App Permission Audit
+
+The agent reads both legacy commit statuses and GitHub Actions check-runs when
+deciding whether main is healthy and whether a failed PR should be retried. The
+GitHub App therefore needs `statuses:read` and `checks:read` in addition to its
+write permissions for contents, issues, pull requests, and workflows.
+
+```bash
+./scripts/audit-github-app-permissions.sh atimics/AutoForwarder
+```
+
+The script reads the app ID and private key from SSM, checks the live app
+permission set, and optionally verifies that the installation token can call the
+status and check-run endpoints for the target repository.
+
 ## Setup
 
 ```bash

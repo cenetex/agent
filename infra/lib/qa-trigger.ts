@@ -113,7 +113,7 @@ const QA_PROMPT = `You are a QA agent. Run the following checks against this rep
 
 ### 4. Container dependencies
 - Verify aws CLI exists: which aws
-- Verify claude CLI exists: which claude
+- Verify codex CLI exists: which codex
 - Verify jq exists: which jq
 - Report any missing tools
 

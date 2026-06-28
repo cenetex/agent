@@ -441,7 +441,7 @@ The agent should follow existing code patterns and maintain compatibility with N
 
 ### GitHub App Permission Audit
 
-**Current permissions** (from GitHub App): contents, pull_requests, issues, metadata
+**Current permissions** (from GitHub App): contents, pull_requests, issues, metadata, workflows
 **Audit needed**:
 
 | Permission | Current Scope | Recommended Scope | Justification |
@@ -450,12 +450,13 @@ The agent should follow existing code patterns and maintain compatibility with N
 | pull_requests | read/write | read/write | Create PRs, add comments, modify PR branches |
 | issues | read/write | read/write | Read issue content, manage labels, add comments |
 | metadata | read | read | Access repository basic information |
-| actions | none | read | **ADD**: Check CI status before merging (future) |
-| checks | none | read/write | **ADD**: Create check runs for task status (future) |
+| workflows | read/write | read/write | Allow CI/workflow file changes when required by tasks |
+| statuses | none | read | **ADD**: Read legacy commit statuses for CI gating |
+| checks | none | read | **ADD**: Read GitHub Actions check-runs for CI gating |
 
 **Recommendations**:
-- Add actions:read for future CI integration
-- Consider checks:write for native GitHub status reporting
+- Add statuses:read and checks:read now; CI gating currently calls both APIs
+- Consider checks:write later only if the agent starts creating native GitHub check runs
 - Regular permission audit every 6 months
 
 ### Secret Management Review

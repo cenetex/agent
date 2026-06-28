@@ -68,6 +68,7 @@ const WEBHOOK_SECRET_PARAM = process.env.WEBHOOK_SECRET_PARAM!;
 const GITHUB_APP_ID_PARAM = process.env.GITHUB_APP_ID_PARAM!;
 const GITHUB_APP_PRIVATE_KEY_PARAM = process.env.GITHUB_APP_PRIVATE_KEY_PARAM!;
 const OPENROUTER_API_KEY_PARAM = process.env.OPENROUTER_API_KEY_PARAM!;
+const DEFAULT_CODEX_MODEL = "z-ai/glm-5.2";
 const ARTIFACTS_BUCKET = process.env.ARTIFACTS_BUCKET!;
 const TRIGGER_LABEL = "agent";
 const DIAGNOSE_LABEL = "diagnose";
@@ -280,13 +281,7 @@ async function getRepoModelConfig(
 }
 
 function getDefaultModel(taskMode: "issue" | "pull_request" | "planning"): string {
-  // Use latest 4.6 models per comment in issue #29
-  if (taskMode === "planning") {
-    return "anthropic/claude-haiku-4-5";
-  }
-  return taskMode === "issue"
-    ? "anthropic/claude-haiku-4-5"
-    : "anthropic/claude-sonnet-4-6";
+  return DEFAULT_CODEX_MODEL;
 }
 
 async function mergePullRequest(
@@ -576,6 +571,7 @@ async function triggerReviewForPR(
     const repoSlug = createRepoSlug(repoOwner, repoName);
     const taskId = generateTaskId();
     const artifactPrefix = `tasks/${repoSlug}/${taskId}`;
+    const reviewPayloadS3Key = `${artifactPrefix}/review-payload.json`;
 
     // Create review payload (mirrors review-handler.ts pattern)
     const reviewPayload = {
@@ -597,6 +593,13 @@ async function triggerReviewForPR(
       created_at: new Date().toISOString(),
     };
 
+    await s3.send(new PutObjectCommand({
+      Bucket: ARTIFACTS_BUCKET,
+      Key: reviewPayloadS3Key,
+      Body: JSON.stringify(reviewPayload, null, 2),
+      ContentType: "application/json",
+    }));
+
     const reviewCriteria = {
       check_compilation: true,
       check_security: true,
@@ -608,7 +611,7 @@ async function triggerReviewForPR(
     };
 
     const reviewEnvironment: Record<string, string> = {
-      REVIEW_PAYLOAD: JSON.stringify(reviewPayload),
+      REVIEW_PAYLOAD_S3_KEY: reviewPayloadS3Key,
       GITHUB_TOKEN: token,
       OPENROUTER_API_KEY: openrouterKey,
       ARTIFACTS_BUCKET,
@@ -648,6 +651,21 @@ async function triggerReviewForPR(
 
     console.log(`Triggered review task ${taskId} for PR #${prNumber} (${taskArn})`);
 
+    try {
+      await githubRequest(
+        `/repos/${repoOwner}/${repoName}/issues/${prNumber}/labels`,
+        token,
+        {
+          method: "POST",
+          body: JSON.stringify({ labels: ["review:in-progress"] }),
+        },
+        [200]
+      );
+      console.log(`Added review:in-progress label to PR #${prNumber}`);
+    } catch (labelError) {
+      console.warn(`Failed to add review:in-progress label to PR #${prNumber}: ${labelError}`);
+    }
+
     // Store initial review metadata
     const metadata = {
       task_id: taskId,
@@ -655,6 +673,7 @@ async function triggerReviewForPR(
       repo_slug: repoSlug,
       status: "running",
       task_arn: taskArn,
+      review_payload_s3_key: reviewPayloadS3Key,
       created_at: reviewPayload.created_at,
       started_at: new Date().toISOString(),
     };
@@ -3160,7 +3179,7 @@ export async function handler(event: {
           requested_ref: requestedRef,
           resolved_commit_sha: payload.repository.default_branch_commit?.sha || "HEAD",
           task_mode: "diagnostic",
-          model: "anthropic/claude-haiku-4-5",
+          model: DEFAULT_CODEX_MODEL,
           issue_metadata: {
             number: issueNumber,
             title: issueData.title || "",
@@ -3233,7 +3252,25 @@ export async function handler(event: {
           const checkStatus = await getPRCheckStatus(repoOwner, repoName, pr.pr_number, githubToken);
           console.log(`PR #${pr.pr_number} check status:`, checkStatus);
 
-          if (checkStatus && checkStatus.conclusion !== "success") {
+          if (checkStatus?.conclusion === "pending") {
+            console.log(`PR #${pr.pr_number} checks are still pending; skipping retry and review for now`);
+            return {
+              statusCode: 200,
+              body: JSON.stringify({
+                message: "PR checks still pending",
+                issueNumber,
+                prNumber: pr.pr_number,
+              }),
+            };
+          }
+
+          if (checkStatus?.conclusion === "unknown") {
+            console.warn(
+              `PR #${pr.pr_number} CI status is unknown; skipping retry to avoid duplicate agent runs`
+            );
+          }
+
+          if (checkStatus?.conclusion === "failure") {
             // CI failed - need to determine if it's agent's fault or pre-existing main issue
             console.log(`CI failed for PR #${pr.pr_number}. Failures:`, checkStatus.failures);
 
@@ -3402,7 +3439,7 @@ export async function handler(event: {
   } else if (ghEvent === "issues" && payload.action === "assigned") {
     // Check if the assignee is the agent bot
     const assignee = payload.assignee?.login;
-    if (assignee !== "cenetex-coding-agent[bot]" && assignee !== "github-agent[bot]") {
+    if (!assignee || !CODING_AGENT_BOT_LOGINS.includes(assignee)) {
       console.log(`Ignoring assignment to non-agent user: ${assignee}`);
       return { statusCode: 200, body: "Ignored: not assigned to agent bot" };
     }

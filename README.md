@@ -1,6 +1,6 @@
 # GitHub Agent
 
-Autonomous AI agent that automatically implements features, fixes bugs, and reviews code on GitHub. Built on Claude Code + AWS Fargate.
+Autonomous AI agent that automatically implements features, fixes bugs, and reviews code on GitHub. Built on Codex CLI + AWS Fargate.
 
 ## Quick Start
 
@@ -14,7 +14,7 @@ To trigger the agent on an issue or PR:
 
 The agent system consists of multiple independently-deployed containers and scheduled handlers:
 
-- **Agent Container** - Runs Claude Code in AWS Fargate; triggered by `agent` label on issues/PRs
+- **Agent Container** - Runs Codex CLI in AWS Fargate; triggered by `agent` label on issues/PRs
 - **Review Container** - Separate Fargate task definition; auto-reviews completed PRs every 15 minutes
 - **Diagnostic Container** - Same image as agent but with read-only CloudWatch access; triggered by `diagnose` label
 - **Webhook Handler Lambda** - Listens for GitHub webhook events (issues/PRs labeled `agent` or `diagnose`, PR reviews)
@@ -30,6 +30,7 @@ The agent system consists of multiple independently-deployed containers and sche
 - **Infrastructure** - AWS CDK stack (`infra/`) defining Lambda, Fargate, VPC, S3, EventBridge rules
 
 For security architecture and isolation controls, see [SECURITY.md](./SECURITY.md).
+For the full runtime and control-plane map, see [docs/architecture.md](./docs/architecture.md).
 
 ## Full Pipeline
 
@@ -141,6 +142,7 @@ Each task deducts credits based on the model used:
 
 | Model | Credits | USD Value |
 |-------|---------|-----------|
+| z-ai/glm-5.2 | 12 | $1.20 |
 | claude-haiku-4-5 | 4 | $0.40 |
 | claude-sonnet-4-6 | 12 | $1.20 |
 | claude-opus-4-6 | 20 | $2.00 |
@@ -227,7 +229,7 @@ Repositories can customize agent behavior using `.github/AGENT.md`:
 
 ```yaml
 # .github/AGENT.md
-model: anthropic/claude-opus-4-6  # Override model choice
+model: z-ai/glm-5.2  # Override model choice
 conventions: |
   - Use PascalCase for class names
   - Use snake_case for functions
@@ -246,13 +248,13 @@ Default models by task type:
 
 | Task Type | Model | Credits |
 |-----------|-------|---------|
-| Issues | `anthropic/claude-haiku-4-5` | 4 |
-| PRs (review) | `anthropic/claude-sonnet-4-6` | 12 |
-| Planning | `anthropic/claude-haiku-4-5` | 4 |
+| Issues | `z-ai/glm-5.2` | 12 |
+| PRs (review) | `z-ai/glm-5.2` | 12 |
+| Planning | `z-ai/glm-5.2` | 12 |
 
 Override using `.github/AGENT.md` in target repository (see Per-Repo Configuration above).
 
-**Note:** Model names use OpenRouter format (`anthropic/claude-*`), not bare Anthropic format.
+**Note:** Model names use OpenRouter format such as `z-ai/glm-5.2`.
 
 ## For External Repos
 
@@ -264,9 +266,21 @@ To install the agent on your repository:
 4. **Monitor in CloudWatch** - View logs: `aws logs tail /aws/lambda/GitHubAgentStack-WebhookHandler --follow`
 
 The app will request these permissions:
-- Read/write to issues, PRs, comments
-- Read repository code and commits
-- Write to repository branches and create PRs
+- **Contents: Read/write** - Clone repository content, create branches, commit, and push changes
+- **Issues: Read/write** - Read issue context, manage labels, and add comments
+- **Pull requests: Read/write** - Create PRs, update PR metadata, and review PRs
+- **Commit statuses: Read-only** - Read legacy commit status checks before dispatch/retry decisions
+- **Checks: Read-only** - Read GitHub Actions check-runs before dispatch/retry decisions
+- **Workflows: Read/write** - Work with workflow files when the agent changes CI-related code
+- **Metadata: Read-only** - Access repository identity and installation metadata
+
+After changing GitHub App permissions, repository or organization owners may need
+to approve the updated installation before the new scopes appear in installation
+tokens. You can audit the live app configuration with:
+
+```bash
+scripts/audit-github-app-permissions.sh atimics/AutoForwarder
+```
 
 ## Error Handling
 

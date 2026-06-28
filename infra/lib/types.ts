@@ -564,11 +564,12 @@ export interface CreditTransaction {
 }
 
 /**
- * Cost function: maps model to credit debit amount
- * Based on observed LLM costs: Haiku ~$0.40, Sonnet ~$1.20, Opus ~$2.00+
- * Pricing: 1 credit = $0.10, so costs are 10x the dollar amount
+ * Cost function: maps model to credit debit amount.
+ * Pricing: 1 credit = $0.10. GLM 5.2 keeps the existing Sonnet-tier default
+ * until usage-based accounting is available.
  */
 export function getModelCost(model: string): number {
+  if (model.includes("glm-5.2")) return 12;
   if (model.includes("haiku")) return 4;      // $0.40
   if (model.includes("sonnet")) return 12;    // $1.20
   if (model.includes("opus")) return 20;      // $2.00
@@ -686,6 +687,7 @@ export function createEscalationHistoryPath(repoSlug: string): string {
  * Bot usernames for the coding agent — used to identify bot-created PRs
  */
 export const CODING_AGENT_BOT_LOGINS = [
+  "cenetex[bot]",
   "cenetex-coding-agent[bot]",
   "github-agent[bot]",
 ];

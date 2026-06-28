@@ -30,6 +30,43 @@ setup_github_auth() {
   return 0
 }
 
+configure_codex_openrouter() {
+  export CODEX_HOME="${CODEX_HOME:-/home/agent/.codex}"
+  mkdir -p "${CODEX_HOME}"
+
+  cat > "${CODEX_HOME}/config.toml" <<'EOF'
+model_provider = "openrouter"
+approval_policy = "never"
+sandbox_mode = "danger-full-access"
+model_context_window = 1048576
+model_reasoning_effort = "none"
+model_reasoning_summary = "none"
+
+[model_providers.openrouter]
+name = "OpenRouter"
+base_url = "https://openrouter.ai/api/v1"
+env_key = "OPENROUTER_API_KEY"
+wire_api = "responses"
+request_max_retries = 4
+stream_max_retries = 10
+stream_idle_timeout_ms = 300000
+
+[shell_environment_policy]
+inherit = "all"
+ignore_default_excludes = true
+exclude = ["OPENROUTER_API_KEY"]
+EOF
+}
+
+start_virtual_display() {
+  if [ -n "${DISPLAY:-}" ] || ! command -v Xvfb >/dev/null 2>&1; then
+    return 0
+  fi
+
+  export DISPLAY="${XVFB_DISPLAY:-:99}"
+  Xvfb "${DISPLAY}" -screen 0 "${XVFB_SCREEN:-1280x1024x24}" >/tmp/xvfb.log 2>&1 &
+}
+
 # Upload artifacts to S3
 upload_artifact() {
   local source="$1"
@@ -105,7 +142,7 @@ categorize_failure() {
   elif echo "$error_message" | grep -qi "repository\|repo.*not found"; then
     echo "repo_not_found|false|Verify the repository exists and the GitHub App is installed"
   elif [ "$stage" = "pre-flight checks" ]; then
-    echo "pre_flight_failure|false|Check infrastructure requirements: gh CLI, aws CLI, claude CLI"
+    echo "pre_flight_failure|false|Check infrastructure requirements: gh CLI, aws CLI, codex CLI"
   elif echo "$stage" | grep -q "run agent"; then
     echo "execution_failure|false|Check the agent logs and issue requirements"
   else

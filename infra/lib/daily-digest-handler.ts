@@ -848,7 +848,7 @@ async function createDigestIssue(
   if (stats.lowBalanceRepos.length > 0) {
     creditSection += `\n**⚠️ Action Required:** The following repos have insufficient credits for future tasks:\n`;
     for (const repo of stats.lowBalanceRepos) {
-      creditSection += `- ${repo.repo}: ${repo.balance} credits (add ${getModelCost("anthropic/claude-haiku-4-5") - repo.balance} credits for next haiku task)\n`;
+      creditSection += `- ${repo.repo}: ${repo.balance} credits (add ${getModelCost("z-ai/glm-5.2") - repo.balance} credits for next GLM 5.2 task)\n`;
     }
   }
 

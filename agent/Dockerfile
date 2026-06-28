@@ -1,12 +1,14 @@
 ARG NODE_IMAGE=node:20.20.2-bookworm-slim
 FROM ${NODE_IMAGE}
 
-ARG CLAUDE_CODE_VERSION=2.1.128
+ARG CODEX_CLI_VERSION=0.142.3
 ARG AWS_CLI_VERSION=2.34.46
 ARG GH_CLI_VERSION=2.92.0
 
 RUN apt-get update \
-  && apt-get install -y --no-install-recommends git jq curl unzip ca-certificates \
+  && apt-get install -y --no-install-recommends \
+    git jq curl unzip ca-certificates \
+    python3 python3-pip python3-venv python3-pytest python3-tk python-is-python3 xvfb \
   && rm -rf /var/lib/apt/lists/*
 
 # Install AWS CLI v2 (needed for S3 artifact uploads)
@@ -21,8 +23,8 @@ RUN curl -fsSL "https://github.com/cli/cli/releases/download/v${GH_CLI_VERSION}/
   && install -m 0755 "/tmp/gh_${GH_CLI_VERSION}_linux_amd64/bin/gh" /usr/local/bin/gh \
   && rm -rf /tmp/gh.tar.gz "/tmp/gh_${GH_CLI_VERSION}_linux_amd64"
 
-# Install Claude Code
-RUN npm install -g "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}"
+# Install Codex CLI
+RUN npm install -g "@openai/codex@${CODEX_CLI_VERSION}"
 
 RUN useradd --create-home --shell /bin/bash agent \
   && mkdir -p /work \
