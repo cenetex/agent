@@ -243,6 +243,58 @@ apply_review_labels() {
   echo "Applied ${result_label} to ${REPO}#${PR_NUMBER}" | tee -a "${REVIEW_LOG}"
 }
 
+extract_linked_issues() {
+  local body="$1"
+  local repo_regex=""
+  local closing_lines=""
+  local issue_urls=""
+
+  repo_regex=$(printf "%s" "${REPO}" | sed -E 's/[][(){}.^$*+?|\\/]/\\&/g')
+
+  closing_lines=$(printf "%s\n" "$body" \
+    | grep -Ei '(^|[^[:alnum:]_])(close[sd]?|fix(e[sd])?|resolve[sd]?)([[:space:]:]+|$)' \
+    || true)
+  issue_urls=$(printf "%s\n" "$body" \
+    | grep -Eio "https://github\\.com/${repo_regex}/issues/[0-9]+" \
+    || true)
+
+  {
+    printf "%s\n" "$closing_lines" | grep -Eo '#[0-9]+' || true
+    printf "%s\n" "$closing_lines" \
+      | grep -Eio "https://github\\.com/${repo_regex}/issues/[0-9]+" \
+      | sed -E 's#.*/issues/([0-9]+)#\#\1#' || true
+    printf "%s\n" "$issue_urls" | sed -E 's#.*/issues/([0-9]+)#\#\1#' || true
+  } | sort -u | tr '\n' ' ' | sed 's/[[:space:]]*$//'
+}
+
+setup_review_dependencies() {
+  local requirements_path="requirements.txt"
+  local venv_path="/tmp/review-venv"
+
+  if [ ! -f "${requirements_path}" ]; then
+    echo "No Python requirements.txt found; skipping Python dependency setup." | tee -a "${REVIEW_LOG}"
+    return 0
+  fi
+
+  echo "Setting up Python review dependencies from ${requirements_path}..." | tee -a "${REVIEW_LOG}"
+  if ! python3 -m venv "${venv_path}" >>"${REVIEW_LOG}" 2>&1; then
+    echo "WARNING: Could not create review virtualenv; continuing without installed repo dependencies." | tee -a "${REVIEW_LOG}"
+    return 0
+  fi
+
+  # shellcheck disable=SC1091
+  . "${venv_path}/bin/activate"
+
+  if timeout 300 python -m pip install --upgrade pip setuptools wheel >>"${REVIEW_LOG}" 2>&1 \
+    && timeout 600 python -m pip install -r "${requirements_path}" >>"${REVIEW_LOG}" 2>&1; then
+    echo "Python review dependencies installed and activated." | tee -a "${REVIEW_LOG}"
+    return 0
+  fi
+
+  echo "WARNING: Could not install all Python review dependencies; continuing with base image environment." | tee -a "${REVIEW_LOG}"
+  deactivate >/dev/null 2>&1 || true
+}
+
 on_exit() {
   local exit_code=$?
 
@@ -350,8 +402,10 @@ PR_JSON=$(gh pr view "${PR_NUMBER}" -R "${REPO}" --json number,title,body,headRe
 echo "Getting PR diff..."
 DIFF=$(gh pr diff "${PR_NUMBER}" -R "${REPO}" 2>&1 | tee -a "${REVIEW_LOG}")
 
-# Get linked issues from PR body
-LINKED_ISSUES=$(echo "$PR_JSON" | jq -r '.body // ""' | grep -oE '#[0-9]+' | sort -u | tr '\n' ' ' || echo "")
+# Get linked issues from PR body. Only closing keywords and same-repo issue URLs
+# are treated as task linkage; casual examples like "#12" are just prose.
+PR_BODY=$(echo "$PR_JSON" | jq -r '.body // ""')
+LINKED_ISSUES=$(extract_linked_issues "$PR_BODY")
 
 # Fetch CI check status
 echo "Fetching CI check status..."
@@ -600,6 +654,7 @@ start_virtual_display
 
 # Change to the PR head worktree for analysis
 cd ../pr-worktree
+setup_review_dependencies
 
 # Run Codex with the review mission
 # Add 30-minute (1800 second) hard timeout to prevent stuck reviews from burning credits
