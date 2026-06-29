@@ -270,11 +270,39 @@ extract_linked_issues() {
 setup_review_dependencies() {
   local requirements_path="requirements.txt"
   local venv_path="/tmp/review-venv"
+  local install_enabled="${REVIEW_INSTALL_DEPENDENCIES:-false}"
+  local pip_upgrade_timeout="${REVIEW_PIP_UPGRADE_TIMEOUT_SECONDS:-60}"
+  local pip_install_timeout="${REVIEW_PIP_INSTALL_TIMEOUT_SECONDS:-180}"
+  local pip_install_args=(--disable-pip-version-check)
 
   if [ ! -f "${requirements_path}" ]; then
     echo "No Python requirements.txt found; skipping Python dependency setup." | tee -a "${REVIEW_LOG}"
     return 0
   fi
+
+  case "${install_enabled}" in
+    1|true|TRUE|yes|YES|on|ON)
+      ;;
+    *)
+      echo "Python requirements.txt found, but automatic dependency setup is disabled. Set REVIEW_INSTALL_DEPENDENCIES=true to enable it." | tee -a "${REVIEW_LOG}"
+      return 0
+      ;;
+  esac
+
+  if ! [[ "${pip_upgrade_timeout}" =~ ^[0-9]+$ ]] || [ "${pip_upgrade_timeout}" -le 0 ]; then
+    pip_upgrade_timeout=60
+  fi
+  if ! [[ "${pip_install_timeout}" =~ ^[0-9]+$ ]] || [ "${pip_install_timeout}" -le 0 ]; then
+    pip_install_timeout=180
+  fi
+
+  case "${REVIEW_PIP_REQUIRE_BINARY:-true}" in
+    0|false|FALSE|no|NO|off|OFF)
+      ;;
+    *)
+      pip_install_args+=(--only-binary=:all:)
+      ;;
+  esac
 
   echo "Setting up Python review dependencies from ${requirements_path}..." | tee -a "${REVIEW_LOG}"
   if ! python3 -m venv "${venv_path}" >>"${REVIEW_LOG}" 2>&1; then
@@ -285,8 +313,28 @@ setup_review_dependencies() {
   # shellcheck disable=SC1091
   . "${venv_path}/bin/activate"
 
-  if timeout 300 python -m pip install --upgrade pip setuptools wheel >>"${REVIEW_LOG}" 2>&1 \
-    && timeout 600 python -m pip install -r "${requirements_path}" >>"${REVIEW_LOG}" 2>&1; then
+  if env \
+    -u GITHUB_TOKEN \
+    -u OPENROUTER_API_KEY \
+    -u REVIEW_PAYLOAD \
+    -u REVIEW_PAYLOAD_S3_KEY \
+    -u ARTIFACTS_BUCKET \
+    -u ARTIFACT_PREFIX \
+    -u AWS_ACCESS_KEY_ID \
+    -u AWS_SECRET_ACCESS_KEY \
+    -u AWS_SESSION_TOKEN \
+    timeout "${pip_upgrade_timeout}" python -m pip install --disable-pip-version-check --upgrade pip setuptools wheel >>"${REVIEW_LOG}" 2>&1 \
+    && env \
+      -u GITHUB_TOKEN \
+      -u OPENROUTER_API_KEY \
+      -u REVIEW_PAYLOAD \
+      -u REVIEW_PAYLOAD_S3_KEY \
+      -u ARTIFACTS_BUCKET \
+      -u ARTIFACT_PREFIX \
+      -u AWS_ACCESS_KEY_ID \
+      -u AWS_SECRET_ACCESS_KEY \
+      -u AWS_SESSION_TOKEN \
+      timeout "${pip_install_timeout}" python -m pip install "${pip_install_args[@]}" -r "${requirements_path}" >>"${REVIEW_LOG}" 2>&1; then
     echo "Python review dependencies installed and activated." | tee -a "${REVIEW_LOG}"
     return 0
   fi

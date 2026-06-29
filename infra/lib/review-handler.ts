@@ -26,6 +26,10 @@ import {
   createRunTaskInput,
   parseTaskAssignPublicIp,
 } from "./fargate-task";
+import {
+  assertLabelCreateSucceeded,
+  type GitHubLabelDefinition,
+} from "./github-labels";
 
 const ecs = new ECSClient({});
 const ssm = new SSMClient({});
@@ -69,7 +73,7 @@ const REVIEW_LABEL_DEFINITIONS = [
     color: "EDEDED",
     description: "Automated review is currently running",
   },
-];
+] satisfies GitHubLabelDefinition[];
 
 // Monitored repositories for automated review (comma-separated)
 const MONITORED_REPOS = (process.env.MONITORED_REPOS || "").split(",").filter(r => r.trim());
@@ -161,7 +165,7 @@ async function githubRequest(
 
 async function ensureReviewLabels(repo: string, token: string): Promise<void> {
   for (const label of REVIEW_LABEL_DEFINITIONS) {
-    await githubRequest(
+    const response = await githubRequest(
       `/repos/${repo}/labels`,
       token,
       {
@@ -170,6 +174,7 @@ async function ensureReviewLabels(repo: string, token: string): Promise<void> {
       },
       [201, 422]
     );
+    await assertLabelCreateSucceeded(label, response);
   }
 }
 
@@ -501,20 +506,6 @@ async function startReviewTask(
     ContentType: "application/json",
   }));
 
-  // Add review:in-progress before launch so a label failure cannot create
-  // invisible duplicate review tasks.
-  await ensureReviewLabels(repoSlug, githubToken);
-  await githubRequest(
-    `/repos/${repoSlug}/issues/${pr.number}/labels`,
-    githubToken,
-    {
-      method: "POST",
-      body: JSON.stringify({ labels: [REVIEW_IN_PROGRESS_LABEL] }),
-    },
-    [200]
-  );
-  console.log(`Added ${REVIEW_IN_PROGRESS_LABEL} label to PR ${repoSlug}#${pr.number}`);
-
   const reviewCriteria = {
     check_compilation: true,
     check_security: true,
@@ -547,8 +538,25 @@ async function startReviewTask(
   });
 
   let taskArn: string | undefined;
+  let progressLabelApplied = false;
 
   try {
+    // Add review:in-progress before launch so a label failure cannot create
+    // invisible duplicate review tasks. Everything after the label is inside
+    // this cleanup path so pre-launch failures do not strand the PR.
+    await ensureReviewLabels(repoSlug, githubToken);
+    await githubRequest(
+      `/repos/${repoSlug}/issues/${pr.number}/labels`,
+      githubToken,
+      {
+        method: "POST",
+        body: JSON.stringify({ labels: [REVIEW_IN_PROGRESS_LABEL] }),
+      },
+      [200]
+    );
+    progressLabelApplied = true;
+    console.log(`Added ${REVIEW_IN_PROGRESS_LABEL} label to PR ${repoSlug}#${pr.number}`);
+
     const result = await ecs.send(new RunTaskCommand(params));
     taskArn = result.tasks?.[0]?.taskArn;
 
@@ -563,17 +571,19 @@ async function startReviewTask(
       );
     }
   } catch (error) {
-    try {
-      await githubRequest(
-        `/repos/${repoSlug}/issues/${pr.number}/labels/${encodeURIComponent("review:in-progress")}`,
-        githubToken,
-        { method: "DELETE" },
-        [200, 204, 404]
-      );
-    } catch (cleanupError) {
-      console.warn(
-        `Failed to remove review:in-progress after launch failure for ${repoSlug}#${pr.number}: ${errorMessage(cleanupError)}`
-      );
+    if (progressLabelApplied) {
+      try {
+        await githubRequest(
+          `/repos/${repoSlug}/issues/${pr.number}/labels/${encodeURIComponent(REVIEW_IN_PROGRESS_LABEL)}`,
+          githubToken,
+          { method: "DELETE" },
+          [200, 204, 404]
+        );
+      } catch (cleanupError) {
+        console.warn(
+          `Failed to remove ${REVIEW_IN_PROGRESS_LABEL} after launch failure for ${repoSlug}#${pr.number}: ${errorMessage(cleanupError)}`
+        );
+      }
     }
     throw error;
   }

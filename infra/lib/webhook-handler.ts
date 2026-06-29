@@ -51,6 +51,10 @@ import {
   parseTaskAssignPublicIp,
 } from "./fargate-task";
 import { publishDigestToSocialMedia } from "./digest-publisher";
+import {
+  assertLabelCreateSucceeded,
+  type GitHubLabelDefinition,
+} from "./github-labels";
 
 const ecs = new ECSClient({});
 const ssm = new SSMClient({});
@@ -107,7 +111,7 @@ const REVIEW_LABEL_DEFINITIONS = [
     color: "EDEDED",
     description: "Automated review is currently running",
   },
-];
+] satisfies GitHubLabelDefinition[];
 
 // Auto-merge hold period (1 hour)
 const MERGE_HOLD_PERIOD_MINUTES = 60;
@@ -143,7 +147,7 @@ const SIGNAL_LABELS = [
     color: "FBCA04",
     description: "Task is queued due to concurrency limit, will dispatch when capacity available",
   },
-] as const;
+] satisfies GitHubLabelDefinition[];
 
 async function getParameter(name: string): Promise<string> {
   const resp = await ssm.send(
@@ -185,7 +189,7 @@ async function ensureSignalLabels(
   token: string
 ): Promise<void> {
   for (const label of SIGNAL_LABELS) {
-    await githubRequest(
+    const response = await githubRequest(
       `/repos/${repoOwner}/${repoName}/labels`,
       token,
       {
@@ -194,6 +198,7 @@ async function ensureSignalLabels(
       },
       [201, 422]
     );
+    await assertLabelCreateSucceeded(label, response);
   }
 }
 
@@ -203,7 +208,7 @@ async function ensureReviewLabels(
   token: string
 ): Promise<void> {
   for (const label of REVIEW_LABEL_DEFINITIONS) {
-    await githubRequest(
+    const response = await githubRequest(
       `/repos/${repoOwner}/${repoName}/labels`,
       token,
       {
@@ -212,6 +217,7 @@ async function ensureReviewLabels(
       },
       [201, 422]
     );
+    await assertLabelCreateSucceeded(label, response);
   }
 }
 
