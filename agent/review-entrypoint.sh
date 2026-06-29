@@ -198,6 +198,7 @@ apply_review_labels() {
   gh issue edit "${PR_NUMBER}" -R "${REPO}" --remove-label "review:changes-requested" 2>/dev/null || true
   gh issue edit "${PR_NUMBER}" -R "${REPO}" --remove-label "review:error" 2>/dev/null || true
   gh issue edit "${PR_NUMBER}" -R "${REPO}" --remove-label "review:human-required" 2>/dev/null || true
+  gh issue edit "${PR_NUMBER}" -R "${REPO}" --remove-label "review:in-progress" 2>/dev/null || true
 
   # Apply the appropriate label
   case "$decision" in

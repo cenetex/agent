@@ -135,6 +135,11 @@ interface GitHubCheckRun {
   conclusion?: string | null;
 }
 
+interface GitHubRepository {
+  archived?: boolean;
+  disabled?: boolean;
+}
+
 interface RepoSummary {
   repo: string;
   candidates: number;
@@ -146,6 +151,8 @@ interface RepoSummary {
   stale: number;
   merged: number;
   mergeFailures: number;
+  skipped?: boolean;
+  skipReason?: string;
 }
 
 function parsePositiveInteger(value: string | undefined, fallback: number): number {
@@ -166,6 +173,52 @@ function maxMergesPerRun(): number {
     process.env.MERGE_TRIAGE_MAX_MERGES_PER_RUN,
     DEFAULT_MAX_MERGES_PER_RUN
   );
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+function isExpectedOptionalGitHubError(message: string): boolean {
+  return (
+    message.includes("Resource not accessible by integration") ||
+    message.includes("Not Found")
+  );
+}
+
+function repoSkipReason(error: unknown): string | null {
+  const message = errorMessage(error);
+
+  if (message.includes("Failed to get installation ID")) {
+    return "GitHub App is not installed or cannot access this repository.";
+  }
+
+  if (message.includes("Repository was archived so is read-only")) {
+    return "Repository is archived/read-only.";
+  }
+
+  if (message.includes("disabled")) {
+    return "Repository is disabled.";
+  }
+
+  return null;
+}
+
+function skippedRepoSummary(repo: string, reason: string): RepoSummary {
+  return {
+    repo,
+    candidates: 0,
+    ready: 0,
+    queued: 0,
+    waiting: 0,
+    blocked: 0,
+    conflicts: 0,
+    stale: 0,
+    merged: 0,
+    mergeFailures: 0,
+    skipped: true,
+    skipReason: reason,
+  };
 }
 
 async function getParameter(name: string): Promise<string> {
@@ -211,7 +264,12 @@ async function githubOptionalRequest(
   try {
     return await githubRequest(path, token, init, expectedStatuses);
   } catch (error) {
-    console.warn(`Optional GitHub request failed for ${path}:`, error);
+    const message = errorMessage(error);
+    if (isExpectedOptionalGitHubError(message)) {
+      console.warn(`Optional GitHub request unavailable for ${path}: ${message}`);
+    } else {
+      console.warn(`Optional GitHub request failed for ${path}:`, error);
+    }
     return null;
   }
 }
@@ -262,6 +320,16 @@ async function getRepoAgentConfigContent(repo: string, token: string): Promise<s
   }
 
   return Buffer.from(content.content, "base64").toString("utf8");
+}
+
+async function getRepositoryInfo(repo: string, token: string): Promise<GitHubRepository> {
+  const response = await githubRequest(
+    `/repos/${repo}`,
+    token,
+    { method: "GET" },
+    [200]
+  );
+  return await response.json() as GitHubRepository;
 }
 
 async function getRepoMergeHoldConfig(repo: string, token: string): Promise<MergeHoldConfig> {
@@ -771,6 +839,14 @@ async function handleRepo(
 ): Promise<RepoSummary> {
   const { owner, name } = parseRepoSlug(repo);
   const token = await getInstallationToken(owner, name, appConfig);
+  const repoInfo = await getRepositoryInfo(repo, token);
+  if (repoInfo.archived) {
+    return skippedRepoSummary(repo, "Repository is archived/read-only.");
+  }
+  if (repoInfo.disabled) {
+    return skippedRepoSummary(repo, "Repository is disabled.");
+  }
+
   const mergeHoldConfig = await getRepoMergeHoldConfig(repo, token);
 
   await ensureMergeLabels(repo, token);
@@ -849,6 +925,13 @@ export async function handler() {
     try {
       summaries.push(await handleRepo(repo, appConfig));
     } catch (error) {
+      const skipReason = repoSkipReason(error);
+      if (skipReason) {
+        console.log(`Merge triage skipped ${repo}: ${skipReason}`);
+        summaries.push(skippedRepoSummary(repo, skipReason));
+        continue;
+      }
+
       console.error(`Merge triage failed for ${repo}:`, error);
       summaries.push({
         repo,

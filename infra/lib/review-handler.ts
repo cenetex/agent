@@ -14,7 +14,7 @@ import {
   ReviewPayload,
   PRMetadata,
   generateTaskId,
-  createRepoSlug,
+  parseRepoSlug,
   getInstallationToken,
   createArtifactPrefix,
   PROTECTED_PATHS,
@@ -57,6 +57,45 @@ const DEFAULT_REPOS = [
 
 // PROTECTED_PATHS and CODING_AGENT_BOT_LOGINS imported from types.ts
 
+interface GitHubLabel {
+  name: string;
+}
+
+interface GitHubUser {
+  login: string;
+}
+
+interface GitHubPullRequest {
+  number: number;
+  title: string;
+  body?: string | null;
+  labels: GitHubLabel[];
+  user: GitHubUser;
+  head: {
+    ref: string;
+    sha: string;
+  };
+  base: {
+    ref: string;
+    sha: string;
+  };
+}
+
+interface ReviewablePR extends GitHubPullRequest {
+  repo: string;
+  githubToken: string;
+}
+
+interface GitHubRepository {
+  archived?: boolean;
+  disabled?: boolean;
+}
+
+interface RepoAccess {
+  repo: string;
+  token: string;
+}
+
 async function getParameter(name: string): Promise<string> {
   const resp = await ssm.send(
     new GetParameterCommand({ Name: name, WithDecryption: true })
@@ -91,55 +130,130 @@ async function githubRequest(
   return response;
 }
 
+function configuredRepos(): string[] {
+  return MONITORED_REPOS.length > 0 ? MONITORED_REPOS : DEFAULT_REPOS;
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+function repoSkipReason(error: unknown): string | null {
+  const message = errorMessage(error);
+
+  if (message.includes("Failed to get installation ID") || message.includes("Not Found")) {
+    return "GitHub App is not installed or cannot access this repository.";
+  }
+
+  if (
+    message.includes("Repository was archived so is read-only") ||
+    message.includes("read-only")
+  ) {
+    return "Repository is archived/read-only.";
+  }
+
+  if (message.includes("disabled")) {
+    return "Repository is disabled.";
+  }
+
+  if (message.includes("Resource not accessible by integration")) {
+    return "GitHub App token does not have the permissions required for review scheduling.";
+  }
+
+  return null;
+}
+
+async function getRepoAccess(repo: string, appConfig: GitHubAppConfig): Promise<RepoAccess | null> {
+  try {
+    const { owner, name } = parseRepoSlug(repo);
+    const token = await getInstallationToken(owner, name, appConfig);
+    const response = await githubRequest(
+      `/repos/${repo}`,
+      token,
+      { method: "GET" },
+      [200]
+    );
+    const repoInfo = await response.json() as GitHubRepository;
+
+    if (repoInfo.archived) {
+      console.log(`Skipping review repo ${repo}: Repository is archived/read-only.`);
+      return null;
+    }
+
+    if (repoInfo.disabled) {
+      console.log(`Skipping review repo ${repo}: Repository is disabled.`);
+      return null;
+    }
+
+    return { repo, token };
+  } catch (error) {
+    const skipReason = repoSkipReason(error);
+    if (skipReason) {
+      console.log(`Skipping review repo ${repo}: ${skipReason}`);
+      return null;
+    }
+    throw error;
+  }
+}
+
 /**
  * Discovers open PRs created by the coding agent that need review
  */
-async function discoverReviewablePRs(token: string): Promise<any[]> {
+async function discoverReviewablePRs(appConfig: GitHubAppConfig): Promise<ReviewablePR[]> {
   console.log("Discovering reviewable PRs...");
 
-  // Get all open PRs across monitored repositories
-  // The repo list is configured via MONITORED_REPOS environment variable
-  const repos = MONITORED_REPOS.length > 0 ? MONITORED_REPOS : DEFAULT_REPOS;
+  const reviewablePRs: ReviewablePR[] = [];
 
-  const reviewablePRs: any[] = [];
-
-  for (const repo of repos) {
+  for (const repo of configuredRepos()) {
     try {
       console.log(`Checking repository: ${repo}`);
+      const repoAccess = await getRepoAccess(repo, appConfig);
+      if (!repoAccess) {
+        continue;
+      }
 
       const response = await githubRequest(
         `/repos/${repo}/pulls?state=open&per_page=100`,
-        token,
+        repoAccess.token,
         { method: "GET" },
         [200]
       );
 
-      const prs = await response.json() as any[];
+      const prs = await response.json() as GitHubPullRequest[];
 
       // Filter PRs created by the coding agent that don't have review labels yet
-      const needsReview = prs.filter((pr: any) => {
+      const needsReview = prs.filter((pr) => {
         const isFromBot = CODING_AGENT_BOT_LOGINS.some(
           login => pr.user.login === login || pr.user.login.includes(login.replace("[bot]", ""))
         );
 
-        const hasReviewLabel = pr.labels.some((label: any) =>
+        const hasReviewLabel = pr.labels.some((label) =>
           label.name.startsWith("review:")
         );
 
-        const hasInProgressLabel = pr.labels.some((label: any) =>
+        const hasInProgressLabel = pr.labels.some((label) =>
           label.name === "review:in-progress"
         );
 
-        const hasPauseLabel = pr.labels.some((label: any) =>
+        const hasPauseLabel = pr.labels.some((label) =>
           label.name === "pause-agent"
         );
 
         return isFromBot && !hasReviewLabel && !hasInProgressLabel && !hasPauseLabel;
       });
 
-      reviewablePRs.push(...needsReview.map(pr => ({ ...pr, repo })));
+      reviewablePRs.push(...needsReview.map(pr => ({
+        ...pr,
+        repo,
+        githubToken: repoAccess.token,
+      })));
     } catch (error) {
-      console.error(`Error checking repository ${repo}:`, error);
+      const skipReason = repoSkipReason(error);
+      if (skipReason) {
+        console.log(`Skipping review repo ${repo}: ${skipReason}`);
+      } else {
+        console.error(`Error checking repository ${repo}:`, error);
+      }
       // Continue with other repos
     }
   }
@@ -152,30 +266,33 @@ async function discoverReviewablePRs(token: string): Promise<any[]> {
  * Checks for and cleans up stale review:in-progress labels
  * If a review has been in-progress for >90 minutes, something likely crashed
  */
-async function cleanupStaleReviewLabels(token: string): Promise<void> {
+async function cleanupStaleReviewLabels(appConfig: GitHubAppConfig): Promise<void> {
   console.log("Cleaning up stale review:in-progress labels...");
-
-  const repos = MONITORED_REPOS.length > 0 ? MONITORED_REPOS : DEFAULT_REPOS;
 
   const STALE_THRESHOLD_MINUTES = 90;
 
-  for (const repo of repos) {
+  for (const repo of configuredRepos()) {
     try {
+      const repoAccess = await getRepoAccess(repo, appConfig);
+      if (!repoAccess) {
+        continue;
+      }
+
       // Find all PRs with review:in-progress label
       const response = await githubRequest(
         `/repos/${repo}/issues?labels=review:in-progress&state=open&per_page=100`,
-        token,
+        repoAccess.token,
         { method: "GET" },
         [200]
       );
 
-      const prs = await response.json() as any[];
+      const prs = await response.json() as Array<{ number: number }>;
 
       for (const pr of prs) {
         // Check when the label was added by looking at recent label events
         const eventsResponse = await githubRequest(
           `/repos/${repo}/issues/${pr.number}/events`,
-          token,
+          repoAccess.token,
           { method: "GET" },
           [200]
         );
@@ -205,7 +322,7 @@ async function cleanupStaleReviewLabels(token: string): Promise<void> {
           // Remove the stale label
           await githubRequest(
             `/repos/${repo}/issues/${pr.number}/labels/${encodeURIComponent("review:in-progress")}`,
-            token,
+            repoAccess.token,
             { method: "DELETE" },
             [200, 204, 404]
           );
@@ -213,7 +330,7 @@ async function cleanupStaleReviewLabels(token: string): Promise<void> {
           // Post a comment about the stale marker
           await githubRequest(
             `/repos/${repo}/issues/${pr.number}/comments`,
-            token,
+            repoAccess.token,
             {
               method: "POST",
               body: JSON.stringify({
@@ -225,7 +342,12 @@ async function cleanupStaleReviewLabels(token: string): Promise<void> {
         }
       }
     } catch (error) {
-      console.error(`Error cleaning up stale labels for ${repo}:`, error);
+      const skipReason = repoSkipReason(error);
+      if (skipReason) {
+        console.log(`Skipping stale review cleanup for ${repo}: ${skipReason}`);
+      } else {
+        console.error(`Error cleaning up stale labels for ${repo}:`, error);
+      }
       // Continue with other repos
     }
   }
@@ -284,18 +406,18 @@ async function checkProtectedPaths(
  * Starts a review task for a PR
  */
 async function startReviewTask(
-  pr: any,
-  githubToken: string,
+  pr: ReviewablePR,
   openrouterApiKey: string
 ): Promise<string> {
   const taskId = generateTaskId();
   const repoSlug = pr.repo;
+  const githubToken = pr.githubToken;
 
   const prMetadata: PRMetadata = {
     number: pr.number,
     title: pr.title,
     body: pr.body || "",
-    labels: pr.labels.map((label: any) => label.name),
+    labels: pr.labels.map((label) => label.name),
     author: pr.user.login,
     head_ref: pr.head.ref,
     base_ref: pr.base.ref,
@@ -322,6 +444,19 @@ async function startReviewTask(
     Body: JSON.stringify(reviewPayload, null, 2),
     ContentType: "application/json",
   }));
+
+  // Add review:in-progress before launch so a label failure cannot create
+  // invisible duplicate review tasks.
+  await githubRequest(
+    `/repos/${repoSlug}/issues/${pr.number}/labels`,
+    githubToken,
+    {
+      method: "POST",
+      body: JSON.stringify({ labels: ["review:in-progress"] }),
+    },
+    [200]
+  );
+  console.log(`Added review:in-progress label to PR ${repoSlug}#${pr.number}`);
 
   const reviewCriteria = {
     check_compilation: true,
@@ -354,36 +489,40 @@ async function startReviewTask(
     assignPublicIp: TASK_ASSIGN_PUBLIC_IP,
   });
 
-  const result = await ecs.send(new RunTaskCommand(params));
-  const taskArn = result.tasks?.[0]?.taskArn;
+  let taskArn: string | undefined;
 
-  if (!taskArn || (result.failures?.length ?? 0) > 0) {
-    const failureDetails =
-      result.failures?.map((failure) => failure.reason ?? failure.arn ?? "unknown failure") ??
-      [];
-    throw new Error(
-      failureDetails.length > 0
-        ? `Review task launch failed: ${failureDetails.join(", ")}`
-        : "Review task launch did not return a task ARN"
-    );
+  try {
+    const result = await ecs.send(new RunTaskCommand(params));
+    taskArn = result.tasks?.[0]?.taskArn;
+
+    if (!taskArn || (result.failures?.length ?? 0) > 0) {
+      const failureDetails =
+        result.failures?.map((failure) => failure.reason ?? failure.arn ?? "unknown failure") ??
+        [];
+      throw new Error(
+        failureDetails.length > 0
+          ? `Review task launch failed: ${failureDetails.join(", ")}`
+          : "Review task launch did not return a task ARN"
+      );
+    }
+  } catch (error) {
+    try {
+      await githubRequest(
+        `/repos/${repoSlug}/issues/${pr.number}/labels/${encodeURIComponent("review:in-progress")}`,
+        githubToken,
+        { method: "DELETE" },
+        [200, 204, 404]
+      );
+    } catch (cleanupError) {
+      console.warn(
+        `Failed to remove review:in-progress after launch failure for ${repoSlug}#${pr.number}: ${errorMessage(cleanupError)}`
+      );
+    }
+    throw error;
   }
 
-  // Add review:in-progress label to prevent duplicate review launches
-  const [repoOwner, repoName] = repoSlug.split("/");
-  try {
-    await githubRequest(
-      `/repos/${repoOwner}/${repoName}/issues/${pr.number}/labels`,
-      githubToken,
-      {
-        method: "POST",
-        body: JSON.stringify({ labels: ["review:in-progress"] }),
-      },
-      [200]
-    );
-    console.log(`Added review:in-progress label to PR ${pr.number}`);
-  } catch (labelError) {
-    console.warn(`Failed to add review:in-progress label to PR ${pr.number}: ${labelError}`);
-    // Don't fail task launch if label addition fails
+  if (!taskArn) {
+    throw new Error("Review task launch did not return a task ARN");
   }
 
   // Store initial review metadata
@@ -428,15 +567,11 @@ export async function handler() {
       privateKey,
     };
 
-    // For simplicity, we'll get a token for a known repo
-    // In full implementation, this would iterate over all installations
-    const githubToken = await getInstallationToken("cenetex", "agent", appConfig);
-
     // Clean up stale review:in-progress labels from crashed reviews
-    await cleanupStaleReviewLabels(githubToken);
+    await cleanupStaleReviewLabels(appConfig);
 
     // Discover reviewable PRs
-    const reviewablePRs = await discoverReviewablePRs(githubToken);
+    const reviewablePRs = await discoverReviewablePRs(appConfig);
 
     // Merge execution is owned by merge-triage-handler.ts so approved PRs are
     // ordered against the rest of the repository queue before anything lands.
@@ -454,7 +589,7 @@ export async function handler() {
         const { hasProtectedFiles, protectedFiles } = await checkProtectedPaths(
           pr.repo,
           pr.number,
-          githubToken
+          pr.githubToken
         );
 
         if (hasProtectedFiles) {
@@ -463,7 +598,7 @@ export async function handler() {
           // Add a comment and label for human review
           await githubRequest(
             `/repos/${pr.repo}/issues/${pr.number}/comments`,
-            githubToken,
+            pr.githubToken,
             {
               method: "POST",
               body: JSON.stringify({
@@ -480,7 +615,7 @@ This PR will not be auto-merged and needs manual review.`
 
           await githubRequest(
             `/repos/${pr.repo}/issues/${pr.number}/labels`,
-            githubToken,
+            pr.githubToken,
             {
               method: "POST",
               body: JSON.stringify({ labels: ["review:human-required"] }),
@@ -489,6 +624,7 @@ This PR will not be auto-merged and needs manual review.`
           );
 
           results.push({
+            repo: pr.repo,
             pr: pr.number,
             status: "protected-files",
             protectedFiles
@@ -497,9 +633,10 @@ This PR will not be auto-merged and needs manual review.`
         }
 
         // Start review task
-        const taskArn = await startReviewTask(pr, githubToken, openrouterApiKey);
+        const taskArn = await startReviewTask(pr, openrouterApiKey);
 
         results.push({
+          repo: pr.repo,
           pr: pr.number,
           status: "review-started",
           taskArn
@@ -508,6 +645,7 @@ This PR will not be auto-merged and needs manual review.`
       } catch (error) {
         console.error(`Failed to process PR ${pr.number}:`, error);
         results.push({
+          repo: pr.repo,
           pr: pr.number,
           status: "error",
           error: error instanceof Error ? error.message : "Unknown error"

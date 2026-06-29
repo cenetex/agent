@@ -4273,6 +4273,16 @@ The agent will automatically dispatch this task when capacity becomes available.
     // Ensure signal labels exist
     await ensureSignalLabels(repoOwner, repoName, githubToken);
 
+    // The task is rejected before launch, so remove the running marker and
+    // leave only the durable blocked status for the credit rescan path.
+    await deleteLabelIfPresent(
+      repoOwner,
+      repoName,
+      issueNumber,
+      githubToken,
+      SIGNAL_LABEL_RUNNING
+    );
+
     // Update GitHub issue with status:blocked label and credit error
     await githubRequest(
       `/repos/${repoOwner}/${repoName}/issues/${issueNumber}/labels`,

@@ -118,9 +118,10 @@ async function findBlockedIssues(
   token: string
 ): Promise<BlockedIssue[]> {
   try {
-    // Query for issues with status:blocked label and agent label
+    // Query for issues with status:blocked. Credit rejection removes the trigger
+    // label, so requiring `agent` here leaves blocked issues stranded.
     const response = await githubRequest(
-      `/repos/${repoOwner}/${repoName}/issues?state=open&labels=status%3Ablocked%2Cagent&per_page=100`,
+      `/repos/${repoOwner}/${repoName}/issues?state=open&labels=status%3Ablocked&per_page=100`,
       token,
       { method: "GET" },
       [200]
@@ -230,6 +231,14 @@ async function retryBlockedIssue(
       blockedIssue.number,
       token,
       "status:blocked"
+    );
+
+    await removeLabel(
+      blockedIssue.owner,
+      blockedIssue.repo.split("/")[1],
+      blockedIssue.number,
+      token,
+      "agent:running"
     );
 
     // Post a comment about credits now being available
