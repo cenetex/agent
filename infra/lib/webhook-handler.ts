@@ -78,7 +78,36 @@ const SIGNAL_LABEL_WAITING = "agent:waiting";
 const SIGNAL_LABEL_FAILED = "agent:failed";
 const SIGNAL_LABEL_SUCCEEDED = "agent:succeeded";
 const REVIEW_APPROVED_LABEL = "review:approved";
+const REVIEW_IN_PROGRESS_LABEL = "review:in-progress";
+const REVIEW_HUMAN_REQUIRED_LABEL = "review:human-required";
 const BLOCKED_MAIN_BROKEN_LABEL = "blocked:main-broken";
+const REVIEW_LABEL_DEFINITIONS = [
+  {
+    name: REVIEW_APPROVED_LABEL,
+    color: "0E8A16",
+    description: "Automated review approved this pull request",
+  },
+  {
+    name: "review:changes-requested",
+    color: "D73A4A",
+    description: "Automated review requested changes",
+  },
+  {
+    name: "review:error",
+    color: "D73A4A",
+    description: "Automated review could not complete",
+  },
+  {
+    name: REVIEW_HUMAN_REQUIRED_LABEL,
+    color: "B60205",
+    description: "Manual human review is required before merge",
+  },
+  {
+    name: REVIEW_IN_PROGRESS_LABEL,
+    color: "EDEDED",
+    description: "Automated review is currently running",
+  },
+];
 
 // Auto-merge hold period (1 hour)
 const MERGE_HOLD_PERIOD_MINUTES = 60;
@@ -156,6 +185,24 @@ async function ensureSignalLabels(
   token: string
 ): Promise<void> {
   for (const label of SIGNAL_LABELS) {
+    await githubRequest(
+      `/repos/${repoOwner}/${repoName}/labels`,
+      token,
+      {
+        method: "POST",
+        body: JSON.stringify(label),
+      },
+      [201, 422]
+    );
+  }
+}
+
+async function ensureReviewLabels(
+  repoOwner: string,
+  repoName: string,
+  token: string
+): Promise<void> {
+  for (const label of REVIEW_LABEL_DEFINITIONS) {
     await githubRequest(
       `/repos/${repoOwner}/${repoName}/labels`,
       token,
@@ -558,6 +605,8 @@ async function triggerReviewForPR(
   token: string,
   openrouterKey: string
 ): Promise<string | null> {
+  let progressLabelApplied = false;
+
   try {
     // Fetch PR details
     const prResponse = await githubRequest(
@@ -625,6 +674,19 @@ async function triggerReviewForPR(
     const REVIEW_TASK_DEFINITION_ARN = process.env.REVIEW_TASK_DEFINITION_ARN!;
     const REVIEW_CONTAINER_NAME = process.env.REVIEW_CONTAINER_NAME!;
 
+    await ensureReviewLabels(repoOwner, repoName, token);
+    await githubRequest(
+      `/repos/${repoOwner}/${repoName}/issues/${prNumber}/labels`,
+      token,
+      {
+        method: "POST",
+        body: JSON.stringify({ labels: [REVIEW_IN_PROGRESS_LABEL] }),
+      },
+      [200]
+    );
+    progressLabelApplied = true;
+    console.log(`Added ${REVIEW_IN_PROGRESS_LABEL} label to PR #${prNumber}`);
+
     const params = createRunTaskInput({
       clusterArn: CLUSTER_ARN,
       taskDefinitionArn: REVIEW_TASK_DEFINITION_ARN,
@@ -651,21 +713,6 @@ async function triggerReviewForPR(
 
     console.log(`Triggered review task ${taskId} for PR #${prNumber} (${taskArn})`);
 
-    try {
-      await githubRequest(
-        `/repos/${repoOwner}/${repoName}/issues/${prNumber}/labels`,
-        token,
-        {
-          method: "POST",
-          body: JSON.stringify({ labels: ["review:in-progress"] }),
-        },
-        [200]
-      );
-      console.log(`Added review:in-progress label to PR #${prNumber}`);
-    } catch (labelError) {
-      console.warn(`Failed to add review:in-progress label to PR #${prNumber}: ${labelError}`);
-    }
-
     // Store initial review metadata
     const metadata = {
       task_id: taskId,
@@ -688,6 +735,18 @@ async function triggerReviewForPR(
     console.log(`Stored review metadata at ${artifactPrefix}/review-metadata.json`);
     return taskArn;
   } catch (error) {
+    if (progressLabelApplied) {
+      try {
+        await githubRequest(
+          `/repos/${repoOwner}/${repoName}/issues/${prNumber}/labels/${encodeURIComponent(REVIEW_IN_PROGRESS_LABEL)}`,
+          token,
+          { method: "DELETE" },
+          [200, 204, 404]
+        );
+      } catch (cleanupError) {
+        console.warn(`Failed to remove ${REVIEW_IN_PROGRESS_LABEL} from PR #${prNumber}: ${cleanupError}`);
+      }
+    }
     console.error(`Failed to trigger review for PR #${prNumber}:`, error);
     return null;
   }
@@ -3723,10 +3782,11 @@ export async function handler(event: {
       if (protectedFiles.length > 0) {
         console.log(`PR #${prNumber} touches protected paths: ${protectedFiles.join(", ")}`);
 
+        await ensureReviewLabels(repoOwner, repoName, githubToken);
         await githubRequest(
           `/repos/${repoOwner}/${repoName}/issues/${prNumber}/labels`,
           githubToken,
-          { method: "POST", body: JSON.stringify({ labels: ["review:human-required"] }) },
+          { method: "POST", body: JSON.stringify({ labels: [REVIEW_HUMAN_REQUIRED_LABEL] }) },
           [200]
         );
 

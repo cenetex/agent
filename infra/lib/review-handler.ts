@@ -41,6 +41,35 @@ const GITHUB_APP_ID_PARAM = process.env.GITHUB_APP_ID_PARAM!;
 const GITHUB_APP_PRIVATE_KEY_PARAM = process.env.GITHUB_APP_PRIVATE_KEY_PARAM!;
 const OPENROUTER_API_KEY_PARAM = process.env.OPENROUTER_API_KEY_PARAM!;
 const ARTIFACTS_BUCKET = process.env.ARTIFACTS_BUCKET!;
+const REVIEW_IN_PROGRESS_LABEL = "review:in-progress";
+const REVIEW_HUMAN_REQUIRED_LABEL = "review:human-required";
+const REVIEW_LABEL_DEFINITIONS = [
+  {
+    name: "review:approved",
+    color: "0E8A16",
+    description: "Automated review approved this pull request",
+  },
+  {
+    name: "review:changes-requested",
+    color: "D73A4A",
+    description: "Automated review requested changes",
+  },
+  {
+    name: "review:error",
+    color: "D73A4A",
+    description: "Automated review could not complete",
+  },
+  {
+    name: REVIEW_HUMAN_REQUIRED_LABEL,
+    color: "B60205",
+    description: "Manual human review is required before merge",
+  },
+  {
+    name: REVIEW_IN_PROGRESS_LABEL,
+    color: "EDEDED",
+    description: "Automated review is currently running",
+  },
+];
 
 // Monitored repositories for automated review (comma-separated)
 const MONITORED_REPOS = (process.env.MONITORED_REPOS || "").split(",").filter(r => r.trim());
@@ -128,6 +157,20 @@ async function githubRequest(
   }
 
   return response;
+}
+
+async function ensureReviewLabels(repo: string, token: string): Promise<void> {
+  for (const label of REVIEW_LABEL_DEFINITIONS) {
+    await githubRequest(
+      `/repos/${repo}/labels`,
+      token,
+      {
+        method: "POST",
+        body: JSON.stringify(label),
+      },
+      [201, 422]
+    );
+  }
 }
 
 function configuredRepos(): string[] {
@@ -460,16 +503,17 @@ async function startReviewTask(
 
   // Add review:in-progress before launch so a label failure cannot create
   // invisible duplicate review tasks.
+  await ensureReviewLabels(repoSlug, githubToken);
   await githubRequest(
     `/repos/${repoSlug}/issues/${pr.number}/labels`,
     githubToken,
     {
       method: "POST",
-      body: JSON.stringify({ labels: ["review:in-progress"] }),
+      body: JSON.stringify({ labels: [REVIEW_IN_PROGRESS_LABEL] }),
     },
     [200]
   );
-  console.log(`Added review:in-progress label to PR ${repoSlug}#${pr.number}`);
+  console.log(`Added ${REVIEW_IN_PROGRESS_LABEL} label to PR ${repoSlug}#${pr.number}`);
 
   const reviewCriteria = {
     check_compilation: true,
@@ -634,12 +678,13 @@ This PR will not be auto-merged and needs manual review.`
             [201]
           );
 
+          await ensureReviewLabels(pr.repo, pr.githubToken);
           await githubRequest(
             `/repos/${pr.repo}/issues/${pr.number}/labels`,
             pr.githubToken,
             {
               method: "POST",
-              body: JSON.stringify({ labels: ["review:human-required"] }),
+              body: JSON.stringify({ labels: [REVIEW_HUMAN_REQUIRED_LABEL] }),
             },
             [200]
           );

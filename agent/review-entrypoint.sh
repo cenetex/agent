@@ -55,6 +55,12 @@ REVIEW_STATUS="error"
 RUN_STARTED_AT="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
 REVIEW_LOG="/tmp/review-output.log"
 
+REVIEW_APPROVED_LABEL="review:approved"
+REVIEW_CHANGES_REQUESTED_LABEL="review:changes-requested"
+REVIEW_ERROR_LABEL="review:error"
+REVIEW_HUMAN_REQUIRED_LABEL="review:human-required"
+REVIEW_IN_PROGRESS_LABEL="review:in-progress"
+
 # S3 artifact keys
 METADATA_KEY="${ARTIFACT_PREFIX}/review-metadata.json"
 LOG_KEY="${ARTIFACT_PREFIX}/review.log"
@@ -192,26 +198,49 @@ This PR will require manual review.
 
 apply_review_labels() {
   local decision="$1"
+  local result_label=""
+
+  gh label create "${REVIEW_APPROVED_LABEL}" -R "${REPO}" --color "0E8A16" \
+    --description "Automated review approved this pull request" --force >/dev/null
+  gh label create "${REVIEW_CHANGES_REQUESTED_LABEL}" -R "${REPO}" --color "D73A4A" \
+    --description "Automated review requested changes" --force >/dev/null
+  gh label create "${REVIEW_ERROR_LABEL}" -R "${REPO}" --color "D73A4A" \
+    --description "Automated review could not complete" --force >/dev/null
+  gh label create "${REVIEW_HUMAN_REQUIRED_LABEL}" -R "${REPO}" --color "B60205" \
+    --description "Manual human review is required before merge" --force >/dev/null
+  gh label create "${REVIEW_IN_PROGRESS_LABEL}" -R "${REPO}" --color "EDEDED" \
+    --description "Automated review is currently running" --force >/dev/null
 
   # Remove any existing review labels
-  gh issue edit "${PR_NUMBER}" -R "${REPO}" --remove-label "review:approved" 2>/dev/null || true
-  gh issue edit "${PR_NUMBER}" -R "${REPO}" --remove-label "review:changes-requested" 2>/dev/null || true
-  gh issue edit "${PR_NUMBER}" -R "${REPO}" --remove-label "review:error" 2>/dev/null || true
-  gh issue edit "${PR_NUMBER}" -R "${REPO}" --remove-label "review:human-required" 2>/dev/null || true
-  gh issue edit "${PR_NUMBER}" -R "${REPO}" --remove-label "review:in-progress" 2>/dev/null || true
+  gh issue edit "${PR_NUMBER}" -R "${REPO}" --remove-label "${REVIEW_APPROVED_LABEL}" 2>/dev/null || true
+  gh issue edit "${PR_NUMBER}" -R "${REPO}" --remove-label "${REVIEW_CHANGES_REQUESTED_LABEL}" 2>/dev/null || true
+  gh issue edit "${PR_NUMBER}" -R "${REPO}" --remove-label "${REVIEW_ERROR_LABEL}" 2>/dev/null || true
+  gh issue edit "${PR_NUMBER}" -R "${REPO}" --remove-label "${REVIEW_HUMAN_REQUIRED_LABEL}" 2>/dev/null || true
+  gh issue edit "${PR_NUMBER}" -R "${REPO}" --remove-label "${REVIEW_IN_PROGRESS_LABEL}" 2>/dev/null || true
 
-  # Apply the appropriate label
   case "$decision" in
     "approved")
-      gh issue edit "${PR_NUMBER}" -R "${REPO}" --add-label "review:approved" 2>/dev/null || true
+      result_label="${REVIEW_APPROVED_LABEL}"
       ;;
     "changes_requested")
-      gh issue edit "${PR_NUMBER}" -R "${REPO}" --add-label "review:changes-requested" 2>/dev/null || true
+      result_label="${REVIEW_CHANGES_REQUESTED_LABEL}"
       ;;
     "error")
-      gh issue edit "${PR_NUMBER}" -R "${REPO}" --add-label "review:error" 2>/dev/null || true
+      result_label="${REVIEW_ERROR_LABEL}"
       ;;
   esac
+
+  if [ -z "${result_label}" ]; then
+    echo "ERROR: Unknown review decision for label application: ${decision}" | tee -a "${REVIEW_LOG}"
+    return 1
+  fi
+
+  if ! gh issue edit "${PR_NUMBER}" -R "${REPO}" --add-label "${result_label}" >>"${REVIEW_LOG}" 2>&1; then
+    echo "ERROR: Failed to apply ${result_label} to ${REPO}#${PR_NUMBER}" | tee -a "${REVIEW_LOG}"
+    return 1
+  fi
+
+  echo "Applied ${result_label} to ${REPO}#${PR_NUMBER}" | tee -a "${REVIEW_LOG}"
 }
 
 on_exit() {
