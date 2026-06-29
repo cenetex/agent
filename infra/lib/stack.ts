@@ -405,6 +405,7 @@ export class GitHubAgentStack extends cdk.Stack {
         OPENROUTER_API_KEY_PARAM: PARAM_OPENROUTER_KEY,
         ARTIFACTS_BUCKET: artifactsBucket.bucketName,
         MONITORED_REPOS,
+        MAX_REVIEWS_PER_RUN: "1",
       },
     });
 

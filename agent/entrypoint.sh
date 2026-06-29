@@ -14,6 +14,7 @@ set -Eeuo pipefail
 : "${SIGNAL_LABEL_WAITING:=agent:waiting}"
 : "${SIGNAL_LABEL_FAILED:=agent:failed}"
 : "${SIGNAL_LABEL_SUCCEEDED:=agent:succeeded}"
+: "${STATUS_BLOCKED_LABEL:=status:blocked}"
 : "${AWS_REGION:=us-east-1}"  # Optional, used for diagnostic tasks
 : "${LINT_RETRY_MAX_ATTEMPTS:=3}"  # Optional, max retries for lint loop
 : "${AGENT_EXECUTOR:=custom}"  # custom or codex
@@ -99,6 +100,17 @@ set_signal_label() {
 
   gh issue edit "${ISSUE_NUMBER}" --remove-label "${TRIGGER_LABEL}" -R "${REPO}" >/dev/null 2>&1 || true
   gh issue edit "${ISSUE_NUMBER}" --add-label "${target_label}" -R "${REPO}" >/dev/null 2>&1 || true
+}
+
+set_blocked_label() {
+  local label
+
+  for label in "${SIGNAL_LABELS[@]}"; do
+    gh issue edit "${ISSUE_NUMBER}" --remove-label "${label}" -R "${REPO}" >/dev/null 2>&1 || true
+  done
+
+  gh issue edit "${ISSUE_NUMBER}" --remove-label "${TRIGGER_LABEL}" -R "${REPO}" >/dev/null 2>&1 || true
+  gh issue edit "${ISSUE_NUMBER}" --add-label "${STATUS_BLOCKED_LABEL}" -R "${REPO}" >/dev/null 2>&1 || true
 }
 
 update_task_metadata() {
@@ -394,14 +406,11 @@ ${CRITERIA_STATUS_COMMENT}"
     exit 0
   fi
 
-  set_signal_label "${SIGNAL_LABEL_FAILED}"
+  if [ "${RUN_STATUS}" = "failed" ] && [ "${exit_code}" -eq 0 ]; then
+    exit_code=1
+  fi
 
-  # Categorize the failure
   local failure_info error_message error_details failure_category is_retryable suggested_action
-  failure_info=$(categorize_failure "${CURRENT_STAGE}" "Task failed during ${CURRENT_STAGE}" "${exit_code}")
-  failure_category=$(echo "$failure_info" | cut -d'|' -f1)
-  is_retryable=$(echo "$failure_info" | cut -d'|' -f2)
-  suggested_action=$(echo "$failure_info" | cut -d'|' -f3)
 
   # Build error message for categorization
   error_message="Task failed during ${CURRENT_STAGE}"
@@ -413,6 +422,44 @@ ${CRITERIA_STATUS_COMMENT}"
       error_message="Repository access failed"
       ;;
   esac
+
+  if detect_provider_credit_exhaustion "${AGENT_LOG}"; then
+    failure_category="provider_credit_exhaustion"
+    error_message="OpenRouter has insufficient provider credits for model ${MODEL}"
+
+    set_blocked_label
+    update_task_metadata "waiting" "$error_message" "" "$failure_category"
+    upload_artifacts "$exit_code" ""
+
+    if ! comment_already_exists "${TASK_ID}" "${ISSUE_NUMBER}" "${REPO}"; then
+      local blocked_comment="<!-- task_id: ${TASK_ID} -->
+⏸️ **Agent blocked: OpenRouter credits exhausted**
+
+The repository has enough agent credits, but the OpenRouter account backing model \`${MODEL}\` does not currently have enough provider credits to complete this request.
+
+**Task Details:**
+- Task ID: \`${TASK_ID}\`
+- Commit SHA: \`${RESOLVED_COMMIT_SHA}\`
+- Category: \`${failure_category}\`
+
+**Suggested Action:** Top up OpenRouter credits, then re-add the \`${TRIGGER_LABEL}\` label to retry.
+
+[View artifacts](https://console.aws.amazon.com/s3/buckets/${ARTIFACTS_BUCKET}?prefix=${ARTIFACT_PREFIX}/)"
+
+      post_comment "${ISSUE_NUMBER}" "${REPO}" "${blocked_comment}"
+    fi
+
+    echo "=== Agent blocked: OpenRouter provider credits exhausted ==="
+    exit 0
+  fi
+
+  set_signal_label "${SIGNAL_LABEL_FAILED}"
+
+  # Categorize the failure
+  failure_info=$(categorize_failure "${CURRENT_STAGE}" "${error_message}" "${exit_code}")
+  failure_category=$(echo "$failure_info" | cut -d'|' -f1)
+  is_retryable=$(echo "$failure_info" | cut -d'|' -f2)
+  suggested_action=$(echo "$failure_info" | cut -d'|' -f3)
 
   # Check if comment already exists to prevent duplicates
   if comment_already_exists "${TASK_ID}" "${ISSUE_NUMBER}" "${REPO}"; then
@@ -1468,6 +1515,12 @@ while [ -z "${RUN_STATUS}" ] && [ "${ATTEMPT}" -lt "${MAX_ATTEMPTS}" ]; do
   fi
 
   echo "--- Executor exit status: ${EXECUTOR_EXIT_CODE} ---" | tee -a "${AGENT_LOG}"
+
+  if detect_provider_credit_exhaustion "${AGENT_LOG}"; then
+    echo "Detected OpenRouter provider credit exhaustion; stopping retries." | tee -a "${AGENT_LOG}"
+    RUN_STATUS="failed"
+    break
+  fi
 
   # --- Check for non-retryable permission errors ---
   if NON_RETRYABLE_INFO=$(detect_non_retryable_error "${AGENT_LOG}"); then

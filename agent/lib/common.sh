@@ -127,8 +127,8 @@ categorize_failure() {
 
   # Returns: category|retryable|suggested_action
   # Transient (retryable) failures
-  if echo "$error_message" | grep -qi "insufficient credits"; then
-    echo "credit_exhaustion|true|Top up OpenRouter credits via your account dashboard"
+  if echo "$error_message" | grep -qiE "HTTP 402|Payment Required|requires more credits|OpenRouter has insufficient credits|insufficient credits"; then
+    echo "provider_credit_exhaustion|false|Top up OpenRouter credits via your account dashboard"
   elif echo "$error_message" | grep -qi "timeout\|60 minute"; then
     echo "timeout|true|The task will be retried automatically; you can also retry manually"
   elif echo "$error_message" | grep -qi "openrouter\|connection"; then
@@ -148,6 +148,16 @@ categorize_failure() {
   else
     echo "unknown|false|Review the error details and GitHub App permissions"
   fi
+}
+
+detect_provider_credit_exhaustion() {
+  local log_file="$1"
+
+  if [ ! -f "$log_file" ] || [ ! -s "$log_file" ]; then
+    return 1
+  fi
+
+  grep -qiE "HTTP 402|Payment Required|requires more credits|OpenRouter has insufficient credits" "$log_file"
 }
 
 # Check if a comment already exists

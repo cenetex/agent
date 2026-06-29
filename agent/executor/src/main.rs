@@ -523,10 +523,14 @@ impl Executor {
                     let status = response.status();
                     let text = response.text().context("failed to read model response")?;
                     if !status.is_success() {
-                        last_error = Some(anyhow!(
+                        let error = anyhow!(
                             "model request failed with HTTP {status}: {}",
                             truncate(&redact_secrets(&text), 2000).0
-                        ));
+                        );
+                        if status.as_u16() == 402 {
+                            return Err(error);
+                        }
+                        last_error = Some(error);
                     } else {
                         match extract_message_content(&text) {
                             Ok(content) => return Ok(content),

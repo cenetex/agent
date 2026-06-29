@@ -233,12 +233,22 @@ on_exit() {
 
   if [ "${REVIEW_STATUS}" = "error" ] || [ "${exit_code}" -ne 0 ]; then
     local error_message="Review failed during ${CURRENT_STAGE}"
+    local review_error_details="Error during ${CURRENT_STAGE}. Exit code: ${exit_code}"
+
+    if detect_provider_credit_exhaustion "${REVIEW_LOG}"; then
+      error_message="OpenRouter has insufficient provider credits for model z-ai/glm-5.2"
+      review_error_details="OpenRouter provider credits are exhausted for model \`z-ai/glm-5.2\`. Top up OpenRouter credits, then remove \`review:error\` to let the review scheduler retry."
+    fi
+
     update_review_status "failed" "error" "" "$error_message"
     upload_review_artifacts
     apply_review_labels "error"
-    post_review_comment "error" "Error during ${CURRENT_STAGE}. Exit code: ${exit_code}"
+    post_review_comment "error" "$review_error_details"
 
     echo "=== Review failed ==="
+    if detect_provider_credit_exhaustion "${REVIEW_LOG}"; then
+      exit 0
+    fi
     exit "${exit_code}"
   else
     echo "=== Review completed successfully ==="
@@ -569,6 +579,12 @@ timeout 1800 codex exec --ephemeral --skip-git-repo-check \
   --sandbox danger-full-access \
   --model "z-ai/glm-5.2" \
   "${REVIEW_MISSION}" 2>&1 | tee "${REVIEW_LOG}" || CODEX_EXIT_CODE=$?
+
+if detect_provider_credit_exhaustion "${REVIEW_LOG}"; then
+  echo "Detected OpenRouter provider credit exhaustion; stopping review." | tee -a "${REVIEW_LOG}"
+  REVIEW_STATUS="error"
+  exit 1
+fi
 
 # Check if the findings file exists and was written by Codex
 if [ ! -f "${REVIEW_FINDINGS_FILE}" ]; then

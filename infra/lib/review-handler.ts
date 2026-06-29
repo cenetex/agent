@@ -134,6 +134,19 @@ function configuredRepos(): string[] {
   return MONITORED_REPOS.length > 0 ? MONITORED_REPOS : DEFAULT_REPOS;
 }
 
+function parsePositiveInteger(value: string | undefined, fallback: number): number {
+  if (!value) {
+    return fallback;
+  }
+
+  const parsed = Number.parseInt(value, 10);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+}
+
+function maxReviewsPerRun(): number {
+  return parsePositiveInteger(process.env.MAX_REVIEWS_PER_RUN, 1);
+}
+
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
@@ -581,9 +594,17 @@ export async function handler() {
       return { statusCode: 200, body: "No PRs to review" };
     }
 
+    const maxReviews = maxReviewsPerRun();
+    const prsToReview = reviewablePRs.slice(0, maxReviews);
+    if (reviewablePRs.length > prsToReview.length) {
+      console.log(
+        `Review scheduler launching ${prsToReview.length}/${reviewablePRs.length} PRs this run; remaining PRs will wait for the next tick.`
+      );
+    }
+
     // Process each PR
     const results = [];
-    for (const pr of reviewablePRs) {
+    for (const pr of prsToReview) {
       try {
         // Check if PR touches protected paths
         const { hasProtectedFiles, protectedFiles } = await checkProtectedPaths(
@@ -658,6 +679,7 @@ This PR will not be auto-merged and needs manual review.`
       body: JSON.stringify({
         message: "Review handler completed",
         processed: results.length,
+        deferred: reviewablePRs.length - prsToReview.length,
         results
       }),
     };
