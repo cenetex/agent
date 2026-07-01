@@ -1143,7 +1143,9 @@ Your mission:
 - If improvements are needed, make the changes directly
 - Commit and push any changes you make
 - Post a comment on the PR summarizing what you did using: gh issue comment ${ISSUE_NUMBER} --body '<your comment>'
-- If you need clarification from the author, post a comment asking for it and stop
+- If you need clarification from the author, post a comment asking for it and stop. The comment MUST start with the literal HTML marker on its own line so the runtime can detect it:
+  <!-- agent-question -->
+  Followed by your question(s). Without this marker the runtime cannot distinguish your question from its own status comments and will silently retry instead of waiting for an answer.
 - Be concise. Make minimal, focused changes.
 
 BEFORE FINISHING:
@@ -1283,7 +1285,7 @@ Your mission:
 - **Before pushing, run the pre-push lint loop** (see Lint Loop Instructions below)
 - Create a PR that references this issue using: gh pr create --title '<title>' --body 'Fixes #${ISSUE_NUMBER}\n\n<description>'
 - If your task does NOT require code changes (e.g., creating issues, analysis, planning), post your results as a comment and close this issue when done using: gh issue close ${ISSUE_NUMBER}
-- If you need more information to proceed, post a comment asking for clarification using: gh issue comment ${ISSUE_NUMBER} --body '<your question>'
+- If you need more information to proceed, post a comment asking for clarification using: gh issue comment ${ISSUE_NUMBER} --body '<your question>'. The comment body MUST start with the literal HTML marker \`<!-- agent-question -->\` on its own line so the runtime can detect it. Without this marker the runtime cannot distinguish your question from its own status comments and will silently retry instead of waiting for an answer.
 - Be concise. Make minimal, focused changes. Don't refactor unrelated code.
 
 ## Lint Loop Instructions
