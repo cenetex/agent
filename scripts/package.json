@@ -5,7 +5,8 @@
   "type": "module",
   "scripts": {
     "build": "tsc",
-    "credits": "node dist/credits-admin.js"
+    "credits": "node dist/credits-admin.js",
+    "pages:report": "node dist/pages-report.js"
   },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.1014.0",

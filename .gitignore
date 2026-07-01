@@ -4,6 +4,7 @@ cdk-outputs.json
 agent/executor/target/
 *.js
 *.d.ts
+*.d.ts.map
 *.js.map
 !cdk.json
 !jest.config.js

@@ -235,8 +235,35 @@ GitHub Actions separates validation from deployment:
 
 - `CI` runs on pull requests and pushes to `main`.
 - `Deploy` runs only for published GitHub releases or manual `workflow_dispatch`.
+- `Publish Benchmarks` publishes the static GitHub Pages benchmark dashboard on a 6-hour schedule, on manual `workflow_dispatch`, and when the Pages generator changes.
 
 The CDK stack runs agent tasks in private subnets by default. To use the prior lower-cost public-subnet mode for a non-production deployment, pass `-c usePublicSubnets=true` to CDK.
+
+## GitHub Pages Benchmarks
+
+The benchmark site is generated from the S3 artifact bucket and published with GitHub Pages at the repository's Pages URL. It includes:
+
+- 24-hour, 7-day, 30-day, and all-time task outcome statistics
+- Runtime and queue-time benchmarks, including p50 and p95 runtime
+- Repository-level success rates and failure counts
+- Credit balances, all-time spend, and recent credit activity
+- Downloadable `data.json` and `tasks.csv` artifacts
+
+The workflow uses `AWS_PAGES_ROLE_ARN` when present, otherwise it falls back to `AWS_DEPLOY_ROLE_ARN`. The role needs read access to:
+
+```text
+s3://github-agent-artifacts-022118847419-us-east-1/tasks/*
+s3://github-agent-artifacts-022118847419-us-east-1/credits/*
+```
+
+Generate a local sample without AWS access:
+
+```bash
+cd scripts
+npm ci
+npm run build
+npm run pages:report -- --sample --out ../pages
+```
 
 ## Per-Repo Configuration
 

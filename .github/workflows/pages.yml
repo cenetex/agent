@@ -1,0 +1,82 @@
+name: Publish Benchmarks
+
+on:
+  workflow_dispatch:
+    inputs:
+      days:
+        description: Reporting window in days
+        required: false
+        default: "30"
+      bucket:
+        description: S3 artifact bucket override
+        required: false
+        default: ""
+  schedule:
+    - cron: "23 */6 * * *"
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/pages.yml"
+      - "scripts/pages-report.ts"
+      - "scripts/package.json"
+      - "scripts/package-lock.json"
+
+concurrency:
+  group: github-pages
+  cancel-in-progress: false
+
+env:
+  DEFAULT_ARTIFACTS_BUCKET: github-agent-artifacts-022118847419-us-east-1
+  DEFAULT_REPORT_DAYS: "30"
+
+permissions:
+  contents: read
+  id-token: write
+  pages: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20.20.2
+          cache: npm
+          cache-dependency-path: scripts/package-lock.json
+
+      - name: Install scripts dependencies
+        run: cd scripts && npm ci
+
+      - name: Build scripts
+        run: cd scripts && npm run build
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_PAGES_ROLE_ARN || secrets.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: us-east-1
+
+      - name: Generate benchmark report
+        env:
+          ARTIFACTS_BUCKET: ${{ github.event.inputs.bucket || env.DEFAULT_ARTIFACTS_BUCKET }}
+        run: |
+          cd scripts
+          npm run pages:report -- --out ../pages --days "${{ github.event.inputs.days || env.DEFAULT_REPORT_DAYS }}"
+
+      - uses: actions/configure-pages@v5
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: pages
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4
