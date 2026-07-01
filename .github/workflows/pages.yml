@@ -66,6 +66,8 @@ jobs:
           npm run pages:report -- --out ../pages --days "${{ github.event.inputs.days || env.DEFAULT_REPORT_DAYS }}"
 
       - uses: actions/configure-pages@v5
+        with:
+          enablement: true
 
       - uses: actions/upload-pages-artifact@v3
         with:
