@@ -245,6 +245,7 @@ The benchmark site is generated from the S3 artifact bucket and published with G
 
 - 24-hour, 7-day, 30-day, and all-time task outcome statistics
 - Runtime and queue-time benchmarks, including p50 and p95 runtime
+- Model, executor, and task-mode benchmark breakdowns with credit spend
 - Repository-level success rates and failure counts
 - Credit balances, all-time spend, and recent credit activity
 - Downloadable `data.json` and `tasks.csv` artifacts

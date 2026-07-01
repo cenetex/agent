@@ -142,6 +142,8 @@ update_task_metadata() {
     --arg error_message "${error_message}" \
     --arg failure_category "${failure_category}" \
     --arg pr_url "${pr_url}" \
+    --arg model "${MODEL:-}" \
+    --arg executor "${AGENT_EXECUTOR:-}" \
     --argjson issue_metadata "$(echo "$TASK_PAYLOAD" | jq '.issue_metadata')" \
     '{
       task_id: $task_id,
@@ -158,6 +160,8 @@ update_task_metadata() {
       error_message: (if $error_message == "" then null else $error_message end),
       failure_category: (if $failure_category == "" then null else $failure_category end),
       pr_url: (if $pr_url == "" then null else $pr_url end),
+      model: (if $model == "" then null else $model end),
+      executor: (if $executor == "" then null else $executor end),
       issue_metadata: $issue_metadata
     } + (if $completed_at == "" then {} else {completed_at: $completed_at} end)')
 

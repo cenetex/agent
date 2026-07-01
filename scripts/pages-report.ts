@@ -19,8 +19,11 @@ interface TaskMetadata {
   created_at: string;
   started_at?: string;
   completed_at?: string;
+  artifact_prefix?: string;
   error_message?: string;
   failure_category?: string;
+  model?: string | null;
+  executor?: string | null;
   pr_url?: string;
   issue_metadata?: {
     title?: string;
@@ -44,6 +47,16 @@ interface CreditTransaction {
   reason: string;
   task_id: string | null;
   model?: string;
+}
+
+interface TaskPayload {
+  task_mode?: string;
+  model?: string;
+}
+
+interface TaskManifest {
+  executor_result_key?: string | null;
+  executor_trace_key?: string | null;
 }
 
 interface WindowStats {
@@ -73,6 +86,22 @@ interface RepoStats {
   running: number;
   successRate: number | null;
   p95RuntimeMinutes: number | null;
+}
+
+interface BenchmarkGroup {
+  name: string;
+  total: number;
+  completed: number;
+  succeeded: number;
+  failed: number;
+  timedOut: number;
+  waiting: number;
+  running: number;
+  successRate: number | null;
+  averageRuntimeMinutes: number | null;
+  p95RuntimeMinutes: number | null;
+  creditsSpent: number;
+  averageCreditsPerCompleted: number | null;
 }
 
 interface DailyPoint {
@@ -105,6 +134,9 @@ interface ReportData {
   daily: DailyPoint[];
   failureCategories: Array<{ category: string; count: number }>;
   modes: Array<{ mode: string; count: number }>;
+  modelBenchmarks: BenchmarkGroup[];
+  executorBenchmarks: BenchmarkGroup[];
+  modeBenchmarks: BenchmarkGroup[];
   credits: CreditSummary;
   recentTasks: TaskMetadata[];
 }
@@ -159,6 +191,18 @@ function minutesBetween(start?: string, end?: string): number | null {
   return (endTime - startTime) / 60000;
 }
 
+function taskRuntimeMinutes(task: TaskMetadata): number | null {
+  return minutesBetween(task.started_at, task.completed_at);
+}
+
+function taskModel(task: TaskMetadata): string {
+  return task.model || "unknown";
+}
+
+function taskExecutor(task: TaskMetadata): string {
+  return task.executor || "unknown";
+}
+
 function average(values: number[]): number | null {
   if (values.length === 0) {
     return null;
@@ -209,7 +253,7 @@ function summarizeWindow(label: string, days: number | null, tasks: TaskMetadata
   const waiting = tasks.filter((task) => task.status === "waiting").length;
   const running = tasks.filter((task) => task.status === "running").length;
   const runtimeMinutes = tasks
-    .map((task) => minutesBetween(task.started_at, task.completed_at))
+    .map(taskRuntimeMinutes)
     .filter((value): value is number => value !== null);
   const queueMinutes = tasks
     .map((task) => minutesBetween(task.created_at, task.started_at))
@@ -247,7 +291,7 @@ function summarizeRepos(tasks: TaskMetadata[]): RepoStats[] {
       const failed = repoTasks.filter((task) => task.status === "failed").length;
       const timedOut = repoTasks.filter((task) => task.status === "timed_out").length;
       const runtimeMinutes = repoTasks
-        .map((task) => minutesBetween(task.started_at, task.completed_at))
+        .map(taskRuntimeMinutes)
         .filter((value): value is number => value !== null);
 
       return {
@@ -263,6 +307,101 @@ function summarizeRepos(tasks: TaskMetadata[]): RepoStats[] {
       };
     })
     .sort((left, right) => right.total - left.total || left.repo.localeCompare(right.repo));
+}
+
+function debitAmountByTask(
+  transactions: Array<CreditTransaction & { repo_slug: string }>
+): Map<string, number> {
+  const debits = new Map<string, number>();
+  for (const transaction of transactions) {
+    if (transaction.type !== "debit" || !transaction.task_id) {
+      continue;
+    }
+    debits.set(
+      transaction.task_id,
+      (debits.get(transaction.task_id) ?? 0) + transaction.amount
+    );
+  }
+  return debits;
+}
+
+function modelByTask(
+  transactions: Array<CreditTransaction & { repo_slug: string }>
+): Map<string, string> {
+  const models = new Map<string, string>();
+  for (const transaction of transactions) {
+    if (transaction.task_id && transaction.model && !models.has(transaction.task_id)) {
+      models.set(transaction.task_id, transaction.model);
+    }
+  }
+  return models;
+}
+
+function enrichTasksFromTransactions(
+  tasks: TaskMetadata[],
+  transactions: Array<CreditTransaction & { repo_slug: string }>
+): TaskMetadata[] {
+  const models = modelByTask(transactions);
+  return tasks.map((task) => ({
+    ...task,
+    model: task.model || models.get(task.task_id) || null,
+  }));
+}
+
+function summarizeBenchmarkGroup(
+  name: string,
+  tasks: TaskMetadata[],
+  debits: Map<string, number>
+): BenchmarkGroup {
+  const succeeded = tasks.filter((task) => task.status === "succeeded").length;
+  const failed = tasks.filter((task) => task.status === "failed").length;
+  const timedOut = tasks.filter((task) => task.status === "timed_out").length;
+  const waiting = tasks.filter((task) => task.status === "waiting").length;
+  const running = tasks.filter((task) => task.status === "running").length;
+  const runtimeMinutes = tasks
+    .map(taskRuntimeMinutes)
+    .filter((value): value is number => value !== null);
+  const creditsSpent = round(
+    tasks.reduce((sum, task) => sum + (debits.get(task.task_id) ?? 0), 0),
+    2
+  ) ?? 0;
+  const completed = tasks.filter((task) => COMPLETED_STATUSES.has(task.status)).length;
+
+  return {
+    name,
+    total: tasks.length,
+    completed,
+    succeeded,
+    failed,
+    timedOut,
+    waiting,
+    running,
+    successRate: successRate(succeeded, failed, timedOut),
+    averageRuntimeMinutes: round(average(runtimeMinutes)),
+    p95RuntimeMinutes: round(percentile(runtimeMinutes, 95)),
+    creditsSpent,
+    averageCreditsPerCompleted: completed > 0 ? round(creditsSpent / completed, 2) : null,
+  };
+}
+
+function summarizeBenchmarksBy(
+  tasks: TaskMetadata[],
+  transactions: Array<CreditTransaction & { repo_slug: string }>,
+  selector: (task: TaskMetadata) => string
+): BenchmarkGroup[] {
+  const debits = debitAmountByTask(transactions);
+  const groups = new Map<string, TaskMetadata[]>();
+
+  for (const task of tasks) {
+    const name = selector(task);
+    const groupTasks = groups.get(name) ?? [];
+    groupTasks.push(task);
+    groups.set(name, groupTasks);
+  }
+
+  return Array.from(groups.entries())
+    .map(([name, groupTasks]) => summarizeBenchmarkGroup(name, groupTasks, debits))
+    .sort((left, right) => right.total - left.total || left.name.localeCompare(right.name));
 }
 
 function summarizeDaily(tasks: TaskMetadata[], days: number, now: Date): DailyPoint[] {
@@ -356,15 +495,50 @@ async function getJson<T>(bucket: string, key: string): Promise<T | null> {
   }
 }
 
+async function getOptionalJson<T>(bucket: string, key: string): Promise<T | null> {
+  try {
+    const result = await s3.send(new GetObjectCommand({ Bucket: bucket, Key: key }));
+    if (!result.Body) {
+      return null;
+    }
+    return JSON.parse(await result.Body.transformToString()) as T;
+  } catch (error) {
+    const name = typeof error === "object" && error !== null && "name" in error
+      ? String((error as { name?: unknown }).name)
+      : "";
+    if (name === "NoSuchKey" || name === "NotFound") {
+      return null;
+    }
+    console.warn(`Skipping optional S3 object ${key}: ${errorMessage(error)}`);
+    return null;
+  }
+}
+
 async function collectTasks(bucket: string): Promise<TaskMetadata[]> {
   const keys = await listKeys(bucket, "tasks/", "/metadata.json");
   const tasks: TaskMetadata[] = [];
 
   for (const key of keys) {
     const task = await getJson<TaskMetadata>(bucket, key);
-    if (task) {
-      tasks.push(task);
+    if (!task) {
+      continue;
     }
+
+    const artifactPrefix = task.artifact_prefix ?? key.replace(/\/metadata\.json$/, "");
+    const [payload, manifest] = await Promise.all([
+      getOptionalJson<TaskPayload>(bucket, `${artifactPrefix}/payload.json`),
+      getOptionalJson<TaskManifest>(bucket, `${artifactPrefix}/manifest.json`),
+    ]);
+
+    tasks.push({
+      ...task,
+      artifact_prefix: artifactPrefix,
+      task_mode: task.task_mode || payload?.task_mode || "unknown",
+      model: task.model || payload?.model || null,
+      executor: task.executor || (
+        manifest?.executor_result_key || manifest?.executor_trace_key ? "custom" : null
+      ),
+    });
   }
 
   return tasks.sort((left, right) => {
@@ -450,7 +624,8 @@ function buildReport(
   source: "s3" | "sample"
 ): ReportData {
   const now = new Date();
-  const windowTasks = filterTasksByDays(tasks, days, now);
+  const enrichedTasks = enrichTasksFromTransactions(tasks, transactions);
+  const windowTasks = filterTasksByDays(enrichedTasks, days, now);
 
   return {
     generatedAt: now.toISOString(),
@@ -458,23 +633,28 @@ function buildReport(
     windowDays: days,
     source,
     windows: [
-      summarizeWindow("24 hours", 1, filterTasksByDays(tasks, 1, now)),
-      summarizeWindow("7 days", 7, filterTasksByDays(tasks, 7, now)),
+      summarizeWindow("24 hours", 1, filterTasksByDays(enrichedTasks, 1, now)),
+      summarizeWindow("7 days", 7, filterTasksByDays(enrichedTasks, 7, now)),
       summarizeWindow(`${days} days`, days, windowTasks),
-      summarizeWindow("All time", null, tasks),
+      summarizeWindow("All time", null, enrichedTasks),
     ],
     repos: summarizeRepos(windowTasks),
     daily: summarizeDaily(windowTasks, Math.min(days, 60), now),
     failureCategories: summarizeCounts(windowTasks.filter((task) => task.status === "failed"), "failure_category"),
     modes: summarizeCounts(windowTasks, "task_mode").map((entry) => ({ mode: entry.category, count: entry.count })),
+    modelBenchmarks: summarizeBenchmarksBy(windowTasks, transactions, taskModel),
+    executorBenchmarks: summarizeBenchmarksBy(windowTasks, transactions, taskExecutor),
+    modeBenchmarks: summarizeBenchmarksBy(windowTasks, transactions, (task) => task.task_mode || "unknown"),
     credits: summarizeCredits(balances, transactions, days, now),
-    recentTasks: tasks.slice(0, 50),
+    recentTasks: enrichedTasks.slice(0, 50),
   };
 }
 
 function sampleTasks(now: Date): TaskMetadata[] {
   const repos = ["atimics/AutoForwarder", "cenetex/agent", "cenetex/ratibot"];
   const statuses: TaskStatus[] = ["succeeded", "succeeded", "succeeded", "failed", "waiting", "timed_out"];
+  const models = ["z-ai/glm-5.2", "z-ai/glm-5.2", "anthropic/claude-sonnet-4-6"];
+  const executors = ["custom", "custom", "codex"];
   const tasks: TaskMetadata[] = [];
 
   for (let index = 0; index < 36; index++) {
@@ -491,6 +671,8 @@ function sampleTasks(now: Date): TaskMetadata[] {
       created_at: created.toISOString(),
       started_at: started.toISOString(),
       completed_at: COMPLETED_STATUSES.has(status) ? completed.toISOString() : undefined,
+      model: models[index % models.length] ?? "z-ai/glm-5.2",
+      executor: executors[index % executors.length] ?? "custom",
       failure_category: status === "failed" ? (index % 2 === 0 ? "compilation_error" : "external_service") : undefined,
       pr_url: status === "succeeded" ? `https://github.com/${repos[index % repos.length]}/pull/${200 + index}` : undefined,
       issue_metadata: {
@@ -514,6 +696,8 @@ function sampleBalances(now: Date): CreditBalance[] {
 function sampleTransactions(now: Date): Array<CreditTransaction & { repo_slug: string }> {
   return [
     { repo_slug: "atimics/AutoForwarder", timestamp: now.toISOString(), type: "debit", amount: 12, reason: "sample task", task_id: "sample_task_01", model: "z-ai/glm-5.2" },
+    { repo_slug: "cenetex/agent", timestamp: now.toISOString(), type: "debit", amount: 12, reason: "sample task", task_id: "sample_task_02", model: "z-ai/glm-5.2" },
+    { repo_slug: "cenetex/ratibot", timestamp: now.toISOString(), type: "debit", amount: 12, reason: "sample task", task_id: "sample_task_03", model: "anthropic/claude-sonnet-4-6" },
     { repo_slug: "cenetex/agent", timestamp: now.toISOString(), type: "credit", amount: 50, reason: "sample top up", task_id: null },
   ];
 }
@@ -559,6 +743,30 @@ function renderBars(points: DailyPoint[]): string {
       <span>${escapeHtml(point.date.slice(5))}</span>
     </div>`;
   }).join("");
+}
+
+function renderBenchmarkRows(benchmarks: BenchmarkGroup[]): string {
+  return benchmarks.map((benchmark) => `<tr>
+    <td>${escapeHtml(benchmark.name)}</td>
+    <td>${benchmark.total}</td>
+    <td>${benchmark.completed}</td>
+    <td>${formatNumber(benchmark.successRate, "%")}</td>
+    <td class="good">${benchmark.succeeded}</td>
+    <td class="bad">${benchmark.failed}</td>
+    <td class="bad">${benchmark.timedOut}</td>
+    <td>${benchmark.running + benchmark.waiting}</td>
+    <td>${formatNumber(benchmark.averageRuntimeMinutes, "m")}</td>
+    <td>${formatNumber(benchmark.p95RuntimeMinutes, "m")}</td>
+    <td>${formatNumber(benchmark.creditsSpent)}</td>
+    <td>${formatNumber(benchmark.averageCreditsPerCompleted)}</td>
+  </tr>`).join("") || `<tr><td colspan="12" class="muted">No data in this window.</td></tr>`;
+}
+
+function renderBenchmarkTable(benchmarks: BenchmarkGroup[]): string {
+  return `<table>
+    <thead><tr><th>Dimension</th><th>Total</th><th>Completed</th><th>Success</th><th>Succeeded</th><th>Failed</th><th>Timed out</th><th>Open</th><th>Avg runtime</th><th>P95 runtime</th><th>Credits</th><th>Credits / completed</th></tr></thead>
+    <tbody>${renderBenchmarkRows(benchmarks)}</tbody>
+  </table>`;
 }
 
 function renderHtml(report: ReportData): string {
@@ -631,6 +839,11 @@ function renderHtml(report: ReportData): string {
       grid-template-columns: repeat(4, minmax(0, 1fr));
       gap: 12px;
       margin-bottom: 22px;
+    }
+    .two-col {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 14px;
     }
     .metric, section {
       background: var(--panel);
@@ -739,6 +952,7 @@ function renderHtml(report: ReportData): string {
     }
     @media (max-width: 860px) {
       .grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .two-col { grid-template-columns: 1fr; }
     }
     @media (max-width: 560px) {
       .grid { grid-template-columns: 1fr; }
@@ -788,6 +1002,22 @@ function renderHtml(report: ReportData): string {
           </tr>`).join("")}
         </tbody>
       </table>
+    </section>
+
+    <section>
+      <h2>Model and Executor Benchmarks</h2>
+      <div class="two-col">
+        <div>
+          <h3>Models</h3>
+          ${renderBenchmarkTable(report.modelBenchmarks)}
+        </div>
+        <div>
+          <h3>Executors</h3>
+          ${renderBenchmarkTable(report.executorBenchmarks)}
+        </div>
+      </div>
+      <h3>Task modes</h3>
+      ${renderBenchmarkTable(report.modeBenchmarks)}
     </section>
 
     <section>
@@ -853,17 +1083,19 @@ function renderHtml(report: ReportData): string {
     <section>
       <h2>Recent Tasks</h2>
       <table>
-        <thead><tr><th>Task</th><th>Repository</th><th>Issue</th><th>Status</th><th>Runtime</th><th>Title</th><th>PR</th></tr></thead>
+        <thead><tr><th>Task</th><th>Repository</th><th>Issue</th><th>Status</th><th>Model</th><th>Executor</th><th>Runtime</th><th>Title</th><th>PR</th></tr></thead>
         <tbody>
           ${report.recentTasks.map((task) => `<tr>
             <td><code>${escapeHtml(task.task_id)}</code></td>
             <td>${escapeHtml(task.repo_slug)}</td>
             <td>#${escapeHtml(task.issue_number)}</td>
             <td><span class="pill ${statusClass(task.status)}">${escapeHtml(task.status)}</span></td>
-            <td>${formatNumber(round(minutesBetween(task.started_at, task.completed_at)), "m")}</td>
+            <td>${escapeHtml(taskModel(task))}</td>
+            <td>${escapeHtml(taskExecutor(task))}</td>
+            <td>${formatNumber(round(taskRuntimeMinutes(task)), "m")}</td>
             <td>${escapeHtml(task.issue_metadata?.title ?? "")}</td>
             <td>${task.pr_url ? `<a href="${escapeHtml(task.pr_url)}">PR</a>` : ""}</td>
-          </tr>`).join("") || `<tr><td colspan="7" class="muted">No task metadata found.</td></tr>`}
+          </tr>`).join("") || `<tr><td colspan="9" class="muted">No task metadata found.</td></tr>`}
         </tbody>
       </table>
     </section>
@@ -882,17 +1114,19 @@ function csvValue(value: unknown): string {
 
 function renderCsv(tasks: TaskMetadata[]): string {
   const rows = [
-    ["task_id", "repo_slug", "issue_number", "task_mode", "status", "created_at", "started_at", "completed_at", "runtime_minutes", "pr_url", "title"],
+    ["task_id", "repo_slug", "issue_number", "task_mode", "status", "model", "executor", "created_at", "started_at", "completed_at", "runtime_minutes", "pr_url", "title"],
     ...tasks.map((task) => [
       task.task_id,
       task.repo_slug,
       task.issue_number,
       task.task_mode,
       task.status,
+      taskModel(task),
+      taskExecutor(task),
       task.created_at,
       task.started_at ?? "",
       task.completed_at ?? "",
-      round(minutesBetween(task.started_at, task.completed_at)) ?? "",
+      round(taskRuntimeMinutes(task)) ?? "",
       task.pr_url ?? "",
       task.issue_metadata?.title ?? "",
     ]),

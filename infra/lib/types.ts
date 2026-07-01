@@ -202,6 +202,10 @@ export interface TaskMetadata {
   issue_metadata: IssueMetadata;
   /** Number of times this task has been retried due to transient failures */
   retry_count?: number;
+  /** Model used for this task */
+  model?: string;
+  /** Executor used inside the agent container */
+  executor?: "custom" | "codex" | string;
   /** History of retry attempts for this task */
   retry_attempts?: Array<{
     timestamp: string;
@@ -414,6 +418,7 @@ export function createInitialTaskMetadata(
     task_arn: taskArn,
     artifact_prefix: artifactPrefix,
     created_at: taskPayload.created_at,
+    model: taskPayload.model,
     issue_metadata: taskPayload.issue_metadata,
   };
 }

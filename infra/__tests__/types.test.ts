@@ -78,6 +78,7 @@ describe('types utilities', () => {
           resolved_commit_sha: 'abc123',
           task_mode: 'issue',
           created_at: '2026-05-14T00:00:00Z',
+          model: 'z-ai/glm-5.2',
           issue_metadata: {
             number: 42,
             title: 'Fix issue',
@@ -100,6 +101,7 @@ describe('types utilities', () => {
         task_arn: 'arn:aws:ecs:task/test',
         artifact_prefix: 'tasks/octocat/repo/task_abc123_def456',
         created_at: '2026-05-14T00:00:00Z',
+        model: 'z-ai/glm-5.2',
       });
     });
   });
