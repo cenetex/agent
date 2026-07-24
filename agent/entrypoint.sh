@@ -632,7 +632,9 @@ gh repo clone "${REPO}" repo -- --depth=50
 cd repo
 
 # Fix git remote URL for push authentication
-git remote set-url origin "https://x-access-token:${GITHUB_TOKEN}@github.com/${REPO}.git"
+# Keep credentials out of .git/config. setup_github_auth configured gh as the
+# credential helper for authenticated fetches and pushes.
+git remote set-url origin "https://github.com/${REPO}.git"
 
 # Install git hooks (pre-commit, pre-push)
 echo "Setting up git hooks..."
@@ -1419,7 +1421,7 @@ fi
 if [ "${IS_PR}" != "true" ]; then
   echo "[preflight] Checking git push access..."
   if ! git ls-remote --exit-code origin HEAD >/dev/null 2>&1; then
-    echo "[preflight] FAIL: Cannot push to ${REPO} — check x-access-token URL" >&2
+    echo "[preflight] FAIL: Cannot push to ${REPO} — check GitHub App permissions and credential helper" >&2
     PREFLIGHT_FAILURES=$((PREFLIGHT_FAILURES + 1))
   fi
 fi
@@ -1486,7 +1488,7 @@ while [ -z "${RUN_STATUS}" ] && [ "${ATTEMPT}" -lt "${MAX_ATTEMPTS}" ]; do
 
   if [ "${AGENT_EXECUTOR}" = "codex" ]; then
     timeout ${TIMEOUT_SECONDS} codex exec --ephemeral --skip-git-repo-check \
-      --sandbox danger-full-access \
+      --sandbox workspace-write \
       --model "${MODEL}" \
       "${MISSION}" 2>&1 | tee "${AGENT_LOG}" || EXECUTOR_EXIT_CODE=$?
   else

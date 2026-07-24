@@ -1,0 +1,88 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["decision", "summary", "findings"],
+  "properties": {
+    "decision": {
+      "type": "string",
+      "enum": ["approved", "changes_requested"]
+    },
+    "summary": {
+      "type": "string"
+    },
+    "findings": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "forbidden_files",
+        "compilation",
+        "security",
+        "issue_alignment",
+        "logic",
+        "complexity",
+        "cost_impact",
+        "scope"
+      ],
+      "properties": {
+        "forbidden_files": {
+          "$ref": "#/$defs/statusDetails"
+        },
+        "compilation": {
+          "$ref": "#/$defs/statusDetails"
+        },
+        "security": {
+          "$ref": "#/$defs/statusIssues"
+        },
+        "issue_alignment": {
+          "$ref": "#/$defs/statusDetails"
+        },
+        "logic": {
+          "$ref": "#/$defs/statusIssues"
+        },
+        "complexity": {
+          "$ref": "#/$defs/statusDetails"
+        },
+        "cost_impact": {
+          "$ref": "#/$defs/statusDetails"
+        },
+        "scope": {
+          "$ref": "#/$defs/statusDetails"
+        }
+      }
+    }
+  },
+  "$defs": {
+    "statusDetails": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["status", "details"],
+      "properties": {
+        "status": {
+          "type": "string",
+          "enum": ["pass", "fail", "warn", "unknown"]
+        },
+        "details": {
+          "type": "string"
+        }
+      }
+    },
+    "statusIssues": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["status", "issues"],
+      "properties": {
+        "status": {
+          "type": "string",
+          "enum": ["pass", "fail", "warn", "unknown"]
+        },
+        "issues": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      }
+    }
+  }
+}
