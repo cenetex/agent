@@ -22,6 +22,14 @@ setup_github_auth() {
   fi
   echo "Repository access confirmed for ${repo}"
 
+  # Let Git ask gh for credentials at request time. Never persist the
+  # installation token in a remote URL where it can leak through logs,
+  # diagnostics, or repository configuration.
+  if ! gh auth setup-git --hostname github.com --force >/dev/null 2>&1; then
+    echo "ERROR: Could not configure GitHub CLI as the git credential helper"
+    return 1
+  fi
+
   # Configure git identity for commits
   git config --global user.name "github-agent[bot]"
   git config --global user.email "github-agent[bot]@users.noreply.github.com"
@@ -31,13 +39,29 @@ setup_github_auth() {
 }
 
 configure_codex_openrouter() {
+  local security_profile="${1:-task}"
+  local sandbox_mode="workspace-write"
+  local shell_environment_policy='inherit = "none"
+set = { PATH = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin", HOME = "/home/agent", USER = "agent", LOGNAME = "agent", LANG = "C.UTF-8", CI = "true", TERM = "dumb" }'
+
+  if [ "${security_profile}" = "review" ]; then
+    sandbox_mode="read-only"
+    # PR contents are attacker-controlled. Give model-spawned commands a fixed,
+    # non-secret environment rather than inheriting task credentials.
+    shell_environment_policy='inherit = "none"
+set = { PATH = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin", HOME = "/home/agent", USER = "agent", LOGNAME = "agent", LANG = "C.UTF-8", CI = "true", TERM = "dumb" }'
+  elif [ "${security_profile}" != "task" ]; then
+    echo "ERROR: Unknown Codex security profile: ${security_profile}" >&2
+    return 1
+  fi
+
   export CODEX_HOME="${CODEX_HOME:-/home/agent/.codex}"
   mkdir -p "${CODEX_HOME}"
 
-  cat > "${CODEX_HOME}/config.toml" <<'EOF'
+  cat > "${CODEX_HOME}/config.toml" <<EOF
 model_provider = "openrouter"
 approval_policy = "never"
-sandbox_mode = "danger-full-access"
+sandbox_mode = "${sandbox_mode}"
 model_context_window = 1048576
 model_reasoning_effort = "none"
 model_reasoning_summary = "none"
@@ -52,9 +76,7 @@ stream_max_retries = 10
 stream_idle_timeout_ms = 300000
 
 [shell_environment_policy]
-inherit = "all"
-ignore_default_excludes = true
-exclude = ["OPENROUTER_API_KEY"]
+${shell_environment_policy}
 EOF
 }
 

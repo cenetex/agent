@@ -11,6 +11,7 @@ import {
   createEscalationQueuePath,
   getModelCost,
   createGitHubAppJWT,
+  isCodingAgentLogin,
 } from '../lib/types';
 
 describe('types utilities', () => {
@@ -168,6 +169,20 @@ l0FIH8sYFVqyI8/0y3WK+4hh1/8C9c9MFnWLYvCnVJPnSuNzxWEh
       expect(parts[0]).toBeTruthy(); // header
       expect(parts[1]).toBeTruthy(); // payload
       expect(parts[2]).toBeTruthy(); // signature
+    });
+  });
+
+  describe('isCodingAgentLogin', () => {
+    it('accepts only exact configured bot identities', () => {
+      expect(isCodingAgentLogin('cenetex[bot]')).toBe(true);
+      expect(isCodingAgentLogin('CENETEX-CODING-AGENT[BOT]')).toBe(true);
+      expect(isCodingAgentLogin('github-agent[bot]')).toBe(true);
+    });
+
+    it('rejects attacker-controlled substring lookalikes', () => {
+      expect(isCodingAgentLogin('evil-cenetex-contributor')).toBe(false);
+      expect(isCodingAgentLogin('github-agent-helper')).toBe(false);
+      expect(isCodingAgentLogin('cenetex[bot]-backup')).toBe(false);
     });
   });
 });

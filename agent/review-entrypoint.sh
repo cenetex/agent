@@ -268,79 +268,11 @@ extract_linked_issues() {
 }
 
 setup_review_dependencies() {
-  local requirements_path="requirements.txt"
-  local venv_path="/tmp/review-venv"
-  local install_enabled="${REVIEW_INSTALL_DEPENDENCIES:-false}"
-  local pip_upgrade_timeout="${REVIEW_PIP_UPGRADE_TIMEOUT_SECONDS:-60}"
-  local pip_install_timeout="${REVIEW_PIP_INSTALL_TIMEOUT_SECONDS:-180}"
-  local pip_install_args=(--disable-pip-version-check)
-
-  if [ ! -f "${requirements_path}" ]; then
-    echo "No Python requirements.txt found; skipping Python dependency setup." | tee -a "${REVIEW_LOG}"
-    return 0
+  # Never execute package-manager code selected by an untrusted PR before the
+  # sandbox starts. Reviews use the fixed toolchain baked into the image.
+  if [ -f "requirements.txt" ]; then
+    echo "Python requirements.txt found; dependency installation is disabled for untrusted reviews." | tee -a "${REVIEW_LOG}"
   fi
-
-  case "${install_enabled}" in
-    1|true|TRUE|yes|YES|on|ON)
-      ;;
-    *)
-      echo "Python requirements.txt found, but automatic dependency setup is disabled. Set REVIEW_INSTALL_DEPENDENCIES=true to enable it." | tee -a "${REVIEW_LOG}"
-      return 0
-      ;;
-  esac
-
-  if ! [[ "${pip_upgrade_timeout}" =~ ^[0-9]+$ ]] || [ "${pip_upgrade_timeout}" -le 0 ]; then
-    pip_upgrade_timeout=60
-  fi
-  if ! [[ "${pip_install_timeout}" =~ ^[0-9]+$ ]] || [ "${pip_install_timeout}" -le 0 ]; then
-    pip_install_timeout=180
-  fi
-
-  case "${REVIEW_PIP_REQUIRE_BINARY:-true}" in
-    0|false|FALSE|no|NO|off|OFF)
-      ;;
-    *)
-      pip_install_args+=(--only-binary=:all:)
-      ;;
-  esac
-
-  echo "Setting up Python review dependencies from ${requirements_path}..." | tee -a "${REVIEW_LOG}"
-  if ! python3 -m venv "${venv_path}" >>"${REVIEW_LOG}" 2>&1; then
-    echo "WARNING: Could not create review virtualenv; continuing without installed repo dependencies." | tee -a "${REVIEW_LOG}"
-    return 0
-  fi
-
-  # shellcheck disable=SC1091
-  . "${venv_path}/bin/activate"
-
-  if env \
-    -u GITHUB_TOKEN \
-    -u OPENROUTER_API_KEY \
-    -u REVIEW_PAYLOAD \
-    -u REVIEW_PAYLOAD_S3_KEY \
-    -u ARTIFACTS_BUCKET \
-    -u ARTIFACT_PREFIX \
-    -u AWS_ACCESS_KEY_ID \
-    -u AWS_SECRET_ACCESS_KEY \
-    -u AWS_SESSION_TOKEN \
-    timeout "${pip_upgrade_timeout}" python -m pip install --disable-pip-version-check --upgrade pip setuptools wheel >>"${REVIEW_LOG}" 2>&1 \
-    && env \
-      -u GITHUB_TOKEN \
-      -u OPENROUTER_API_KEY \
-      -u REVIEW_PAYLOAD \
-      -u REVIEW_PAYLOAD_S3_KEY \
-      -u ARTIFACTS_BUCKET \
-      -u ARTIFACT_PREFIX \
-      -u AWS_ACCESS_KEY_ID \
-      -u AWS_SECRET_ACCESS_KEY \
-      -u AWS_SESSION_TOKEN \
-      timeout "${pip_install_timeout}" python -m pip install "${pip_install_args[@]}" -r "${requirements_path}" >>"${REVIEW_LOG}" 2>&1; then
-    echo "Python review dependencies installed and activated." | tee -a "${REVIEW_LOG}"
-    return 0
-  fi
-
-  echo "WARNING: Could not install all Python review dependencies; continuing with base image environment." | tee -a "${REVIEW_LOG}"
-  deactivate >/dev/null 2>&1 || true
 }
 
 on_exit() {
@@ -399,8 +331,9 @@ echo "Cloning ${REPO}..."
 gh repo clone "${REPO}" repo -- --depth=50
 cd repo
 
-# Fix git remote URL for authenticated access
-git remote set-url origin "https://x-access-token:${GITHUB_TOKEN}@github.com/${REPO}.git"
+# Keep credentials out of .git/config. setup_github_auth configured gh as the
+# credential helper for authenticated fetches.
+git remote set-url origin "https://github.com/${REPO}.git"
 
 # Ensure the exact base and PR head commits are present after the shallow clone.
 # GitHub exposes PR heads through refs/pull/<number>/head even when the branch is
@@ -492,13 +425,11 @@ while IFS= read -r file; do
     fi
   done
 
-  # Also check for large files (> 500KB)
-  # Use structured PR metadata; never interpolate file paths into regexes.
-  file_additions=$(echo "$PR_JSON" | jq -r --arg path "$file" '.files[] | select(.path == $path) | (.additions // 0)' | head -n 1)
-  file_additions=${file_additions:-0}
-  # If more than ~6000 additions (very rough estimate for 500KB), flag it
-  if [ "$file_additions" -gt 6000 ]; then
-    FORBIDDEN_FILES+=("$file (large file: ~$((file_additions / 10))KB)")
+  # Check the exact Git blob size. Addition counts are not byte sizes and report
+  # zero for many binaries, so using them as a size proxy is fail-open.
+  file_size=$(git cat-file -s "${HEAD_SHA}:${file}" 2>/dev/null || echo 0)
+  if [ "$file_size" -gt 512000 ]; then
+    FORBIDDEN_FILES+=("$file (large file: ${file_size} bytes)")
   fi
 done < <(echo "$PR_JSON" | jq -r '.files[].path' 2>/dev/null || true)
 
@@ -565,6 +496,7 @@ CURRENT_STAGE="run review analysis"
 echo "Starting automated review analysis..."
 
 REVIEW_FINDINGS_FILE="/tmp/review-findings.json"
+REVIEW_FINDINGS_SCHEMA="/lib/review-findings.schema.json"
 
 REVIEW_MISSION="You are an automated code review agent for PR #${PR_NUMBER} in ${REPO}.
 
@@ -610,7 +542,7 @@ AUTO-REJECT PRs containing the following files:
 - **Large files**: Any single file > 500KB
 - **Protected paths**: CI/CD workflows, infrastructure code, deployment scripts
 
-If ANY forbidden file is found, set decision to "changes_requested" with a summary explaining the file violations.
+If ANY forbidden file is found, set decision to \"changes_requested\" with a summary explaining the file violations.
 
 ## Review Criteria
 You must evaluate this PR against the following criteria and provide structured findings:
@@ -627,19 +559,17 @@ You must evaluate this PR against the following criteria and provide structured 
 10. **Scope Warning**: Flag if PR touches >10 files or adds >1000 lines (warn but don't reject).
 
 ## Your Tasks
-1. **Check for forbidden files**: Review the list of forbidden files. If ANY are present, set decision to "changes_requested"
+1. **Check for forbidden files**: Review the list of forbidden files. If ANY are present, set decision to \"changes_requested\"
 2. **Examine the codebase**: Use your tools to read relevant files and understand the changes
 3. **Analyze the diff**: Review the actual changes being made
 4. **Check acceptance criteria**: If acceptance criteria were listed, review the diff to verify each criterion is addressed
 5. **Check scope**: Consider if the PR is too large (>10 files or >1000 lines added). Warn in findings if so, but don't reject based on scope alone
 6. **Check for issues**: Look for the problems listed in the review criteria
 7. **Make a decision**: Determine if this should be APPROVED or if CHANGES ARE REQUESTED
-8. **Document findings**: Write findings to a structured JSON file
+8. **Document findings**: Return only the structured JSON object as your final response
 
 ## Output Format
-After completing your review, write your findings to a JSON file at: /tmp/review-findings.json
-
-The file must have exactly this structure:
+After completing your review, return exactly this JSON structure as your final response:
 \`\`\`json
 {
   \"decision\": \"approved\" or \"changes_requested\",
@@ -697,7 +627,7 @@ Begin your review now."
 
 # --- Run Codex with OpenRouter API ---
 echo "Running review analysis with Codex on GLM 5.2..."
-configure_codex_openrouter
+configure_codex_openrouter review
 start_virtual_display
 
 # Change to the PR head worktree for analysis
@@ -707,10 +637,33 @@ setup_review_dependencies
 # Run Codex with the review mission
 # Add 30-minute (1800 second) hard timeout to prevent stuck reviews from burning credits
 CODEX_EXIT_CODE=0
-timeout 1800 codex exec --ephemeral --skip-git-repo-check \
-  --sandbox danger-full-access \
+rm -f "${REVIEW_FINDINGS_FILE}"
+env -i \
+  PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" \
+  HOME="/home/agent" \
+  USER="agent" \
+  LOGNAME="agent" \
+  LANG="C.UTF-8" \
+  CI="true" \
+  TERM="dumb" \
+  DISPLAY="${DISPLAY:-}" \
+  CODEX_HOME="${CODEX_HOME}" \
+  CODEX_DISABLE_NONESSENTIAL_TRAFFIC="1" \
+  OPENROUTER_API_KEY="${OPENROUTER_API_KEY}" \
+  timeout 1800 codex exec --ephemeral --skip-git-repo-check \
+  --strict-config \
+  --ignore-rules \
+  --sandbox read-only \
+  --output-schema "${REVIEW_FINDINGS_SCHEMA}" \
+  --output-last-message "${REVIEW_FINDINGS_FILE}" \
   --model "z-ai/glm-5.2" \
   "${REVIEW_MISSION}" 2>&1 | tee "${REVIEW_LOG}" || CODEX_EXIT_CODE=$?
+
+if [ "${CODEX_EXIT_CODE}" -ne 0 ]; then
+  echo "ERROR: Review analysis exited with code ${CODEX_EXIT_CODE}" | tee -a "${REVIEW_LOG}"
+  REVIEW_STATUS="error"
+  exit "${CODEX_EXIT_CODE}"
+fi
 
 if detect_provider_credit_exhaustion "${REVIEW_LOG}"; then
   echo "Detected OpenRouter provider credit exhaustion; stopping review." | tee -a "${REVIEW_LOG}"

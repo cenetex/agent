@@ -18,10 +18,11 @@ import {
   getInstallationToken,
   createArtifactPrefix,
   PROTECTED_PATHS,
-  CODING_AGENT_BOT_LOGINS,
+  isCodingAgentLogin,
   type ReviewEnvironment,
   type GitHubAppConfig,
 } from "./types";
+import { collectGitHubPages } from "./github-pagination";
 import {
   createRunTaskInput,
   parseTaskAssignPublicIp,
@@ -284,9 +285,7 @@ async function discoverReviewablePRs(appConfig: GitHubAppConfig): Promise<Review
 
       // Filter PRs created by the coding agent that don't have review labels yet
       const needsReview = prs.filter((pr) => {
-        const isFromBot = CODING_AGENT_BOT_LOGINS.some(
-          login => pr.user.login === login || pr.user.login.includes(login.replace("[bot]", ""))
-        );
+        const isFromBot = isCodingAgentLogin(pr.user.login);
 
         const hasReviewLabel = pr.labels.some((label) =>
           label.name.startsWith("review:")
@@ -423,14 +422,17 @@ async function checkProtectedPaths(
   token: string
 ): Promise<{ hasProtectedFiles: boolean; protectedFiles: string[] }> {
   try {
-    const response = await githubRequest(
-      `/repos/${repo}/pulls/${prNumber}/files`,
-      token,
-      { method: "GET" },
-      [200]
+    const files = await collectGitHubPages<any>(
+      async (page, perPage) => {
+        const response = await githubRequest(
+          `/repos/${repo}/pulls/${prNumber}/files?per_page=${perPage}&page=${page}`,
+          token,
+          { method: "GET" },
+          [200]
+        );
+        return await response.json() as any[];
+      }
     );
-
-    const files = await response.json() as any[];
     const protectedFiles: string[] = [];
 
     for (const file of files) {

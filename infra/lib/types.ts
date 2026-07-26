@@ -698,6 +698,18 @@ export const CODING_AGENT_BOT_LOGINS = [
 ];
 
 /**
+ * GitHub logins are case-insensitive, but trust decisions must otherwise use
+ * exact identity matching. Substring matching lets an attacker choose a login
+ * such as "evil-cenetex-contributor" and inherit bot privileges.
+ */
+export function isCodingAgentLogin(login: string): boolean {
+  const normalized = login.trim().toLowerCase();
+  return CODING_AGENT_BOT_LOGINS.some(
+    candidate => candidate.toLowerCase() === normalized
+  );
+}
+
+/**
  * Protected file patterns that should never be auto-merged.
  * Single source of truth — imported by both webhook-handler and review-handler.
  */
