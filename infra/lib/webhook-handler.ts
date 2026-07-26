@@ -38,7 +38,7 @@ import {
   createEscalationConfigPath,
   createEscalationQueuePath,
   PROTECTED_PATHS,
-  CODING_AGENT_BOT_LOGINS,
+  isCodingAgentLogin,
 } from "./types";
 import {
   DEFAULT_DISPATCH_CONFIG,
@@ -567,9 +567,7 @@ async function reviewPendingBotPRs(
     const prs = await response.json() as any[];
 
     const needsReview = prs.filter((pr: any) => {
-      const isBotPR = CODING_AGENT_BOT_LOGINS.some(
-        login => pr.user.login === login || pr.user.login.includes(login.replace("[bot]", ""))
-      );
+      const isBotPR = isCodingAgentLogin(pr.user.login);
       const hasReviewLabel = pr.labels.some((label: any) =>
         label.name.startsWith("review:")
       );
@@ -3504,7 +3502,7 @@ export async function handler(event: {
   } else if (ghEvent === "issues" && payload.action === "assigned") {
     // Check if the assignee is the agent bot
     const assignee = payload.assignee?.login;
-    if (!assignee || !CODING_AGENT_BOT_LOGINS.includes(assignee)) {
+    if (!assignee || !isCodingAgentLogin(assignee)) {
       console.log(`Ignoring assignment to non-agent user: ${assignee}`);
       return { statusCode: 200, body: "Ignored: not assigned to agent bot" };
     }
@@ -3742,9 +3740,7 @@ export async function handler(event: {
   } else if (ghEvent === "pull_request" && payload.action === "opened") {
     // Immediate review trigger for bot-created PRs
     const prAuthor = payload.pull_request.user.login;
-    const isBotPR = CODING_AGENT_BOT_LOGINS.some(
-      login => prAuthor === login || prAuthor.includes(login.replace("[bot]", ""))
-    );
+    const isBotPR = isCodingAgentLogin(prAuthor);
 
     if (!isBotPR) {
       console.log(`PR opened by ${prAuthor}, not a bot PR, skipping`);

@@ -36,6 +36,17 @@ describe('agent shell security contracts', () => {
     expect(common).not.toContain('set = { OPENROUTER_API_KEY');
   });
 
+  it('uses a non-inheriting shell environment for implementation workers', () => {
+    expect(common).toMatch(
+      /local security_profile="\$\{1:-task\}"[\s\S]*?shell_environment_policy='inherit = "none"/
+    );
+    expect(taskEntrypoint).toContain('env -i');
+    expect(taskEntrypoint).not.toContain('push anyway');
+    expect(taskEntrypoint).not.toContain(
+      "gh pr create --title '<title>'"
+    );
+  });
+
   it('never embeds an installation token in a git remote', () => {
     for (const source of [common, reviewEntrypoint, taskEntrypoint]) {
       expect(source).not.toContain('x-access-token:');
@@ -61,5 +72,12 @@ describe('agent shell security contracts', () => {
     expect(reviewEntrypoint).toContain(
       'dependency installation is disabled for untrusted reviews'
     );
+  });
+
+  it('checks exact git blob size rather than estimating bytes from line count', () => {
+    expect(reviewEntrypoint).toContain(
+      'git cat-file -s "${HEAD_SHA}:${file}"'
+    );
+    expect(reviewEntrypoint).not.toContain('file_additions / 10');
   });
 });

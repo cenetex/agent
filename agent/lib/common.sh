@@ -41,9 +41,8 @@ setup_github_auth() {
 configure_codex_openrouter() {
   local security_profile="${1:-task}"
   local sandbox_mode="workspace-write"
-  local shell_environment_policy='inherit = "all"
-ignore_default_excludes = true
-exclude = ["OPENROUTER_API_KEY"]'
+  local shell_environment_policy='inherit = "none"
+set = { PATH = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin", HOME = "/home/agent", USER = "agent", LOGNAME = "agent", LANG = "C.UTF-8", CI = "true", TERM = "dumb" }'
 
   if [ "${security_profile}" = "review" ]; then
     sandbox_mode="read-only"

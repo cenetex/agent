@@ -425,13 +425,11 @@ while IFS= read -r file; do
     fi
   done
 
-  # Also check for large files (> 500KB)
-  # Use structured PR metadata; never interpolate file paths into regexes.
-  file_additions=$(echo "$PR_JSON" | jq -r --arg path "$file" '.files[] | select(.path == $path) | (.additions // 0)' | head -n 1)
-  file_additions=${file_additions:-0}
-  # If more than ~6000 additions (very rough estimate for 500KB), flag it
-  if [ "$file_additions" -gt 6000 ]; then
-    FORBIDDEN_FILES+=("$file (large file: ~$((file_additions / 10))KB)")
+  # Check the exact Git blob size. Addition counts are not byte sizes and report
+  # zero for many binaries, so using them as a size proxy is fail-open.
+  file_size=$(git cat-file -s "${HEAD_SHA}:${file}" 2>/dev/null || echo 0)
+  if [ "$file_size" -gt 512000 ]; then
+    FORBIDDEN_FILES+=("$file (large file: ${file_size} bytes)")
   fi
 done < <(echo "$PR_JSON" | jq -r '.files[].path' 2>/dev/null || true)
 
