@@ -29,11 +29,30 @@ describe('agent shell security contracts', () => {
     );
     expect(codexEnvironment).not.toContain('GITHUB_TOKEN=');
     expect(codexEnvironment).not.toContain('GH_TOKEN=');
-    expect(codexEnvironment).not.toContain('AWS_');
+    expect(codexEnvironment).not.toContain('AWS_ACCESS_KEY_ID=');
+    expect(codexEnvironment).not.toContain('AWS_SECRET_ACCESS_KEY=');
+    expect(codexEnvironment).not.toContain('AWS_SESSION_TOKEN=');
+    expect(codexEnvironment).not.toContain('AWS_CONTAINER_CREDENTIALS_RELATIVE_URI=');
+    expect(codexEnvironment).not.toContain('AWS_CONTAINER_AUTHORIZATION_TOKEN=');
     expect(codexEnvironment).not.toContain('ARTIFACT');
+    expect(codexEnvironment).toContain('AWS_EC2_METADATA_DISABLED="true"');
+    expect(codexEnvironment).toContain('AWS_CONFIG_FILE="/dev/null"');
+    expect(codexEnvironment).toContain('AWS_SHARED_CREDENTIALS_FILE="/dev/null"');
+    expect(codexEnvironment).toContain('GIT_CONFIG_GLOBAL="/dev/null"');
+    expect(codexEnvironment).toContain('GIT_TERMINAL_PROMPT="0"');
     expect(common).not.toContain('set = { GITHUB_TOKEN');
     expect(common).not.toContain('set = { GH_TOKEN');
     expect(common).not.toContain('set = { OPENROUTER_API_KEY');
+    expect(common).not.toContain('AWS_ACCESS_KEY_ID');
+    expect(common).not.toContain('AWS_SECRET_ACCESS_KEY');
+    expect(common).not.toContain('AWS_SESSION_TOKEN');
+    expect(common).not.toContain('AWS_CONTAINER_CREDENTIALS_RELATIVE_URI');
+    expect(common).not.toContain('AWS_CONTAINER_AUTHORIZATION_TOKEN');
+    expect(common).toContain('AWS_EC2_METADATA_DISABLED = "true"');
+    expect(common).toContain('AWS_CONFIG_FILE = "/dev/null"');
+    expect(common).toContain('AWS_SHARED_CREDENTIALS_FILE = "/dev/null"');
+    expect(common).toContain('GIT_CONFIG_GLOBAL = "/dev/null"');
+    expect(common).toContain('GIT_TERMINAL_PROMPT = "0"');
   });
 
   it('never embeds an installation token in a git remote', () => {
