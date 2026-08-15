@@ -649,6 +649,11 @@ env -i \
   DISPLAY="${DISPLAY:-}" \
   CODEX_HOME="${CODEX_HOME}" \
   CODEX_DISABLE_NONESSENTIAL_TRAFFIC="1" \
+  AWS_EC2_METADATA_DISABLED="true" \
+  AWS_CONFIG_FILE="/dev/null" \
+  AWS_SHARED_CREDENTIALS_FILE="/dev/null" \
+  GIT_CONFIG_GLOBAL="/dev/null" \
+  GIT_TERMINAL_PROMPT="0" \
   OPENROUTER_API_KEY="${OPENROUTER_API_KEY}" \
   timeout 1800 codex exec --ephemeral --skip-git-repo-check \
   --strict-config \
