@@ -49,7 +49,7 @@ set = { PATH = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin", H
     # PR contents are attacker-controlled. Give model-spawned commands a fixed,
     # non-secret environment rather than inheriting task credentials.
     shell_environment_policy='inherit = "none"
-set = { PATH = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin", HOME = "/home/agent", USER = "agent", LOGNAME = "agent", LANG = "C.UTF-8", CI = "true", TERM = "dumb" }'
+set = { PATH = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin", HOME = "/home/agent", USER = "agent", LOGNAME = "agent", LANG = "C.UTF-8", CI = "true", TERM = "dumb", AWS_EC2_METADATA_DISABLED = "true", AWS_CONFIG_FILE = "/dev/null", AWS_SHARED_CREDENTIALS_FILE = "/dev/null", GIT_CONFIG_GLOBAL = "/dev/null", GIT_TERMINAL_PROMPT = "0" }'
   elif [ "${security_profile}" != "task" ]; then
     echo "ERROR: Unknown Codex security profile: ${security_profile}" >&2
     return 1
