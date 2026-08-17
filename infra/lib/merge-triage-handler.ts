@@ -17,7 +17,6 @@ import {
   parseRepoSlug,
   PROTECTED_PATHS,
 } from "./types";
-import { hasCurrentHumanApproval } from "./review-policy";
 import {
   ALL_MERGE_TRIAGE_LABELS,
   MERGE_TRIAGE_LABELS,
@@ -509,9 +508,8 @@ async function buildCandidate(
   );
   const pr = await prResponse.json() as GitHubPullRequest;
 
-  const [files, reviews, events, checksState] = await Promise.all([
+  const [files, events, checksState] = await Promise.all([
     githubPaginatedRequest<GitHubPullFile>(`/repos/${repo}/pulls/${prNumber}/files`, token),
-    githubPaginatedRequest<any>(`/repos/${repo}/pulls/${prNumber}/reviews`, token),
     githubPaginatedRequest<GitHubIssueEvent>(`/repos/${repo}/issues/${prNumber}/events`, token),
     getChecksState(repo, pr.head.sha, token),
   ]);
@@ -536,7 +534,6 @@ async function buildCandidate(
     additions,
     deletions,
     protectedFiles: findProtectedFiles(files),
-    hasCurrentHumanApproval: hasCurrentHumanApproval(reviews),
     reviewApprovedAt: latestReviewApprovedAt(events),
     requiredHoldMinutes: requiredHoldMinutesForPR(pr, files, mergeHoldConfig),
     createdAt: pr.created_at,
