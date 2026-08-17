@@ -12,11 +12,13 @@ import {
   parseAgentConfig,
 } from "./agent-config";
 import {
+  CODING_AGENT_BOT_LOGINS,
   GitHubAppConfig,
   getInstallationToken,
   parseRepoSlug,
   PROTECTED_PATHS,
 } from "./types";
+import { GitHubReviewSummary, hasCurrentBotApproval } from "./review-policy";
 import {
   ALL_MERGE_TRIAGE_LABELS,
   MERGE_TRIAGE_LABELS,
@@ -508,8 +510,9 @@ async function buildCandidate(
   );
   const pr = await prResponse.json() as GitHubPullRequest;
 
-  const [files, events, checksState] = await Promise.all([
+  const [files, reviews, events, checksState] = await Promise.all([
     githubPaginatedRequest<GitHubPullFile>(`/repos/${repo}/pulls/${prNumber}/files`, token),
+    githubPaginatedRequest<GitHubReviewSummary>(`/repos/${repo}/pulls/${prNumber}/reviews`, token),
     githubPaginatedRequest<GitHubIssueEvent>(`/repos/${repo}/issues/${prNumber}/events`, token),
     getChecksState(repo, pr.head.sha, token),
   ]);
@@ -534,6 +537,7 @@ async function buildCandidate(
     additions,
     deletions,
     protectedFiles: findProtectedFiles(files),
+    botApproved: hasCurrentBotApproval(reviews, CODING_AGENT_BOT_LOGINS, pr.head.sha),
     reviewApprovedAt: latestReviewApprovedAt(events),
     requiredHoldMinutes: requiredHoldMinutesForPR(pr, files, mergeHoldConfig),
     createdAt: pr.created_at,

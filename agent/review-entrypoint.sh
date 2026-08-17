@@ -243,6 +243,33 @@ apply_review_labels() {
   echo "Applied ${result_label} to ${REPO}#${PR_NUMBER}" | tee -a "${REVIEW_LOG}"
 }
 
+post_github_review() {
+  local decision="$1"
+
+  case "$decision" in
+    "approved")
+      if ! gh pr review "${PR_NUMBER}" -R "${REPO}" --approve \
+        --body "Automated review: approved by the coding agent." >>"${REVIEW_LOG}" 2>&1; then
+        echo "ERROR: Failed to submit approving review for ${REPO}#${PR_NUMBER}" | tee -a "${REVIEW_LOG}"
+        return 1
+      fi
+      ;;
+    "changes_requested")
+      if ! gh pr review "${PR_NUMBER}" -R "${REPO}" --request-changes \
+        --body "Automated review: changes requested." >>"${REVIEW_LOG}" 2>&1; then
+        echo "ERROR: Failed to submit changes-requested review for ${REPO}#${PR_NUMBER}" | tee -a "${REVIEW_LOG}"
+        return 1
+      fi
+      ;;
+    *)
+      echo "No GitHub review submitted for decision: ${decision}" | tee -a "${REVIEW_LOG}"
+      return 0
+      ;;
+  esac
+
+  echo "Submitted GitHub review (${decision}) for ${REPO}#${PR_NUMBER}" | tee -a "${REVIEW_LOG}"
+}
+
 extract_linked_issues() {
   local body="$1"
   local repo_regex=""
@@ -730,5 +757,9 @@ apply_review_labels "$REVIEW_DECISION"
 # Format findings for the review comment
 FORMATTED_FINDINGS=$(format_review_findings "$FINDINGS_DATA")
 post_review_comment "$REVIEW_DECISION" "$FORMATTED_FINDINGS"
+
+# Submit a real GitHub review (APPROVE / REQUEST_CHANGES) so merge triage can
+# verify the approving bot identity instead of trusting the review:approved label.
+post_github_review "$REVIEW_DECISION"
 
 REVIEW_STATUS="completed"
