@@ -38,7 +38,6 @@ export interface MergeTriageCandidate {
   additions: number;
   deletions: number;
   protectedFiles: string[];
-  hasCurrentHumanApproval: boolean;
   reviewApprovedAt?: string;
   requiredHoldMinutes?: number;
   createdAt?: string;
@@ -159,13 +158,6 @@ function initialStatusForCandidate(
     return {
       status: "waiting",
       reasons: ["Waiting for review:approved."],
-    };
-  }
-
-  if (!candidate.hasCurrentHumanApproval) {
-    return {
-      status: "waiting",
-      reasons: ["Waiting for a current human approving review."],
     };
   }
 

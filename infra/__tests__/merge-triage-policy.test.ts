@@ -25,7 +25,6 @@ function candidate(
     additions: 10,
     deletions: 2,
     protectedFiles: [],
-    hasCurrentHumanApproval: true,
     reviewApprovedAt: "2026-06-28T10:30:00Z",
     checksState: "success",
     ...overrides,
@@ -57,23 +56,25 @@ describe("merge triage policy", () => {
     expect(plan.queued[0].reasons[0]).toContain("Overlaps with PR #11");
   });
 
-  it("keeps approved PRs waiting until the hold period and human approval gates pass", () => {
+  it("keeps approved PRs waiting until the hold period passes", () => {
     const plan = planMergeTriage(
-      [
-        candidate(20, {
-          reviewApprovedAt: "2026-06-28T11:45:00Z",
-        }),
-        candidate(21, {
-          hasCurrentHumanApproval: false,
-        }),
-      ],
+      [candidate(20, { reviewApprovedAt: "2026-06-28T11:45:00Z" })],
       { now, defaultHoldMinutes: 60, maxReady: 1 }
     );
 
     expect(plan.ready).toHaveLength(0);
-    expect(plan.waiting.map((item) => item.candidate.number)).toEqual([20, 21]);
+    expect(plan.waiting.map((item) => item.candidate.number)).toEqual([20]);
     expect(plan.waiting[0].reasons[0]).toContain("Hold period still active");
-    expect(plan.waiting[1].reasons[0]).toContain("human approving review");
+  });
+
+  it("waits for the bot review approval label", () => {
+    const plan = planMergeTriage(
+      [candidate(21, { labels: [] })],
+      { now, defaultHoldMinutes: 60, maxReady: 1 }
+    );
+
+    expect(plan.waiting.map((item) => item.candidate.number)).toEqual([21]);
+    expect(plan.waiting[0].reasons[0]).toContain("Waiting for review:approved");
   });
 
   it("flags protected files and merge conflicts as non-mergeable work", () => {
