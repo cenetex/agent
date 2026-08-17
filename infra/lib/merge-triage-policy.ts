@@ -38,6 +38,7 @@ export interface MergeTriageCandidate {
   additions: number;
   deletions: number;
   protectedFiles: string[];
+  botApproved: boolean;
   reviewApprovedAt?: string;
   requiredHoldMinutes?: number;
   createdAt?: string;
@@ -86,10 +87,6 @@ export function isCodingAgentAuthor(
     const botStem = normalizedBot.replace("[bot]", "");
     return normalizedAuthor === normalizedBot || normalizedAuthor.includes(botStem);
   });
-}
-
-function hasLabel(candidate: MergeTriageCandidate, label: string): boolean {
-  return candidate.labels.some((candidateLabel) => candidateLabel === label);
 }
 
 function parseTimestamp(value: string | undefined): number | null {
@@ -154,10 +151,10 @@ function initialStatusForCandidate(
     };
   }
 
-  if (!hasLabel(candidate, "review:approved")) {
+  if (!candidate.botApproved) {
     return {
       status: "waiting",
-      reasons: ["Waiting for review:approved."],
+      reasons: ["Waiting for an approving bot review."],
     };
   }
 
