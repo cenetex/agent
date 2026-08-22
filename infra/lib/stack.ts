@@ -213,7 +213,7 @@ export class GitHubAgentStack extends cdk.Stack {
         logRetention: logs.RetentionDays.TWO_WEEKS,
       }),
       environment: {
-        AGENT_EXECUTOR: "custom",
+        AGENT_EXECUTOR: "codex",
         AGENT_EXECUTOR_PATH: "/usr/local/bin/agent-executor",
       },
     });
