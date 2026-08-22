@@ -23,6 +23,7 @@ const PARAM_ANTHROPIC_KEY = "/github-agent/ANTHROPIC_API_KEY";
 const PARAM_TWITTER_BEARER_TOKEN = "/github-agent/TWITTER_BEARER_TOKEN";
 const PARAM_TELEGRAM_BOT_TOKEN = "/github-agent/TELEGRAM_BOT_TOKEN";
 const PARAM_TELEGRAM_CHANNEL_ID = "/github-agent/TELEGRAM_CHANNEL_ID";
+const PARAM_STRIPE_WEBHOOK_SECRET = "/github-agent/STRIPE_WEBHOOK_SECRET";
 const MONITORED_REPOS = [
   "cenetex/aws-swarm",
   "cenetex/kyro",
@@ -47,6 +48,7 @@ export class GitHubAgentStack extends cdk.Stack {
       PARAM_TWITTER_BEARER_TOKEN,
       PARAM_TELEGRAM_BOT_TOKEN,
       PARAM_TELEGRAM_CHANNEL_ID,
+      PARAM_STRIPE_WEBHOOK_SECRET,
     ].map(
       (name) =>
         `arn:aws:ssm:${this.region}:${this.account}:parameter${name}`
@@ -376,6 +378,44 @@ export class GitHubAgentStack extends cdk.Stack {
 
     // Grant S3 permissions for task metadata
     artifactsBucket.grantReadWrite(webhookHandler);
+
+    // -------------------------------------------------------
+    // Lambda — Stripe Webhook Handler
+    // Separate Lambda for Stripe webhook events to keep concerns
+    // separated (cleaner blast radius). Reuses the same S3 credit-ledger
+    // helpers via the shared credit-ledger module.
+    // See docs/architecture/adr-stripe-webhook-location.md
+    // -------------------------------------------------------
+    const stripeWebhookHandler = new NodejsFunction(this, "StripeWebhookHandler", {
+      entry: path.join(__dirname, "stripe-webhook-handler.ts"),
+      handler: "handler",
+      runtime: lambda.Runtime.NODEJS_20_X,
+      architecture: lambda.Architecture.ARM_64,
+      timeout: cdk.Duration.seconds(30),
+      memorySize: 256,
+      bundling: {
+        minify: true,
+        sourceMap: true,
+        target: "node20",
+        externalModules: [],
+      },
+      environment: {
+        ARTIFACTS_BUCKET: artifactsBucket.bucketName,
+        STRIPE_WEBHOOK_SECRET_PARAM: PARAM_STRIPE_WEBHOOK_SECRET,
+      },
+    });
+
+    stripeWebhookHandler.addToRolePolicy(
+      new iam.PolicyStatement({
+        actions: ["ssm:GetParameter"],
+        resources: [
+          `arn:aws:ssm:${this.region}:${this.account}:parameter${PARAM_STRIPE_WEBHOOK_SECRET}`,
+        ],
+      })
+    );
+
+    // Grant S3 permissions for credit ledger writes
+    artifactsBucket.grantReadWrite(stripeWebhookHandler);
 
     // -------------------------------------------------------
     // Lambda — Review Handler
@@ -861,6 +901,15 @@ export class GitHubAgentStack extends cdk.Stack {
       ),
     });
 
+    httpApi.addRoutes({
+      path: "/webhooks/stripe",
+      methods: [apigwv2.HttpMethod.POST],
+      integration: new apigwv2Integrations.HttpLambdaIntegration(
+        "StripeWebhookIntegration",
+        stripeWebhookHandler
+      ),
+    });
+
     // -------------------------------------------------------
     // Digest Publisher Lambda (posts to X/Twitter and Telegram)
     // -------------------------------------------------------
@@ -973,6 +1022,11 @@ export class GitHubAgentStack extends cdk.Stack {
     new cdk.CfnOutput(this, "WebhookUrl", {
       value: `${httpApi.apiEndpoint}/webhook`,
       description: "URL to configure as GitHub webhook endpoint",
+    });
+
+    new cdk.CfnOutput(this, "StripeWebhookUrl", {
+      value: `${httpApi.apiEndpoint}/webhooks/stripe`,
+      description: "URL to configure as the Stripe webhook endpoint (single source of truth for credit purchases)",
     });
 
     new cdk.CfnOutput(this, "EcrRepositoryUri", {
