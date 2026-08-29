@@ -31,6 +31,7 @@ import {
   assertLabelCreateSucceeded,
   type GitHubLabelDefinition,
 } from "./github-labels";
+import { DEFAULT_MONITORED_REPOS } from "./monitored-repos";
 
 const ecs = new ECSClient({});
 const ssm = new SSMClient({});
@@ -78,16 +79,7 @@ const REVIEW_LABEL_DEFINITIONS = [
 
 // Monitored repositories for automated review (comma-separated)
 const MONITORED_REPOS = (process.env.MONITORED_REPOS || "").split(",").filter(r => r.trim());
-const DEFAULT_REPOS = [
-  "cenetex/aws-swarm",
-  "cenetex/kyro",
-  "cenetex/raticross",
-  "cenetex/ratibot",
-  "cenetex/litigation",
-  "cenetex/agent",
-  "cenetex/governance",
-  "atimics/AutoForwarder",
-];
+const DEFAULT_REPOS = DEFAULT_MONITORED_REPOS;
 
 // PROTECTED_PATHS and CODING_AGENT_BOT_LOGINS imported from types.ts
 
