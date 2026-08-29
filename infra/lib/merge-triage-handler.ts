@@ -18,7 +18,12 @@ import {
   parseRepoSlug,
   PROTECTED_PATHS,
 } from "./types";
-import { GitHubReviewSummary, hasCurrentBotApproval } from "./review-policy";
+import {
+  GitHubReviewAttestationComment,
+  GitHubReviewSummary,
+  hasCurrentBotApproval,
+  hasCurrentBotAttestation,
+} from "./review-policy";
 import {
   ALL_MERGE_TRIAGE_LABELS,
   MERGE_TRIAGE_LABELS,
@@ -118,7 +123,7 @@ interface GitHubIssueEvent {
   };
 }
 
-interface GitHubIssueComment {
+interface GitHubIssueComment extends GitHubReviewAttestationComment {
   id: number;
   body?: string;
 }
@@ -502,10 +507,11 @@ async function buildCandidate(
   );
   const pr = await prResponse.json() as GitHubPullRequest;
 
-  const [files, reviews, events, checksState] = await Promise.all([
+  const [files, reviews, events, comments, checksState] = await Promise.all([
     githubPaginatedRequest<GitHubPullFile>(`/repos/${repo}/pulls/${prNumber}/files`, token),
     githubPaginatedRequest<GitHubReviewSummary>(`/repos/${repo}/pulls/${prNumber}/reviews`, token),
     githubPaginatedRequest<GitHubIssueEvent>(`/repos/${repo}/issues/${prNumber}/events`, token),
+    githubPaginatedRequest<GitHubIssueComment>(`/repos/${repo}/issues/${prNumber}/comments`, token),
     getChecksState(repo, pr.head.sha, token),
   ]);
 
@@ -529,7 +535,9 @@ async function buildCandidate(
     additions,
     deletions,
     protectedFiles: findProtectedFiles(files),
-    botApproved: hasCurrentBotApproval(reviews, CODING_AGENT_BOT_LOGINS, pr.head.sha),
+    botApproved:
+      hasCurrentBotApproval(reviews, CODING_AGENT_BOT_LOGINS, pr.head.sha) ||
+      hasCurrentBotAttestation(comments, CODING_AGENT_BOT_LOGINS, pr.head.sha),
     reviewApprovedAt: latestReviewApprovedAt(events),
     requiredHoldMinutes: requiredHoldMinutesForPR(pr, files, mergeHoldConfig),
     createdAt: pr.created_at,

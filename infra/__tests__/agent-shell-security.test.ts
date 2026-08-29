@@ -87,6 +87,15 @@ describe('agent shell security contracts', () => {
     );
   });
 
+  it('binds bot review attestations to the exact reviewed head', () => {
+    expect(reviewEntrypoint).toContain(
+      '<!-- cenetex-review-attestation:v1 head=${HEAD_SHA} decision=${decision} task=${TASK_ID} -->'
+    );
+    expect(reviewEntrypoint).toContain(
+      'using the bot attestation'
+    );
+  });
+
   it('uses the namespace-free Linux sandbox backend on Fargate', () => {
     expect(reviewEntrypoint).toContain(
       'timeout 1800 codex --enable use_legacy_landlock exec'
