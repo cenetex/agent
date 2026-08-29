@@ -13,6 +13,7 @@ import * as events from "aws-cdk-lib/aws-events";
 import * as targets from "aws-cdk-lib/aws-events-targets";
 import { Construct } from "constructs";
 import * as path from "path";
+import { DEFAULT_MONITORED_REPOS } from "./monitored-repos";
 
 // SSM parameter names — created out-of-band (already exist)
 const PARAM_GITHUB_APP_ID = "/github-agent/GITHUB_APP_ID";
@@ -23,16 +24,7 @@ const PARAM_ANTHROPIC_KEY = "/github-agent/ANTHROPIC_API_KEY";
 const PARAM_TWITTER_BEARER_TOKEN = "/github-agent/TWITTER_BEARER_TOKEN";
 const PARAM_TELEGRAM_BOT_TOKEN = "/github-agent/TELEGRAM_BOT_TOKEN";
 const PARAM_TELEGRAM_CHANNEL_ID = "/github-agent/TELEGRAM_CHANNEL_ID";
-const MONITORED_REPOS = [
-  "cenetex/aws-swarm",
-  "cenetex/kyro",
-  "cenetex/raticross",
-  "cenetex/ratibot",
-  "cenetex/litigation",
-  "cenetex/agent",
-  "cenetex/governance",
-  "atimics/AutoForwarder",
-].join(",");
+const MONITORED_REPOS = DEFAULT_MONITORED_REPOS.join(",");
 
 export class GitHubAgentStack extends cdk.Stack {
   constructor(scope: Construct, id: string, props?: cdk.StackProps) {

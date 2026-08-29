@@ -13,6 +13,7 @@ import {
 } from "@aws-sdk/client-ssm";
 import type { GitHubAppConfig } from "./types";
 import { getInstallationToken } from "./types";
+import { DEFAULT_MONITORED_REPOS } from "./monitored-repos";
 
 const ssm = new SSMClient({});
 
@@ -23,16 +24,7 @@ const GITHUB_APP_PRIVATE_KEY_PARAM = process.env.GITHUB_APP_PRIVATE_KEY_PARAM!;
 const MONITORED_REPOS = (process.env.MONITORED_REPOS || "").split(",").filter(r => r.trim());
 
 // Default repos if not specified
-const DEFAULT_REPOS = [
-  "cenetex/aws-swarm",
-  "cenetex/kyro",
-  "cenetex/raticross",
-  "cenetex/ratibot",
-  "cenetex/litigation",
-  "cenetex/agent",
-  "cenetex/governance",
-  "atimics/AutoForwarder",
-];
+const DEFAULT_REPOS = DEFAULT_MONITORED_REPOS;
 
 const AGENT_LABEL = "agent";
 const NEEDS_SPLIT_LABEL = "scope:large";

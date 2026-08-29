@@ -29,6 +29,7 @@ import {
   isCodingAgentAuthor,
   planMergeTriage,
 } from "./merge-triage-policy";
+import { DEFAULT_MONITORED_REPOS } from "./monitored-repos";
 
 const ssm = new SSMClient({});
 const s3 = new S3Client({});
@@ -37,16 +38,7 @@ const GITHUB_APP_ID_PARAM = process.env.GITHUB_APP_ID_PARAM!;
 const GITHUB_APP_PRIVATE_KEY_PARAM = process.env.GITHUB_APP_PRIVATE_KEY_PARAM!;
 const ARTIFACTS_BUCKET = process.env.ARTIFACTS_BUCKET!;
 const MONITORED_REPOS = (process.env.MONITORED_REPOS || "").split(",").filter(r => r.trim());
-const DEFAULT_REPOS = [
-  "cenetex/aws-swarm",
-  "cenetex/kyro",
-  "cenetex/raticross",
-  "cenetex/ratibot",
-  "cenetex/litigation",
-  "cenetex/agent",
-  "cenetex/governance",
-  "atimics/AutoForwarder",
-];
+const DEFAULT_REPOS = DEFAULT_MONITORED_REPOS;
 
 const PLAN_COMMENT_MARKER = "<!-- merge-triage-plan -->";
 const REVIEW_APPROVED_LABEL = "review:approved";
