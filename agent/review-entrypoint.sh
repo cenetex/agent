@@ -143,10 +143,12 @@ post_review_comment() {
   local decision="$1"
   local findings="$2"
 
+  local attestation="<!-- cenetex-review-attestation:v1 head=${HEAD_SHA} decision=${decision} task=${TASK_ID} -->"
   local comment_body=""
   case "$decision" in
     "approved")
-      comment_body="✅ **Automated Review: APPROVED**
+      comment_body="${attestation}
+✅ **Automated Review: APPROVED**
 
 This PR has been reviewed by the agent and is approved for merging.
 
@@ -163,7 +165,8 @@ To prevent auto-merge, remove the \`review:approved\` label or close this PR.
 *Task ID: \`${TASK_ID}\`*"
       ;;
     "changes_requested")
-      comment_body="❌ **Automated Review: CHANGES REQUESTED**
+      comment_body="${attestation}
+❌ **Automated Review: CHANGES REQUESTED**
 
 The automated review has identified issues that need to be addressed before this PR can be merged.
 
@@ -177,7 +180,8 @@ Please address these issues and push new commits. The review will run again auto
 *Task ID: \`${TASK_ID}\`*"
       ;;
     "error")
-      comment_body="🔧 **Automated Review: ERROR**
+      comment_body="${attestation}
+🔧 **Automated Review: ERROR**
 
 The automated review encountered an error and could not complete.
 
@@ -760,8 +764,10 @@ apply_review_labels "$REVIEW_DECISION"
 FORMATTED_FINDINGS=$(format_review_findings "$FINDINGS_DATA")
 post_review_comment "$REVIEW_DECISION" "$FORMATTED_FINDINGS"
 
-# Submit a real GitHub review (APPROVE / REQUEST_CHANGES) so merge triage can
-# verify the approving bot identity instead of trusting the review:approved label.
-post_github_review "$REVIEW_DECISION"
+# GitHub rejects a real review when the same App authored the PR. Keep this
+# best-effort for PRs authored by another identity; merge triage verifies the
+# head-bound attestation comment above when self-review is unavailable.
+post_github_review "$REVIEW_DECISION" || \
+  echo "WARNING: GitHub review submission was unavailable; using the bot attestation." | tee -a "${REVIEW_LOG}"
 
 REVIEW_STATUS="completed"

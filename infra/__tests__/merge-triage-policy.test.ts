@@ -78,6 +78,16 @@ describe("merge triage policy", () => {
     expect(plan.waiting[0].reasons[0]).toContain("approving bot review");
   });
 
+  it("waits when the current approval label is absent", () => {
+    const plan = planMergeTriage(
+      [candidate(22, { labels: ["review:error"], botApproved: true })],
+      { now, defaultHoldMinutes: 60, maxReady: 1 }
+    );
+
+    expect(plan.waiting.map((item) => item.candidate.number)).toEqual([22]);
+    expect(plan.waiting[0].reasons[0]).toContain("review:approved label");
+  });
+
   it("flags protected files and merge conflicts as non-mergeable work", () => {
     const plan = planMergeTriage(
       [

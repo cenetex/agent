@@ -151,6 +151,13 @@ function initialStatusForCandidate(
     };
   }
 
+  if (!candidate.labels.includes("review:approved")) {
+    return {
+      status: "waiting",
+      reasons: ["Waiting for the current review:approved label."],
+    };
+  }
+
   if (!candidate.botApproved) {
     return {
       status: "waiting",
