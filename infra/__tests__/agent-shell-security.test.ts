@@ -25,7 +25,9 @@ describe('agent shell security contracts', () => {
     );
     const codexEnvironment = reviewEntrypoint.slice(
       reviewEntrypoint.indexOf('env -i'),
-      reviewEntrypoint.indexOf('timeout 1800 codex exec')
+      reviewEntrypoint.indexOf(
+        'timeout 1800 codex --enable use_legacy_landlock exec'
+      )
     );
     expect(codexEnvironment).not.toContain('GITHUB_TOKEN=');
     expect(codexEnvironment).not.toContain('GH_TOKEN=');
@@ -83,6 +85,13 @@ describe('agent shell security contracts', () => {
     expect(reviewDockerfile).toContain(
       'COPY review-findings.schema.json /lib/review-findings.schema.json'
     );
+  });
+
+  it('uses the namespace-free Linux sandbox backend on Fargate', () => {
+    expect(reviewEntrypoint).toContain(
+      'timeout 1800 codex --enable use_legacy_landlock exec'
+    );
+    expect(reviewEntrypoint).toContain('--sandbox read-only');
   });
 
   it('does not install dependencies selected by an untrusted PR', () => {

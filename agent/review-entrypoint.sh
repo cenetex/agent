@@ -665,6 +665,8 @@ setup_review_dependencies
 # Add 30-minute (1800 second) hard timeout to prevent stuck reviews from burning credits
 CODEX_EXIT_CODE=0
 rm -f "${REVIEW_FINDINGS_FILE}"
+# Fargate blocks the user namespaces required by Codex's Bubblewrap backend.
+# Landlock keeps model commands read-only without requiring extra container privileges.
 env -i \
   PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" \
   HOME="/home/agent" \
@@ -682,7 +684,7 @@ env -i \
   GIT_CONFIG_GLOBAL="/dev/null" \
   GIT_TERMINAL_PROMPT="0" \
   OPENROUTER_API_KEY="${OPENROUTER_API_KEY}" \
-  timeout 1800 codex exec --ephemeral --skip-git-repo-check \
+  timeout 1800 codex --enable use_legacy_landlock exec --ephemeral --skip-git-repo-check \
   --strict-config \
   --ignore-rules \
   --sandbox read-only \
