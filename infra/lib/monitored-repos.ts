@@ -5,6 +5,7 @@ export const DEFAULT_MONITORED_REPOS: string[] = [
   "cenetex/ratibot",
   "cenetex/litigation",
   "cenetex/agent",
+  "cenetex/braid",
   "cenetex/governance",
   "cenetex/ilXyr",
   "atimics/AutoForwarder",
