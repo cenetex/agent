@@ -68,6 +68,20 @@ describe('agent shell security contracts', () => {
     );
   });
 
+  it('merges through GitHub only after the entrypoint observes green CI', () => {
+    expect(taskEntrypoint).toContain(': "${SELF_MERGE_ENABLED:=true}"');
+    expect(taskEntrypoint).toContain('merge_ready_pr()');
+    expect(taskEntrypoint).toContain(
+      'gh api --method PUT "repos/${repo}/pulls/${pr_number}/merge"'
+    );
+    expect(taskEntrypoint).toMatch(
+      /case "\$CI_RESULT" in[\s\S]*?0\)[\s\S]*?merge_ready_pr/
+    );
+    expect(taskEntrypoint).toContain(
+      'The code work is complete, but the agent will not merge without a green check result.'
+    );
+  });
+
   it('never embeds an installation token in a git remote', () => {
     for (const source of [common, reviewEntrypoint, taskEntrypoint]) {
       expect(source).not.toContain('x-access-token:');

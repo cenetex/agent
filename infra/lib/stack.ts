@@ -331,6 +331,7 @@ export class GitHubAgentStack extends cdk.Stack {
         GITHUB_APP_PRIVATE_KEY_PARAM: PARAM_GITHUB_APP_PRIVATE_KEY,
         OPENROUTER_API_KEY_PARAM: PARAM_OPENROUTER_KEY,
         ARTIFACTS_BUCKET: artifactsBucket.bucketName,
+        FRICTIONLESS_PR_FLOW: "true",
       },
     });
 
@@ -489,6 +490,7 @@ export class GitHubAgentStack extends cdk.Stack {
     // -------------------------------------------------------
     const reviewRule = new events.Rule(this, "ReviewRule", {
       description: "Trigger review of coding agent PRs",
+      enabled: false,
       schedule: events.Schedule.cron({
         minute: "*/15", // Every 15 minutes
         hour: "*",
@@ -521,7 +523,7 @@ export class GitHubAgentStack extends cdk.Stack {
         GITHUB_APP_ID_PARAM: PARAM_GITHUB_APP_ID,
         GITHUB_APP_PRIVATE_KEY_PARAM: PARAM_GITHUB_APP_PRIVATE_KEY,
         MONITORED_REPOS,
-        MERGE_TRIAGE_AUTO_MERGE: "true",
+        MERGE_TRIAGE_AUTO_MERGE: "false",
         MERGE_TRIAGE_MAX_MERGES_PER_RUN: "1",
       },
     });
@@ -540,6 +542,7 @@ export class GitHubAgentStack extends cdk.Stack {
     // -------------------------------------------------------
     const mergeTriageRule = new events.Rule(this, "MergeTriageRule", {
       description: "Plan and safely advance merge-ready coding-agent PRs every 15 minutes",
+      enabled: false,
       schedule: events.Schedule.rate(cdk.Duration.minutes(15)),
     });
 

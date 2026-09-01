@@ -24,8 +24,8 @@ export const DEFAULT_DISPATCH_CONFIG: DispatchConfig = {
 };
 
 export const DEFAULT_MERGE_HOLD_CONFIG: MergeHoldConfig = {
-  merge_hold_minutes: 60,
-  merge_hold_minutes_infra: 120,
+  merge_hold_minutes: 0,
+  merge_hold_minutes_infra: 0,
 };
 
 function getConfigValue(content: string, key: string): string | null {
