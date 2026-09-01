@@ -72,6 +72,7 @@ const WEBHOOK_SECRET_PARAM = process.env.WEBHOOK_SECRET_PARAM!;
 const GITHUB_APP_ID_PARAM = process.env.GITHUB_APP_ID_PARAM!;
 const GITHUB_APP_PRIVATE_KEY_PARAM = process.env.GITHUB_APP_PRIVATE_KEY_PARAM!;
 const OPENROUTER_API_KEY_PARAM = process.env.OPENROUTER_API_KEY_PARAM!;
+const FRICTIONLESS_PR_FLOW = process.env.FRICTIONLESS_PR_FLOW !== "false";
 const DEFAULT_CODEX_MODEL = "z-ai/glm-5.2";
 const ARTIFACTS_BUCKET = process.env.ARTIFACTS_BUCKET!;
 const TRIGGER_LABEL = "agent";
@@ -3283,6 +3284,14 @@ export async function handler(event: {
 
     // Handle agent:succeeded label to trigger automatic review
     if (labelName === SIGNAL_LABEL_SUCCEEDED) {
+      if (FRICTIONLESS_PR_FLOW) {
+        console.log("Agent completed under the direct PR flow; no separate review task is needed");
+        return {
+          statusCode: 200,
+          body: JSON.stringify({ message: "Agent completion recorded" }),
+        };
+      }
+
       console.log(`Handling agent:succeeded label on issue #${payload.issue.number}`);
 
       const repoOwner = payload.repository.owner.login;
@@ -3738,6 +3747,11 @@ export async function handler(event: {
       };
     }
   } else if (ghEvent === "pull_request" && payload.action === "opened") {
+    if (FRICTIONLESS_PR_FLOW) {
+      console.log("PR opened under the direct PR flow; CI and repository rules decide mergeability");
+      return { statusCode: 200, body: "PR opened" };
+    }
+
     // Immediate review trigger for bot-created PRs
     const prAuthor = payload.pull_request.user.login;
     const isBotPR = isCodingAgentLogin(prAuthor);
@@ -3826,6 +3840,11 @@ export async function handler(event: {
 
     // Handle review:approved label for auto-merge scheduling
     if (labelName === REVIEW_APPROVED_LABEL) {
+      if (FRICTIONLESS_PR_FLOW) {
+        console.log("Ignoring legacy review approval label under the direct PR flow");
+        return { statusCode: 200, body: "Legacy review label ignored" };
+      }
+
       const repoOwner = payload.repository.owner.login;
       const repoName = payload.repository.name;
       const prNumber = payload.pull_request.number;
@@ -4097,7 +4116,7 @@ export async function handler(event: {
   }
 
   // --- Prioritize reviews: launch pending bot PR reviews before new work ---
-  if (!isPR) {
+  if (!isPR && !FRICTIONLESS_PR_FLOW) {
     const reviewsTriggered = await reviewPendingBotPRs(repoOwner, repoName, githubToken, openrouterKey);
     if (reviewsTriggered > 0) {
       console.log(`Launched ${reviewsTriggered} priority review(s) before new task for issue #${issueNumber}`);

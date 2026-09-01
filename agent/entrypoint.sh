@@ -22,6 +22,7 @@ set -Eeuo pipefail
 : "${EXECUTOR_MAX_RESPONSE_TOKENS:=5000}"
 : "${EXECUTOR_HTTP_TIMEOUT_SECONDS:=300}"
 : "${EXECUTOR_MAX_TOOL_OUTPUT_CHARS:=12000}"
+: "${SELF_MERGE_ENABLED:=true}"
 
 export EXECUTOR_MAX_RESPONSE_TOKENS
 export EXECUTOR_HTTP_TIMEOUT_SECONDS
@@ -751,6 +752,49 @@ poll_pr_checks() {
 
   echo "[CI poll] Timed out after ${max_wait}s waiting for CI."
   return 3
+}
+
+# merge_ready_pr <pr_number> <repo>
+# Merges a green PR directly through GitHub. Repository rules remain the final
+# authority: if GitHub rejects the merge, the PR stays open and the task waits.
+merge_ready_pr() {
+  local pr_number="$1"
+  local repo="$2"
+  local attempt=1
+  local max_attempts=6
+  local response_file="/tmp/pr-merge-${pr_number}.json"
+  local error_file="/tmp/pr-merge-${pr_number}.err"
+
+  if [ "${SELF_MERGE_ENABLED}" != "true" ]; then
+    echo "Self-merge is disabled; leaving PR #${pr_number} open."
+    return 2
+  fi
+
+  while [ "${attempt}" -le "${max_attempts}" ]; do
+    echo "Merging green PR #${pr_number} (attempt ${attempt}/${max_attempts})..."
+    if gh api --method PUT "repos/${repo}/pulls/${pr_number}/merge" \
+      -f merge_method=squash >"${response_file}" 2>"${error_file}"; then
+      if jq -e '.merged == true' "${response_file}" >/dev/null 2>&1; then
+        echo "PR #${pr_number} merged."
+        return 0
+      fi
+    fi
+
+    if [ -s "${response_file}" ]; then
+      jq -r '.message // empty' "${response_file}" >&2 || true
+    fi
+    if [ -s "${error_file}" ]; then
+      cat "${error_file}" >&2
+    fi
+
+    attempt=$((attempt + 1))
+    if [ "${attempt}" -le "${max_attempts}" ]; then
+      sleep 10
+    fi
+  done
+
+  echo "GitHub did not accept the merge for PR #${pr_number}; leaving it open." >&2
+  return 1
 }
 
 # is_main_also_broken <repo>
@@ -1721,14 +1765,24 @@ ${ERROR_MESSAGE}
 
     case "$CI_RESULT" in
       0)
-        RUN_STATUS="succeeded"
+        MERGE_RESULT=0
+        merge_ready_pr "${ISSUE_NUMBER}" "${REPO}" || MERGE_RESULT=$?
+        if [ "${MERGE_RESULT}" -eq 0 ]; then
+          RUN_STATUS="succeeded"
+        else
+          RUN_STATUS="waiting"
+          merge_waiting_comment="Checks passed for PR #${ISSUE_NUMBER}, but GitHub did not accept the merge yet. The PR remains open; repository rules or mergeability may need attention."
+          post_comment "${ISSUE_NUMBER}" "${REPO}" "$merge_waiting_comment"
+        fi
         ;;
       1)
         echo "CI failed on PR #${ISSUE_NUMBER}; refusing to republish over a red branch" >&2
         exit 1
         ;;
       2)
-        RUN_STATUS="succeeded"
+        RUN_STATUS="waiting"
+        main_broken_comment="PR #${ISSUE_NUMBER} could not be merged because its checks failed while the default branch is also failing. Fix the shared failure, then re-add the ${TRIGGER_LABEL} label."
+        post_comment "${ISSUE_NUMBER}" "${REPO}" "$main_broken_comment"
         ;;
       3)
         RUN_STATUS="waiting"
@@ -1737,8 +1791,8 @@ ${ERROR_MESSAGE}
         post_comment "${ISSUE_NUMBER}" "${REPO}" "$ci_pending_comment"
         ;;
       4)
-        RUN_STATUS="succeeded"
-        ci_unavailable_comment="CI checks could not be read by the agent token for PR #${ISSUE_NUMBER}. The agent completed its code work; review and branch protection should make the final merge decision."
+        RUN_STATUS="waiting"
+        ci_unavailable_comment="CI checks could not be read by the agent token for PR #${ISSUE_NUMBER}. The code work is complete, but the agent will not merge without a green check result."
         post_comment "${ISSUE_NUMBER}" "${REPO}" "$ci_unavailable_comment"
         ;;
     esac
@@ -1751,14 +1805,24 @@ ${ERROR_MESSAGE}
 
       case "$CI_RESULT" in
         0)
-          RUN_STATUS="succeeded"
+          MERGE_RESULT=0
+          merge_ready_pr "${PR_NUM}" "${REPO}" || MERGE_RESULT=$?
+          if [ "${MERGE_RESULT}" -eq 0 ]; then
+            RUN_STATUS="succeeded"
+          else
+            RUN_STATUS="waiting"
+            merge_waiting_comment="Checks passed for PR #${PR_NUM}, but GitHub did not accept the merge yet. The PR remains open; repository rules or mergeability may need attention."
+            post_comment "${ISSUE_NUMBER}" "${REPO}" "$merge_waiting_comment"
+          fi
           ;;
         1)
           echo "CI failed on created PR #${PR_NUM}; refusing to republish over a red branch" >&2
           exit 1
           ;;
         2)
-          RUN_STATUS="succeeded"
+          RUN_STATUS="waiting"
+          main_broken_comment="PR #${PR_NUM} could not be merged because its checks failed while the default branch is also failing. Fix the shared failure, then re-add the ${TRIGGER_LABEL} label."
+          post_comment "${ISSUE_NUMBER}" "${REPO}" "$main_broken_comment"
           ;;
         3)
           RUN_STATUS="waiting"
@@ -1767,8 +1831,8 @@ ${ERROR_MESSAGE}
           post_comment "${ISSUE_NUMBER}" "${REPO}" "$ci_pending_comment"
           ;;
         4)
-          RUN_STATUS="succeeded"
-          ci_unavailable_comment="CI checks could not be read by the agent token for PR #${PR_NUM}. The agent completed its code work; review and branch protection should make the final merge decision."
+          RUN_STATUS="waiting"
+          ci_unavailable_comment="CI checks could not be read by the agent token for PR #${PR_NUM}. The code work is complete, but the agent will not merge without a green check result."
           post_comment "${ISSUE_NUMBER}" "${REPO}" "$ci_unavailable_comment"
           ;;
       esac
