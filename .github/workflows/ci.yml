@@ -49,6 +49,15 @@ jobs:
           bash -n lib/orchestrate-lint.sh
           bash -n lib/lint-loop.sh
 
+      - name: Check pinned Codex sandbox on Linux
+        run: |
+          codex_version=$(sed -n 's/^ARG CODEX_CLI_VERSION=//p' agent/Dockerfile)
+          test -n "$codex_version"
+          npm install --prefix "$RUNNER_TEMP/codex-sandbox" --no-save --ignore-scripts "@openai/codex@$codex_version"
+          "$RUNNER_TEMP/codex-sandbox/node_modules/.bin/codex" --enable use_legacy_landlock sandbox \
+            -c 'sandbox_mode="workspace-write"' -- /bin/sh -c \
+            'set -eu; probe=$(mktemp .agent-sandbox-check.XXXXXX); rm -f "$probe"'
+
       - name: Build website
         run: |
           cd website

@@ -1474,6 +1474,9 @@ if [ "${AGENT_EXECUTOR}" = "codex" ]; then
   if ! command -v codex >/dev/null 2>&1; then
     echo "[preflight] FAIL: codex CLI not found in PATH" >&2
     PREFLIGHT_FAILURES=$((PREFLIGHT_FAILURES + 1))
+  elif ! check_codex_task_sandbox >> "${AGENT_LOG}" 2>&1; then
+    echo "[preflight] FAIL: Codex sandbox startup failed; check host sandbox support" >&2
+    PREFLIGHT_FAILURES=$((PREFLIGHT_FAILURES + 1))
   fi
 elif ! executor_command_available "${AGENT_EXECUTOR_PATH}"; then
   echo "[preflight] FAIL: custom executor not found or not executable: ${AGENT_EXECUTOR_PATH}" >&2
@@ -1630,7 +1633,7 @@ while [ -z "${RUN_STATUS}" ] && [ "${ATTEMPT}" -lt "${MAX_ATTEMPTS}" ]; do
       CODEX_HOME="${CODEX_HOME}" \
       CODEX_DISABLE_NONESSENTIAL_TRAFFIC="1" \
       OPENROUTER_API_KEY="${OPENROUTER_API_KEY}" \
-      timeout ${TIMEOUT_SECONDS} codex exec --ephemeral --skip-git-repo-check \
+      timeout ${TIMEOUT_SECONDS} codex --enable use_legacy_landlock exec --ephemeral --skip-git-repo-check \
       --sandbox workspace-write \
       --model "${MODEL}" \
       "${MISSION}" 2>&1 | tee "${AGENT_LOG}" || EXECUTOR_EXIT_CODE=$?

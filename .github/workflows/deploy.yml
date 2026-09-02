@@ -79,6 +79,8 @@ jobs:
         run: |
           cd agent
           docker build --platform linux/amd64 -t ${{ env.ECR_REPO }} .
+          docker run --rm --entrypoint /bin/bash ${{ env.ECR_REPO }} -c \
+            'source /lib/common.sh; configure_codex_openrouter task; check_codex_task_sandbox'
           docker tag ${{ env.ECR_REPO }}:latest ${{ steps.ecr-login.outputs.registry }}/${{ env.ECR_REPO }}:latest
           docker tag ${{ env.ECR_REPO }}:latest ${{ steps.ecr-login.outputs.registry }}/${{ env.ECR_REPO }}:${{ github.sha }}
           docker push ${{ steps.ecr-login.outputs.registry }}/${{ env.ECR_REPO }}:latest

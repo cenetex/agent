@@ -115,6 +115,16 @@ describe('agent shell security contracts', () => {
       'timeout 1800 codex --enable use_legacy_landlock exec'
     );
     expect(reviewEntrypoint).toContain('--sandbox read-only');
+    expect(taskEntrypoint).toContain(
+      'codex --enable use_legacy_landlock exec'
+    );
+    expect(taskEntrypoint).toContain('--sandbox workspace-write');
+    expect(taskEntrypoint).toContain(
+      'elif ! check_codex_task_sandbox >> "${AGENT_LOG}" 2>&1; then'
+    );
+    expect(taskEntrypoint.indexOf('check_codex_task_sandbox')).toBeLessThan(
+      taskEntrypoint.indexOf('codex --enable use_legacy_landlock exec')
+    );
   });
 
   it('does not install dependencies selected by an untrusted PR', () => {

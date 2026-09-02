@@ -80,6 +80,23 @@ ${shell_environment_policy}
 EOF
 }
 
+check_codex_task_sandbox() {
+  # Exercise the same file policy and Linux backend as the coding worker.
+  # This command is local and uses an empty credential environment.
+  env -i \
+    PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" \
+    HOME="/home/agent" \
+    USER="agent" \
+    LOGNAME="agent" \
+    LANG="C.UTF-8" \
+    CI="true" \
+    TERM="dumb" \
+    CODEX_HOME="${CODEX_HOME}" \
+    timeout 30 codex --enable use_legacy_landlock sandbox \
+    -c 'sandbox_mode="workspace-write"' -- /bin/sh -c \
+    'set -eu; test -r .; probe=$(mktemp .agent-sandbox-check.XXXXXX); rm -f "$probe"'
+}
+
 start_virtual_display() {
   if [ -n "${DISPLAY:-}" ] || ! command -v Xvfb >/dev/null 2>&1; then
     return 0
