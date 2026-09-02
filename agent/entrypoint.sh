@@ -1630,7 +1630,7 @@ while [ -z "${RUN_STATUS}" ] && [ "${ATTEMPT}" -lt "${MAX_ATTEMPTS}" ]; do
       CODEX_HOME="${CODEX_HOME}" \
       CODEX_DISABLE_NONESSENTIAL_TRAFFIC="1" \
       OPENROUTER_API_KEY="${OPENROUTER_API_KEY}" \
-      timeout ${TIMEOUT_SECONDS} codex exec --ephemeral --skip-git-repo-check \
+      timeout ${TIMEOUT_SECONDS} codex --enable use_legacy_landlock exec --ephemeral --skip-git-repo-check \
       --sandbox workspace-write \
       --model "${MODEL}" \
       "${MISSION}" 2>&1 | tee "${AGENT_LOG}" || EXECUTOR_EXIT_CODE=$?

@@ -17,6 +17,13 @@ describe('agent shell security contracts', () => {
     expect(taskEntrypoint).toContain('--sandbox workspace-write');
   });
 
+  it('runs both Codex workflows on the Fargate-compatible Landlock backend', () => {
+    // Fargate blocks the user namespaces required by Codex's default
+    // Bubblewrap backend; every tool call dies at the sandbox boundary.
+    expect(reviewEntrypoint).toContain('--enable use_legacy_landlock');
+    expect(taskEntrypoint).toContain('--enable use_legacy_landlock');
+  });
+
   it('uses a non-inheriting shell environment for attacker-controlled reviews', () => {
     expect(reviewEntrypoint).toContain('configure_codex_openrouter review');
     expect(reviewEntrypoint).toContain('env -i');
