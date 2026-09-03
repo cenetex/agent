@@ -37,6 +37,7 @@ describe('Codex task sandbox startup check', () => {
   test.each([0, 22, 124])('preserves sandbox exit code %i', (status) => {
     const result = spawnSync('bash', ['-c', [
       'source "$1"',
+      'codex() { :; }',
       'env() { printf "%s\\n" "$@"; return "$SANDBOX_TEST_EXIT"; }',
       'check_codex_task_sandbox',
     ].join('\n'), 'sandbox-test', common], {
