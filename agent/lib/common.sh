@@ -98,7 +98,7 @@ check_codex_task_sandbox() {
     CI="true" \
     TERM="dumb" \
     CODEX_HOME="${CODEX_HOME}" \
-    timeout 30 "${codex_path}" --enable use_legacy_landlock sandbox \
+    timeout 30 "${codex_path}" --enable use_legacy_landlock sandbox linux \
     -c 'sandbox_mode="workspace-write"' -- /bin/sh -c \
     'set -eu; test -r .; probe=$(mktemp .agent-sandbox-check.XXXXXX); rm -f "$probe"'
 }
