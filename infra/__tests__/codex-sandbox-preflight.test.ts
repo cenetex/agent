@@ -1,9 +1,39 @@
 import { spawnSync } from 'child_process';
+import { mkdtempSync, readFileSync, rmSync } from 'fs';
+import { tmpdir } from 'os';
 import { resolve } from 'path';
 
 const common = resolve(__dirname, '../../agent/lib/common.sh');
 
 describe('Codex task sandbox startup check', () => {
+  it('writes a Landlock-compatible task permission profile', () => {
+    const codexHome = mkdtempSync(resolve(tmpdir(), 'codex-task-profile-'));
+    try {
+      const result = spawnSync('bash', ['-c', [
+        'source "$1"',
+        'configure_codex_openrouter task',
+      ].join('\n'), 'profile-test', common], {
+        encoding: 'utf8',
+        env: {
+          ...process.env,
+          CODEX_HOME: codexHome,
+        },
+      });
+      expect(result.status).toBe(0);
+      const config = readFileSync(resolve(codexHome, 'config.toml'), 'utf8');
+      expect(config).toContain('default_permissions = "task"');
+      expect(config).toContain('extends = ":workspace"');
+      expect(config).toContain('".git" = "write"');
+      expect(config).toContain('".agents" = "write"');
+      expect(config).toContain('".codex" = "write"');
+      expect(config).toContain('[permissions.task.network]');
+      expect(config).toContain('enabled = false');
+      expect(config).not.toContain('sandbox_mode = "workspace-write"');
+    } finally {
+      rmSync(codexHome, { recursive: true, force: true });
+    }
+  });
+
   test.each([0, 22, 124])('preserves sandbox exit code %i', (status) => {
     const result = spawnSync('bash', ['-c', [
       'source "$1"',
@@ -27,7 +57,6 @@ describe('Codex task sandbox startup check', () => {
     expect(args).toContain('30');
     expect(args).toContain('use_legacy_landlock');
     expect(args).toContain('sandbox');
-    expect(args).toContain('sandbox_mode="workspace-write"');
     expect(args).toContain('/bin/sh');
     expect(result.stdout).toContain('mktemp .agent-sandbox-check.XXXXXX');
     expect(result.stdout).not.toContain('test-secret');

@@ -54,9 +54,11 @@ jobs:
           codex_version=$(sed -n 's/^ARG CODEX_CLI_VERSION=//p' agent/Dockerfile)
           test -n "$codex_version"
           npm install --prefix "$RUNNER_TEMP/codex-sandbox" --no-save --ignore-scripts "@openai/codex@$codex_version"
-          "$RUNNER_TEMP/codex-sandbox/node_modules/.bin/codex" --enable use_legacy_landlock sandbox \
-            -c 'sandbox_mode="workspace-write"' -- /bin/sh -c \
-            'set -eu; probe=$(mktemp .agent-sandbox-check.XXXXXX); rm -f "$probe"'
+          export PATH="$RUNNER_TEMP/codex-sandbox/node_modules/.bin:$PATH"
+          export CODEX_HOME="$RUNNER_TEMP/codex-home"
+          source agent/lib/common.sh
+          configure_codex_openrouter task
+          check_codex_task_sandbox
 
       - name: Build website
         run: |

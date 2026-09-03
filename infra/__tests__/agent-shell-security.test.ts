@@ -14,7 +14,13 @@ describe('agent shell security contracts', () => {
     expect(taskEntrypoint).not.toContain('--sandbox danger-full-access');
 
     expect(reviewEntrypoint).toContain('--sandbox read-only');
-    expect(taskEntrypoint).toContain('--sandbox workspace-write');
+    expect(common).toContain('default_permissions = "task"');
+    expect(common).toContain('extends = ":workspace"');
+    expect(common).toContain('".git" = "write"');
+    expect(common).toContain('".agents" = "write"');
+    expect(common).toContain('".codex" = "write"');
+    expect(common).toContain('[permissions.task.network]');
+    expect(common).toContain('enabled = false');
   });
 
   it('uses a non-inheriting shell environment for attacker-controlled reviews', () => {
@@ -118,7 +124,7 @@ describe('agent shell security contracts', () => {
     expect(taskEntrypoint).toContain(
       'codex --enable use_legacy_landlock exec'
     );
-    expect(taskEntrypoint).toContain('--sandbox workspace-write');
+    expect(taskEntrypoint).not.toContain('--sandbox workspace-write');
     expect(taskEntrypoint).toContain(
       'elif ! check_codex_task_sandbox >> "${AGENT_LOG}" 2>&1; then'
     );

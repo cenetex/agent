@@ -40,12 +40,23 @@ setup_github_auth() {
 
 configure_codex_openrouter() {
   local security_profile="${1:-task}"
-  local sandbox_mode="workspace-write"
+  local sandbox_config='default_permissions = "task"'
+  local permission_profile_config='[permissions.task]
+extends = ":workspace"
+
+[permissions.task.filesystem.":workspace_roots"]
+".git" = "write"
+".agents" = "write"
+".codex" = "write"
+
+[permissions.task.network]
+enabled = false'
   local shell_environment_policy='inherit = "none"
 set = { PATH = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin", HOME = "/home/agent", USER = "agent", LOGNAME = "agent", LANG = "C.UTF-8", CI = "true", TERM = "dumb" }'
 
   if [ "${security_profile}" = "review" ]; then
-    sandbox_mode="read-only"
+    sandbox_config='sandbox_mode = "read-only"'
+    permission_profile_config=''
     # PR contents are attacker-controlled. Give model-spawned commands a fixed,
     # non-secret environment rather than inheriting task credentials.
     shell_environment_policy='inherit = "none"
@@ -61,7 +72,7 @@ set = { PATH = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin", H
   cat > "${CODEX_HOME}/config.toml" <<EOF
 model_provider = "openrouter"
 approval_policy = "never"
-sandbox_mode = "${sandbox_mode}"
+${sandbox_config}
 model_context_window = 1048576
 model_reasoning_effort = "none"
 model_reasoning_summary = "none"
@@ -77,14 +88,21 @@ stream_idle_timeout_ms = 300000
 
 [shell_environment_policy]
 ${shell_environment_policy}
+
+${permission_profile_config}
 EOF
 }
 
 check_codex_task_sandbox() {
+  local codex_path node_path safe_path
+  codex_path="$(command -v codex)" || return 127
+  node_path="$(command -v node)" || return 127
+  safe_path="${node_path%/*}:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+
   # Exercise the same file policy and Linux backend as the coding worker.
   # This command is local and uses an empty credential environment.
   env -i \
-    PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" \
+    PATH="${safe_path}" \
     HOME="/home/agent" \
     USER="agent" \
     LOGNAME="agent" \
@@ -92,8 +110,7 @@ check_codex_task_sandbox() {
     CI="true" \
     TERM="dumb" \
     CODEX_HOME="${CODEX_HOME}" \
-    timeout 30 codex --enable use_legacy_landlock sandbox \
-    -c 'sandbox_mode="workspace-write"' -- /bin/sh -c \
+    timeout 30 "${codex_path}" --enable use_legacy_landlock sandbox -- /bin/sh -c \
     'set -eu; test -r .; probe=$(mktemp .agent-sandbox-check.XXXXXX); rm -f "$probe"'
 }
 
