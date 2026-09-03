@@ -54,7 +54,7 @@ describe('Codex task sandbox startup check', () => {
     expect(args).toContain('use_legacy_landlock');
     expect(args).toContain('sandbox');
     expect(args).toContain('linux');
-    expect(args).toContain('sandbox_mode="workspace-write"');
+    expect(args).toContain('--full-auto');
     expect(args).toContain('/bin/sh');
     expect(result.stdout).toContain('mktemp .agent-sandbox-check.XXXXXX');
     expect(result.stdout).not.toContain('test-secret');
