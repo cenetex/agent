@@ -5,6 +5,7 @@ const agentRoot = resolve(__dirname, '../../agent');
 const common = readFileSync(resolve(agentRoot, 'lib/common.sh'), 'utf8');
 const reviewEntrypoint = readFileSync(resolve(agentRoot, 'review-entrypoint.sh'), 'utf8');
 const taskEntrypoint = readFileSync(resolve(agentRoot, 'entrypoint.sh'), 'utf8');
+const taskDockerfile = readFileSync(resolve(agentRoot, 'Dockerfile'), 'utf8');
 const reviewDockerfile = readFileSync(resolve(agentRoot, 'Dockerfile.review'), 'utf8');
 
 describe('agent shell security contracts', () => {
@@ -115,6 +116,18 @@ describe('agent shell security contracts', () => {
       'timeout 1800 codex --enable use_legacy_landlock exec'
     );
     expect(reviewEntrypoint).toContain('--sandbox read-only');
+    expect(taskEntrypoint).toContain(
+      '"${CODEX_TASK_BIN}" --enable use_legacy_landlock exec'
+    );
+    expect(taskEntrypoint).toContain('--sandbox workspace-write');
+    expect(taskDockerfile).toContain('ARG CODEX_TASK_CLI_VERSION=0.116.0');
+    expect(taskDockerfile).toContain('/usr/local/bin/codex-task');
+    expect(taskEntrypoint).toContain(
+      'elif ! check_codex_task_sandbox >> "${AGENT_LOG}" 2>&1; then'
+    );
+    expect(taskEntrypoint.indexOf('check_codex_task_sandbox')).toBeLessThan(
+      taskEntrypoint.indexOf('"${CODEX_TASK_BIN}" --enable use_legacy_landlock exec')
+    );
   });
 
   it('does not install dependencies selected by an untrusted PR', () => {

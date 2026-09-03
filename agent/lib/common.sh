@@ -80,6 +80,29 @@ ${shell_environment_policy}
 EOF
 }
 
+check_codex_task_sandbox() {
+  local codex_command codex_path node_path safe_path
+  codex_command="${CODEX_TASK_BIN:-codex-task}"
+  codex_path="$(command -v "${codex_command}")" || return 127
+  node_path="$(command -v node)" || return 127
+  safe_path="${node_path%/*}:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+
+  # Exercise the same file policy and Linux backend as the coding worker.
+  # This command is local and uses an empty credential environment.
+  env -i \
+    PATH="${safe_path}" \
+    HOME="/home/agent" \
+    USER="agent" \
+    LOGNAME="agent" \
+    LANG="C.UTF-8" \
+    CI="true" \
+    TERM="dumb" \
+    CODEX_HOME="${CODEX_HOME}" \
+    timeout 30 "${codex_path}" --enable use_legacy_landlock sandbox linux \
+    --full-auto -- /bin/sh -c \
+    'set -eu; test -r .; probe=$(mktemp .agent-sandbox-check.XXXXXX); rm -f "$probe"'
+}
+
 start_virtual_display() {
   if [ -n "${DISPLAY:-}" ] || ! command -v Xvfb >/dev/null 2>&1; then
     return 0
