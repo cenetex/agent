@@ -6,7 +6,7 @@ import { resolve } from 'path';
 const common = resolve(__dirname, '../../agent/lib/common.sh');
 
 describe('Codex task sandbox startup check', () => {
-  it('writes a Landlock-compatible task permission profile', () => {
+  it('writes the workspace-write task sandbox config', () => {
     const codexHome = mkdtempSync(resolve(tmpdir(), 'codex-task-profile-'));
     try {
       const result = spawnSync('bash', ['-c', [
@@ -21,14 +21,8 @@ describe('Codex task sandbox startup check', () => {
       });
       expect(result.status).toBe(0);
       const config = readFileSync(resolve(codexHome, 'config.toml'), 'utf8');
-      expect(config).toContain('default_permissions = "task"');
-      expect(config).toContain('extends = ":workspace"');
-      expect(config).toContain('".git" = "write"');
-      expect(config).toContain('".agents" = "write"');
-      expect(config).toContain('".codex" = "write"');
-      expect(config).toContain('[permissions.task.network]');
-      expect(config).toContain('enabled = false');
-      expect(config).not.toContain('sandbox_mode = "workspace-write"');
+      expect(config).toContain('sandbox_mode = "workspace-write"');
+      expect(config).not.toContain('default_permissions');
     } finally {
       rmSync(codexHome, { recursive: true, force: true });
     }
@@ -45,6 +39,7 @@ describe('Codex task sandbox startup check', () => {
       env: {
         ...process.env,
         CODEX_HOME: '/tmp/codex-sandbox-fixture',
+        CODEX_TASK_BIN: 'codex',
         SANDBOX_TEST_EXIT: String(status),
         GITHUB_TOKEN: 'test-secret',
         OPENROUTER_API_KEY: 'test-secret',
@@ -58,6 +53,7 @@ describe('Codex task sandbox startup check', () => {
     expect(args).toContain('30');
     expect(args).toContain('use_legacy_landlock');
     expect(args).toContain('sandbox');
+    expect(args).toContain('sandbox_mode="workspace-write"');
     expect(args).toContain('/bin/sh');
     expect(result.stdout).toContain('mktemp .agent-sandbox-check.XXXXXX');
     expect(result.stdout).not.toContain('test-secret');

@@ -19,6 +19,7 @@ set -Eeuo pipefail
 : "${LINT_RETRY_MAX_ATTEMPTS:=3}"  # Optional, max retries for lint loop
 : "${AGENT_EXECUTOR:=codex}"  # implementation tasks require the sandboxed Codex executor
 : "${AGENT_EXECUTOR_PATH:=agent-executor}"
+: "${CODEX_TASK_BIN:=codex-task}"
 : "${EXECUTOR_MAX_RESPONSE_TOKENS:=5000}"
 : "${EXECUTOR_HTTP_TIMEOUT_SECONDS:=300}"
 : "${EXECUTOR_MAX_TOOL_OUTPUT_CHARS:=12000}"
@@ -1633,7 +1634,8 @@ while [ -z "${RUN_STATUS}" ] && [ "${ATTEMPT}" -lt "${MAX_ATTEMPTS}" ]; do
       CODEX_HOME="${CODEX_HOME}" \
       CODEX_DISABLE_NONESSENTIAL_TRAFFIC="1" \
       OPENROUTER_API_KEY="${OPENROUTER_API_KEY}" \
-      timeout ${TIMEOUT_SECONDS} codex --enable use_legacy_landlock exec --ephemeral --skip-git-repo-check \
+      timeout ${TIMEOUT_SECONDS} "${CODEX_TASK_BIN}" --enable use_legacy_landlock exec --ephemeral --skip-git-repo-check \
+      --sandbox workspace-write \
       --model "${MODEL}" \
       "${MISSION}" 2>&1 | tee "${AGENT_LOG}" || EXECUTOR_EXIT_CODE=$?
   else

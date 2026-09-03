@@ -10,6 +10,7 @@ RUN cargo build --release --locked
 FROM ${NODE_IMAGE}
 
 ARG CODEX_CLI_VERSION=0.142.3
+ARG CODEX_TASK_CLI_VERSION=0.116.0
 ARG AWS_CLI_VERSION=2.34.46
 ARG GH_CLI_VERSION=2.92.0
 
@@ -32,7 +33,10 @@ RUN curl -fsSL "https://github.com/cli/cli/releases/download/v${GH_CLI_VERSION}/
   && rm -rf /tmp/gh.tar.gz "/tmp/gh_${GH_CLI_VERSION}_linux_amd64"
 
 # Install Codex CLI
-RUN npm install -g "@openai/codex@${CODEX_CLI_VERSION}"
+RUN npm install -g "@openai/codex@${CODEX_CLI_VERSION}" \
+  && npm install --prefix /opt/codex-task --no-save --ignore-scripts \
+    "@openai/codex@${CODEX_TASK_CLI_VERSION}" \
+  && ln -s /opt/codex-task/node_modules/.bin/codex /usr/local/bin/codex-task
 
 # Install the headless custom executor used by the main agent task.
 COPY --from=executor-builder /executor/target/release/agent-executor /usr/local/bin/agent-executor

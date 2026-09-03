@@ -51,11 +51,11 @@ jobs:
 
       - name: Check pinned Codex sandbox on Linux
         run: |
-          codex_version=$(sed -n 's/^ARG CODEX_CLI_VERSION=//p' agent/Dockerfile)
+          codex_version=$(sed -n 's/^ARG CODEX_TASK_CLI_VERSION=//p' agent/Dockerfile)
           test -n "$codex_version"
           npm install --prefix "$RUNNER_TEMP/codex-sandbox" --no-save --ignore-scripts "@openai/codex@$codex_version"
-          export PATH="$RUNNER_TEMP/codex-sandbox/node_modules/.bin:$PATH"
           export CODEX_HOME="$RUNNER_TEMP/codex-home"
+          export CODEX_TASK_BIN="$RUNNER_TEMP/codex-sandbox/node_modules/.bin/codex"
           source agent/lib/common.sh
           configure_codex_openrouter task
           check_codex_task_sandbox
