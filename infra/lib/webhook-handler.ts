@@ -334,7 +334,7 @@ async function getRepoModelConfig(
   return content ? parseAgentConfig(content).model : null;
 }
 
-function getDefaultModel(taskMode: "issue" | "pull_request" | "planning"): string {
+function getDefaultModel(taskMode: "issue" | "pull_request" | "planning" | "diagnostic"): string {
   return DEFAULT_CODEX_MODEL;
 }
 
@@ -3244,6 +3244,7 @@ export async function handler(event: {
           requested_ref: requestedRef,
           resolved_commit_sha: payload.repository.default_branch_commit?.sha || "HEAD",
           task_mode: "diagnostic",
+          agent_class: "operator",
           model: DEFAULT_CODEX_MODEL,
           issue_metadata: {
             number: issueNumber,
@@ -4311,11 +4312,26 @@ The agent will automatically dispatch this task when capacity becomes available.
     author: isPR ? prData.user.login : issueData.user.login,
   };
 
-  // --- Determine task mode ---
-  let taskMode: "issue" | "pull_request" | "planning";
+  // --- Determine institutional class and task mode ---
+  const classLabel = labels.find((label: string) => label.startsWith("class:"));
+  const agentClass = classLabel
+    ? classLabel.slice("class:".length)
+    : labels.includes("diagnose") || labels.includes("operator")
+      ? "operator"
+      : labels.includes("archivist")
+        ? "archivist"
+        : labels.includes("researcher")
+          ? "researcher"
+          : isPR
+            ? "reviewer"
+            : "developer";
+
+  let taskMode: "issue" | "pull_request" | "planning" | "diagnostic";
   if (isPR) {
     taskMode = "pull_request";
-  } else if (labels.includes("planning")) {
+  } else if (agentClass === "operator") {
+    taskMode = "diagnostic";
+  } else if (labels.includes("planning") || ["archivist", "researcher", "trainer", "miner"].includes(agentClass)) {
     taskMode = "planning";
   } else {
     taskMode = "issue";
@@ -4337,7 +4353,8 @@ The agent will automatically dispatch this task when capacity becomes available.
     requested_ref: requestedRef,
     resolved_commit_sha: resolvedCommitSha,
     issue_metadata: issueMetadata,
-    task_mode: isPR ? "pull_request" : "issue",
+    task_mode: taskMode,
+    agent_class: agentClass,
     created_at: new Date().toISOString(),
     model: selectedModel,
   };

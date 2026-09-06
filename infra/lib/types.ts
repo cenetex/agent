@@ -130,6 +130,8 @@ export interface TaskPayload {
   issue_metadata: IssueMetadata;
   /** Task execution mode */
   task_mode: "issue" | "pull_request" | "planning" | "diagnostic";
+  /** Institutional role performing the task */
+  agent_class?: "developer" | "reviewer" | "researcher" | "archivist" | "operator" | "trainer" | "miner" | "commander" | "courier" | string;
   /** Timestamp when task was created */
   created_at: string;
   /** Model to use for this task, defaults based on task type if not specified */
@@ -176,6 +178,8 @@ export interface TaskMetadata {
   issue_number: number;
   /** Task execution mode */
   task_mode: "issue" | "pull_request" | "planning" | "diagnostic";
+  /** Institutional role performing the task */
+  agent_class?: string;
   /** Current lifecycle state */
   status: TaskLifecycleState;
   /** The original reference that was requested */
@@ -412,6 +416,7 @@ export function createInitialTaskMetadata(
     repo_slug: taskPayload.repo_slug,
     issue_number: taskPayload.issue_metadata.number,
     task_mode: taskPayload.task_mode,
+    agent_class: taskPayload.agent_class,
     status: "requested",
     requested_ref: taskPayload.requested_ref,
     resolved_commit_sha: taskPayload.resolved_commit_sha,

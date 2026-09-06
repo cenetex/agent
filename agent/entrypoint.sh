@@ -51,6 +51,7 @@ REQUESTED_REF=$(echo "$TASK_PAYLOAD" | jq -r '.requested_ref')
 RESOLVED_COMMIT_SHA=$(echo "$TASK_PAYLOAD" | jq -r '.resolved_commit_sha')
 ISSUE_NUMBER=$(echo "$TASK_PAYLOAD" | jq -r '.issue_metadata.number')
 TASK_MODE=$(echo "$TASK_PAYLOAD" | jq -r '.task_mode')
+AGENT_CLASS=$(echo "$TASK_PAYLOAD" | jq -r '.agent_class // "developer"')
 CREATED_AT=$(echo "$TASK_PAYLOAD" | jq -r '.created_at')
 
 # Extract repo owner and name from slug
@@ -68,7 +69,7 @@ echo "Task ID: $TASK_ID"
 echo "Repository: $REPO_SLUG"
 echo "Requested ref: $REQUESTED_REF"
 echo "Resolved commit SHA: $RESOLVED_COMMIT_SHA"
-echo "Issue/PR #$ISSUE_NUMBER (mode: $TASK_MODE)"
+echo "Issue/PR #$ISSUE_NUMBER (class: $AGENT_CLASS, mode: $TASK_MODE)"
 echo "Created at: $CREATED_AT"
 CURRENT_STAGE="startup"
 RUN_STATUS="failed"
@@ -133,6 +134,7 @@ update_task_metadata() {
     --arg repo_slug "${REPO_SLUG}" \
     --arg issue_number "${ISSUE_NUMBER}" \
     --arg task_mode "${TASK_MODE}" \
+    --arg agent_class "${AGENT_CLASS}" \
     --arg status "${status}" \
     --arg requested_ref "${REQUESTED_REF}" \
     --arg resolved_commit_sha "${RESOLVED_COMMIT_SHA}" \
@@ -152,6 +154,7 @@ update_task_metadata() {
       repo_slug: $repo_slug,
       issue_number: ($issue_number | tonumber),
       task_mode: $task_mode,
+      agent_class: $agent_class,
       status: $status,
       requested_ref: $requested_ref,
       resolved_commit_sha: $resolved_commit_sha,
@@ -1105,56 +1108,56 @@ if [ "${IS_PR}" != "true" ] && [ "${TASK_MODE}" != "planning" ]; then
 fi
 
 if [ "${TASK_MODE}" = "diagnostic" ]; then
-  echo "ERROR: Diagnostic tasks require a brokered read-only AWS capability and are disabled until that broker is configured." >&2
-  exit 1
   MISSION="${SYSTEM_INSTRUCTIONS}
 
 ---
 
 TASK (from issue #${ISSUE_NUMBER}):
 
-You have been triggered by the 'diagnose' label on issue #${ISSUE_NUMBER} in ${REPO}.
+You are the **operator** for issue #${ISSUE_NUMBER} in ${REPO}. Inspect the live system and produce an evidence-backed operational report.
 
-## CRITICAL FOCUS GUARDRAILS
+## Boundaries
+- Work only on issue #${ISSUE_NUMBER}.
+- You have read-only AWS CloudWatch access through the diagnostic task role.
+- Do not modify infrastructure, source code, labels, credits, or deployments.
+- Do not treat missing logs as proof that a service did not run.
 
-**You are working exclusively on the diagnostic task in issue #${ISSUE_NUMBER}. Do NOT investigate other issues.**
+## Operator mission
+1. Read the issue context and identify the exact service or failure under investigation.
+2. Inspect relevant CloudWatch log groups, recent streams, ECS task events, and S3 task metadata when available.
+3. Record timestamps, task IDs, stages, error categories, and the last known healthy event.
+4. Distinguish observed facts from hypotheses and unresolved questions.
+5. Post one concise report to the issue with sections: Observed, Verified, Suspected, Unknown, Recommended next action.
+6. Close the issue when the report is complete.
 
-Your ONLY goal is to diagnose and report on the specific problem described in THIS issue (#${ISSUE_NUMBER}).
-If the issue references other failing tasks or issues:
-- Those are CONTEXT ONLY — reference them as needed
-- Do NOT investigate or fix those other issues
-- Focus exclusively on the diagnostic task for #${ISSUE_NUMBER}
+The AWS CLI is available. Use read-only commands such as:
+  aws logs describe-log-groups
+  aws logs describe-log-streams
+  aws logs filter-log-events
+  aws ecs describe-tasks
+  aws s3 ls
+
+The control plane records this run as class=operator, mode=diagnostic."
+elif [ "${AGENT_CLASS}" = "archivist" ]; then
+  MISSION="${SYSTEM_INSTRUCTIONS}
 
 ---
 
-Here is the issue context:
-${CONTEXT}
+TASK (from issue #${ISSUE_NUMBER}):
 
-## CRITICAL FOCUS GUARDRAILS:
-**You are working on issue #${ISSUE_NUMBER} ONLY.**
+You are the **archivist** for issue #${ISSUE_NUMBER} in ${REPO}. Reconstruct and preserve the historical record requested by this issue.
 
-1. **Focus on the assigned issue**: Your ONLY goal is to diagnose the specific problem described in issue #${ISSUE_NUMBER}.
-2. **Do NOT drift to related issues**: If the issue context mentions or links to other issues, those are context only. Do NOT implement, fix, or work on them.
-3. **Do NOT explore tangential problems**: If you discover other issues while diagnosing, ignore them. Stay focused on #${ISSUE_NUMBER}.
-4. **Validate your work**: Before finishing, confirm you addressed the acceptance criteria listed in issue #${ISSUE_NUMBER}, not any other issue.
+## Archivist mission
+- Inspect the permitted repository history, issues, PRs, experiment artifacts, and linked evidence.
+- Separate observed records from interpretation and institutional judgment.
+- Preserve failed, superseded, and contradictory results; never erase a failure because it is inconvenient.
+- Produce a structured archival finding in /tmp/planning-result.json with keys: record_type, subject, observations, provenance, verification, contradictions, disposition, next_research_question.
+- The disposition must be one of: arrived, attested, verified, contested, unresolved, superseded, rejected.
+- Include commit SHAs, issue/PR numbers, artifact paths, timestamps, and source limitations.
+- Do not modify repository files. Do not create a cleanup PR in the same run.
+- The trusted control plane will publish the finding to the issue and archive it.
 
-Your mission:
-- You have read-only access to AWS CloudWatch Logs for this deployment
-- Read the logs from recent Lambda function executions to diagnose why they failed or what they're logging
-- Check the daily digest Lambda and nightly QA Lambda logs to verify they're running correctly
-- Report your findings as a comment on this issue, including:
-  - Any errors or exceptions found in the logs
-  - The last successful run timestamp (if found)
-  - Any warnings or unusual patterns
-- When done, close this issue using: gh issue close ${ISSUE_NUMBER}
-- Be thorough but concise in your analysis.
-- IMPORTANT: Do not ask for confirmation. Execute immediately.
-
-Note: The AWS CLI is available in the container. Try commands like:
-  aws logs filter-log-events --log-group-name '/aws/lambda/GitHubAgentStack-DailyDigest' --start-time \$(($(date +%s)*1000-86400000))
-  aws logs get-log-events --log-group-name '/aws/lambda/...' --log-stream-name '...'
-
-When you close the issue, the system will detect this and mark your work as complete."
+The control plane records this run as class=archivist, mode=planning."
 elif [ "${IS_PR}" = "true" ]; then
   MISSION="${SYSTEM_INSTRUCTIONS}
 
