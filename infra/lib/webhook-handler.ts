@@ -3215,8 +3215,9 @@ export async function handler(event: {
   if (ghEvent === "issues" && payload.action === "labeled") {
     const labelName = payload.label?.name?.toLowerCase();
 
-    // Handle diagnostic label
-    if (labelName === DIAGNOSE_LABEL) {
+    // Handle read-only operator labels. `operator` is the class label;
+    // `diagnose` remains supported for backward compatibility.
+    if (labelName === DIAGNOSE_LABEL || labelName === "operator" || labelName === "class:operator") {
       console.log(`Handling diagnostic label on issue #${payload.issue.number}`);
 
       repoOwner = payload.repository.owner.login;
