@@ -259,6 +259,18 @@ export class GitHubAgentStack extends cdk.Stack {
       })
     );
 
+    // Operators may inspect task state, but cannot stop, run, or mutate tasks.
+    diagnosticTaskRole.addToPolicy(
+      new iam.PolicyStatement({
+        actions: ["ecs:DescribeTasks", "ecs:DescribeTaskDefinition", "ecs:ListTasks"],
+        resources: [
+          cluster.clusterArn,
+          `${cluster.clusterArn}/*`,
+          `arn:aws:ecs:${this.region}:${this.account}:task-definition/GitHubAgentStack*`,
+        ],
+      })
+    );
+
     // Grant S3 permissions for artifacts
     artifactsBucket.grantReadWrite(diagnosticTaskRole);
 
@@ -274,6 +286,8 @@ export class GitHubAgentStack extends cdk.Stack {
         resources: [
           `arn:aws:logs:${this.region}:${this.account}:log-group:/aws/lambda/GitHubAgentStack-*`,
           `arn:aws:logs:${this.region}:${this.account}:log-group:/aws/lambda/GitHubAgentStack-*:*`,
+          `arn:aws:logs:${this.region}:${this.account}:log-group:/aws/ecs/*`,
+          `arn:aws:logs:${this.region}:${this.account}:log-group:/aws/ecs/*:*`,
         ],
       })
     );
