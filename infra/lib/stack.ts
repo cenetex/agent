@@ -673,6 +673,55 @@ export class GitHubAgentStack extends cdk.Stack {
     qaRule.addTarget(new targets.LambdaFunction(qaFunction));
 
     // -------------------------------------------------------
+    // Canary Lambda (daily end-to-end dispatch chain check)
+    // -------------------------------------------------------
+    const canaryFunction = new NodejsFunction(this, "CanaryFunction", {
+      entry: path.join(__dirname, "canary-handler.ts"),
+      handler: "handler",
+      runtime: lambda.Runtime.NODEJS_20_X,
+      architecture: lambda.Architecture.ARM_64,
+      timeout: cdk.Duration.minutes(5),
+      memorySize: 256,
+      bundling: {
+        minify: true,
+        sourceMap: true,
+        target: "node20",
+        externalModules: [],
+      },
+      environment: {
+        GITHUB_APP_ID_PARAM: PARAM_GITHUB_APP_ID,
+        GITHUB_APP_PRIVATE_KEY_PARAM: PARAM_GITHUB_APP_PRIVATE_KEY,
+        ARTIFACTS_BUCKET: artifactsBucket.bucketName,
+      },
+    });
+
+    canaryFunction.addToRolePolicy(
+      new iam.PolicyStatement({
+        actions: ["ssm:GetParameter"],
+        resources: ssmParamArns,
+      })
+    );
+
+    artifactsBucket.grantReadWrite(canaryFunction);
+
+    // -------------------------------------------------------
+    // EventBridge rule to trigger the canary (4:30am UTC daily,
+    // before the 9am digest so a broken chain is flagged same-day)
+    // -------------------------------------------------------
+    const canaryRule = new events.Rule(this, "CanaryRule", {
+      description: "Daily canary: exercise the full agent dispatch chain",
+      schedule: events.Schedule.cron({
+        minute: "30",
+        hour: "4",
+        day: "*",
+        month: "*",
+        year: "*",
+      }),
+    });
+
+    canaryRule.addTarget(new targets.LambdaFunction(canaryFunction));
+
+    // -------------------------------------------------------
     // Escalation Handler Lambda
     // -------------------------------------------------------
     const escalationHandler = new NodejsFunction(this, "EscalationHandler", {
