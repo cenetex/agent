@@ -2085,7 +2085,8 @@ async function deductCredits(
   repoSlug: string,
   taskId: string,
   model: string,
-  status: "succeeded" | "failed" | "timed_out"
+  status: "succeeded" | "failed" | "timed_out",
+  reasonOverride?: string
 ): Promise<number> {
   // Don't charge for failed/timed-out tasks
   if (status !== "succeeded") {
@@ -2130,7 +2131,7 @@ async function deductCredits(
     timestamp: new Date().toISOString(),
     type: "debit",
     amount: cost,
-    reason: `Task ${taskId} completed`,
+    reason: reasonOverride ?? `Task ${taskId} completed`,
     task_id: taskId,
     model,
   };
@@ -4467,9 +4468,19 @@ Add the \`agent\` label again after purchasing credits. Credits can be purchased
     taskMetadata.status = "running";
     await storeTaskMetadata(taskMetadata);
 
-    // --- Deduct credits for this task ---
+    // --- Reserve credits for this task ---
+    // The debit is a reservation against runaway spend, taken before the task
+    // does any work. If the task ends in any non-succeeded state, the
+    // task-status handler's reconciliation sweep refunds it automatically
+    // (no charge for failed or timed-out tasks).
     try {
-      await deductCredits(repoSlug, taskId, selectedModel, "succeeded");
+      await deductCredits(
+        repoSlug,
+        taskId,
+        selectedModel,
+        "succeeded",
+        `Task ${taskId} dispatched (credit reservation)`
+      );
     } catch (creditError) {
       console.error(`Failed to deduct credits for task ${taskId}: ${creditError}`);
       // Don't fail task launch if credit accounting fails
