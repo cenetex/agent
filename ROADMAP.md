@@ -140,7 +140,8 @@ Drop the `files` field (may not be supported in all `gh` versions). Get the diff
 
 ## Phase 2 — Cut Costs, Add Memory (Week 3-4)
 
-### 2.1 Switch from OpenRouter to direct Anthropic API
+### 2.1 Switch from OpenRouter to direct Anthropic API — superseded, won't-fix
+**Status:** ARB decided won't-fix for the general migration (ADR #473, 2026-06-17). The narrower `call_llm_for_lint_fix()` accounting bypass that #473 does flag as must-fix is tracked separately, not here.
 **File:** `agent/entrypoint.sh` (3 env vars), `infra/lib/stack.ts` (SSM param)
 
 Current:
