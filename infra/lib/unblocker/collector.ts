@@ -1,3 +1,18 @@
+/**
+ * Unblocker Failure-Graph Collector
+ *
+ * Runs every 15 minutes (via EventBridge cron) to:
+ * 1. Query GitHub for all open issues/PRs with `agent:failed` or `agent:waiting` labels
+ * 2. Fetch task metadata from S3 for error details
+ * 3. Collect GitHub check-run status for PRs
+ * 4. Write a timestamped JSON snapshot to S3
+ * 5. Update `latest.json` pointer for readers
+ *
+ * SCALE TRIGGER: When fleet reaches ~500 concurrent active tasks (~2000 API calls per run),
+ * evaluate switching from polling to a webhook-driven incremental model.
+ * See infra/lib/unblocker/ADR.md for rate-limit analysis and design decisions.
+ */
+
 import {
   S3Client,
   GetObjectCommand,
