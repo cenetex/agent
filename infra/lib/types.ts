@@ -2,6 +2,7 @@
  * Types for the immutable task contract system
  */
 import { createSign } from "crypto";
+import type { ResolvedRole } from "./role-contracts";
 
 export interface GitHubAppConfig {
   /** GitHub App ID */
@@ -132,6 +133,8 @@ export interface TaskPayload {
   task_mode: "issue" | "pull_request" | "planning" | "diagnostic";
   /** Institutional role performing the task */
   agent_class?: "developer" | "reviewer" | "researcher" | "archivist" | "operator" | "trainer" | "miner" | "commander" | "courier" | string;
+  /** Resolved machine-readable role contract (single source of truth for tools/permissions/verifier) */
+  resolved_role?: ResolvedRole;
   /** Timestamp when task was created */
   created_at: string;
   /** Model to use for this task, defaults based on task type if not specified */
@@ -180,6 +183,8 @@ export interface TaskMetadata {
   task_mode: "issue" | "pull_request" | "planning" | "diagnostic";
   /** Institutional role performing the task */
   agent_class?: string;
+  /** Resolved machine-readable role contract carried in task metadata */
+  resolved_role?: ResolvedRole;
   /** Current lifecycle state */
   status: TaskLifecycleState;
   /** The original reference that was requested */
@@ -417,6 +422,7 @@ export function createInitialTaskMetadata(
     issue_number: taskPayload.issue_metadata.number,
     task_mode: taskPayload.task_mode,
     agent_class: taskPayload.agent_class,
+    resolved_role: taskPayload.resolved_role,
     status: "requested",
     requested_ref: taskPayload.requested_ref,
     resolved_commit_sha: taskPayload.resolved_commit_sha,
