@@ -50,6 +50,11 @@ import {
   createRunTaskInput,
   parseTaskAssignPublicIp,
 } from "./fargate-task";
+import {
+  resolveRoleContract,
+  assertModeAllowed,
+  type TaskMode,
+} from "./role-contracts";
 import { publishDigestToSocialMedia } from "./digest-publisher";
 import {
   assertLabelCreateSucceeded,
@@ -3239,6 +3244,7 @@ export async function handler(event: {
         const appConfig: GitHubAppConfig = { appId, privateKey };
         const githubToken = await getInstallationToken(repoOwner, repoName, appConfig);
 
+        const operatorRole = resolveRoleContract("operator");
         const taskPayload: TaskPayload = {
           task_id: generateTaskId(),
           repo_slug: createRepoSlug(repoOwner, repoName),
@@ -3246,6 +3252,7 @@ export async function handler(event: {
           resolved_commit_sha: payload.repository.default_branch_commit?.sha || "HEAD",
           task_mode: "diagnostic",
           agent_class: "operator",
+          resolved_role: operatorRole,
           model: DEFAULT_CODEX_MODEL,
           issue_metadata: {
             number: issueNumber,
@@ -4348,6 +4355,29 @@ The agent will automatically dispatch this task when capacity becomes available.
     console.log(`Using default model for ${taskMode}: ${selectedModel}`);
   }
 
+  // --- Resolve machine-readable role contract (validates before dispatch) ---
+  // The role contract is the single source of truth for tools, permissions,
+  // verifier, and acceptance criteria. No role behavior depends on a system prompt.
+  let resolvedRole;
+  try {
+    resolvedRole = resolveRoleContract(agentClass);
+    assertModeAllowed(agentClass, taskMode as TaskMode);
+  } catch (roleError) {
+    console.error(`Role contract validation failed for role ${agentClass}: ${roleError}`);
+    // Ensure signal labels exist before reporting failure
+    await ensureSignalLabels(repoOwner, repoName, githubToken);
+    await deleteLabelIfPresent(repoOwner, repoName, issueNumber, githubToken, SIGNAL_LABEL_RUNNING);
+    await setSignalLabel(repoOwner, repoName, issueNumber, githubToken, SIGNAL_LABEL_FAILED);
+    return {
+      statusCode: 400,
+      body: JSON.stringify({
+        message: "Task rejected: invalid role contract",
+        agentClass,
+        error: roleError instanceof Error ? roleError.message : String(roleError),
+      }),
+    };
+  }
+
   const taskPayload: TaskPayload = {
     task_id: taskId,
     repo_slug: repoSlug,
@@ -4356,6 +4386,7 @@ The agent will automatically dispatch this task when capacity becomes available.
     issue_metadata: issueMetadata,
     task_mode: taskMode,
     agent_class: agentClass,
+    resolved_role: resolvedRole,
     created_at: new Date().toISOString(),
     model: selectedModel,
   };
