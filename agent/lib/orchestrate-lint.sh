@@ -9,6 +9,15 @@ set -Eeuo pipefail
 # 2. Detecting when LLM intervention is needed
 # 3. Tracking telemetry
 # 4. Creating PR comments for unresolved warnings
+#
+# Network policy note:
+#   The worker sandbox blocks the npm registry (DNS EAI_AGAIN), so
+#   `npm install` / `npm ci` cannot resolve dependencies inside the worker.
+#   This script relies on pre-installed node_modules from the Docker image.
+#   If eslint is not available (no node_modules), the lint loop is a no-op
+#   and the harness treats the local-test signal as Unknown.  GitHub Actions
+#   CI on the pushed PR branch is the authoritative test gate — see the
+#   verify-outputs stage in agent/entrypoint.sh.
 
 REPO_DIR="${REPO_DIR:-.}"
 LINT_RETRY_MAX_ATTEMPTS="${LINT_RETRY_MAX_ATTEMPTS:-3}"

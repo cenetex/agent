@@ -248,6 +248,77 @@ find_created_pr_url() {
     '
 }
 
+# Find any open PR that references the issue (not filtered by run start).
+# Used by the verify stage on re-dispatch, where the PR was created in a
+# prior run and find_created_pr_url (which filters by since) would miss it.
+find_pr_for_issue() {
+  local issue_number="$1"
+  local repo="$2"
+
+  gh api "repos/${repo}/pulls?state=open&per_page=100" \
+    --jq '[.[] | select(.body != null) | select(.body | test("(Fixes|Closes|Resolves) #'"${issue_number}"'(\\b|$)")) | .html_url] | first // empty' \
+    2>/dev/null || true
+}
+
+# Get the head SHA pushed to a PR branch.
+get_pr_head_sha() {
+  local pr_number="$1"
+  local repo="$2"
+
+  gh api "repos/${repo}/pulls/${pr_number}" --jq '.head.sha' 2>/dev/null || true
+}
+
+# Get the CI check conclusion for a PR head as a single string:
+#   success | failure | pending | unknown
+get_pr_ci_conclusion() {
+  local pr_number="$1"
+  local repo="$2"
+
+  local head_sha
+  head_sha="$(get_pr_head_sha "${pr_number}" "${repo}")"
+  if [ -z "${head_sha}" ]; then
+    echo "unknown"
+    return 0
+  fi
+
+  local status_json
+  status_json="$(gh api "repos/${repo}/commits/${head_sha}/check-runs" 2>/dev/null)" || {
+    echo "unknown"
+    return 0
+  }
+
+  local total_count in_progress_count failure_count
+  total_count="$(echo "${status_json}" | jq '.total_count // 0')"
+  in_progress_count="$(echo "${status_json}" | jq '[.check_runs[]? | select(.status != "completed")] | length')"
+  failure_count="$(echo "${status_json}" | jq '[.check_runs[]? | select(.conclusion == "failure" or .conclusion == "cancelled" or .conclusion == "timed_out")] | length')"
+
+  if [ "${total_count}" -eq 0 ]; then
+    echo "unknown"
+  elif [ "${in_progress_count}" -gt 0 ]; then
+    echo "pending"
+  elif [ "${failure_count}" -gt 0 ]; then
+    echo "failure"
+  else
+    echo "success"
+  fi
+}
+
+# List the names of failing CI check-runs for a PR head.
+get_pr_failing_checks() {
+  local pr_number="$1"
+  local repo="$2"
+
+  local head_sha
+  head_sha="$(get_pr_head_sha "${pr_number}" "${repo}")"
+  if [ -z "${head_sha}" ]; then
+    return 0
+  fi
+
+  gh api "repos/${repo}/commits/${head_sha}/check-runs" 2>/dev/null \
+    | jq -r '[.check_runs[]? | select(.conclusion == "failure" or .conclusion == "cancelled" or .conclusion == "timed_out") | .name] | unique | .[]' \
+    2>/dev/null || true
+}
+
 # Check if there are agent questions in comments
 has_agent_question_comment() {
   local issue_number="$1"
