@@ -170,6 +170,7 @@ export class GitHubAgentStack extends cdk.Stack {
     const cluster = new ecs.Cluster(this, "AgentCluster", {
       vpc,
       clusterName: "github-agent",
+      enableFargateCapacityProviders: true,
     });
 
     // -------------------------------------------------------
