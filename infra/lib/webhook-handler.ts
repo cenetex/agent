@@ -4528,10 +4528,19 @@ Add the \`agent\` label again after purchasing credits. Credits can be purchased
       SIGNAL_LABEL_SUCCEEDED,
     };
 
+    // Operator (diagnostic) tasks dispatch to the read-only diagnostic runtime,
+    // not the standard developer task definition. The diagnostic runtime has an
+    // IAM role with only read-only CloudWatch Logs, ECS describe/list, and S3
+    // get/list permissions — no mutation APIs.
+    const isDiagnosticTask = agentClass === "operator";
     const params = createRunTaskInput({
       clusterArn: CLUSTER_ARN,
-      taskDefinitionArn: TASK_DEFINITION_ARN,
-      containerName: CONTAINER_NAME,
+      taskDefinitionArn: isDiagnosticTask
+        ? DIAGNOSTIC_TASK_DEFINITION_ARN
+        : TASK_DEFINITION_ARN,
+      containerName: isDiagnosticTask
+        ? DIAGNOSTIC_CONTAINER_NAME
+        : CONTAINER_NAME,
       subnets: SUBNETS,
       securityGroup: SECURITY_GROUP,
       environment: { ...taskEnvironment },

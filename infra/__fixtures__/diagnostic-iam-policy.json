@@ -1,0 +1,35 @@
+{
+  "description": "Checked IAM policy fixture for the diagnostic (operator) task role. Tests assert that mutation APIs are denied and only read-only APIs are allowed.",
+  "allowed_actions": [
+    "ssm:GetParameter",
+    "ecs:DescribeTasks",
+    "ecs:DescribeTaskDefinition",
+    "ecs:ListTasks",
+    "s3:GetObject",
+    "s3:ListBucket",
+    "logs:FilterLogEvents",
+    "logs:GetLogEvents",
+    "logs:DescribeLogGroups",
+    "logs:DescribeLogStreams"
+  ],
+  "denied_actions": [
+    "ecs:RunTask",
+    "ecs:StopTask",
+    "ecs:StartTask",
+    "ecs:UpdateService",
+    "ecs:UpdateTaskDefinition",
+    "ecs:RegisterTaskDefinition",
+    "ecs:DeregisterTaskDefinition",
+    "s3:PutObject",
+    "s3:DeleteObject",
+    "s3:PutBucketPolicy",
+    "s3:DeleteBucket",
+    "logs:CreateLogGroup",
+    "logs:CreateLogStream",
+    "logs:PutLogEvents",
+    "logs:DeleteLogGroup",
+    "logs:DeleteLogStream"
+  ],
+  "mutation_policy": "read-only",
+  "notes": "The explicit deny is defense-in-depth. Even without it, the allow-list contains only read-only actions. No mutation API is ever granted."
+}

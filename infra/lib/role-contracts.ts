@@ -96,6 +96,20 @@ const FILE_TOOLS_READ: ToolPermission[] = [
   { name: "filesystem", permissions: ["fs:read"] },
 ];
 
+// Operator read-only inspection tools — the only tools the operator role may use.
+// Each tool carries read-only permissions; no mutation permissions are granted.
+const OPERATOR_TOOLS: ToolPermission[] = [
+  { name: "logs.describe", permissions: ["logs:read"] },
+  { name: "logs.search", permissions: ["logs:read"] },
+  { name: "logs.read", permissions: ["logs:read"] },
+  { name: "ecs.list_tasks", permissions: ["ecs:read"] },
+  { name: "ecs.describe_task", permissions: ["ecs:read"] },
+  { name: "s3.list_task_artifacts", permissions: ["s3:read"] },
+  { name: "s3.read_task_metadata", permissions: ["s3:read"] },
+  { name: "github.read_issue", permissions: ["repo:read", "issues:read"] },
+  { name: "github.read_comments", permissions: ["repo:read", "issues:read"] },
+];
+
 // --- Acceptance criteria templates ---
 
 const CODE_CHANGE_CRITERIA: AcceptanceCriterion[] = [
@@ -120,8 +134,11 @@ const ARCHIVE_CRITERIA: AcceptanceCriterion[] = [
 ];
 
 const DIAGNOSTIC_CRITERIA: AcceptanceCriterion[] = [
-  { id: "diagnosis", description: "Diagnostic output", type: "string" },
-  { id: "root_cause", description: "Identified root cause", type: "string" },
+  { id: "report_observed", description: "Observed section of the evidence report", type: "string" },
+  { id: "report_verified", description: "Verified section with evidence references", type: "string" },
+  { id: "report_suspected", description: "Suspected section of the evidence report", type: "string" },
+  { id: "report_unknown", description: "Unknown section of the evidence report", type: "string" },
+  { id: "report_recommended", description: "Recommended next action section", type: "string" },
 ];
 
 const TRAINING_CRITERIA: AcceptanceCriterion[] = [
@@ -190,10 +207,10 @@ export const ROLE_CONTRACTS: Record<RoleName, RoleContract> = {
   operator: {
     version: ROLE_CONTRACT_VERSION,
     role: "operator",
-    tools: [...READONLY_GITHUB_TOOLS],
-    permissions: ["repo:read", "issues:read"],
+    tools: [...OPERATOR_TOOLS],
+    permissions: ["logs:read", "ecs:read", "s3:read", "repo:read", "issues:read"],
     acceptance_criteria: DIAGNOSTIC_CRITERIA,
-    verifier: { name: "diagnostic-verifier", version: "1" },
+    verifier: { name: "diagnostic-verifier", version: "2" },
     allowed_modes: ["diagnostic"],
     mutation_policy: "read-only",
   },
