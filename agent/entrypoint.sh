@@ -1306,23 +1306,70 @@ else
   # Check for an existing agent PR that already references this issue
   EXISTING_PR_NUMBER=$(check_for_existing_agent_pr || true)
   EXISTING_PR_HEAD_REF=""
+  EXISTING_PR_HEAD_SHA=""
+  EXISTING_PR_CI_CONCLUSION=""
+  EXISTING_PR_CI_FAILURES=""
   EXISTING_PR_NOTE=""
   if [ -n "${EXISTING_PR_NUMBER}" ]; then
     echo "WARNING: Found existing open PR #${EXISTING_PR_NUMBER} referencing issue #${ISSUE_NUMBER}"
     EXISTING_PR_HEAD_REF=$(gh api "repos/${REPO}/pulls/${EXISTING_PR_NUMBER}" --jq '.head.ref' 2>/dev/null || true)
+    EXISTING_PR_HEAD_SHA=$(gh api "repos/${REPO}/pulls/${EXISTING_PR_NUMBER}" --jq '.head.sha' 2>/dev/null || true)
+    EXISTING_PR_CI_CONCLUSION="$(get_pr_ci_conclusion "${EXISTING_PR_NUMBER}" "${REPO}")"
     EXISTING_PR_NOTE="
 
 IMPORTANT — EXISTING PR DETECTED:
 There is already an open PR #${EXISTING_PR_NUMBER} that references this issue.
-The existing PR branch is \`${EXISTING_PR_HEAD_REF}\`.
+The existing PR branch is \`${EXISTING_PR_HEAD_REF}\` (head \`${EXISTING_PR_HEAD_SHA:-unknown}\`).
 
 **You MUST re-use this existing PR branch:**
-1. Check out the existing branch: \`git checkout ${EXISTING_PR_HEAD_REF}\` (or fetch it first: \`git fetch origin ${EXISTING_PR_HEAD_REF}\` then \`git checkout ${EXISTING_PR_HEAD_REF}\`).
+1. Check out the existing branch: \`git checkout ${EXISTING_PR_HEAD_REF}\` (it has already been fetched into your worktree).
 2. Make your changes on top of the existing branch.
 3. Commit your changes to this branch — do NOT create a new branch.
 4. The control plane will push your commit to \`${EXISTING_PR_HEAD_REF}\` and the existing PR will be updated.
 
 Do NOT create a new PR or a new branch. Pushing fixes to the existing PR branch is the correct flow for re-dispatch."
+
+    if [ "${EXISTING_PR_CI_CONCLUSION}" = "failure" ]; then
+      EXISTING_PR_CI_FAILURES="$(get_pr_failing_checks "${EXISTING_PR_NUMBER}" "${REPO}")"
+      if [ -n "${EXISTING_PR_CI_FAILURES}" ]; then
+        local existing_pr_ci_list
+        existing_pr_ci_list=$(echo "${EXISTING_PR_CI_FAILURES}" | sed 's/^/- /')
+        EXISTING_PR_NOTE="${EXISTING_PR_NOTE}
+
+## Failing CI checks on PR #${EXISTING_PR_NUMBER}
+${existing_pr_ci_list}
+
+Inspect these failures and make a focused fix on the existing PR branch."
+      fi
+    fi
+
+    # Write a structured task packet so the worker can reliably read the
+    # existing PR details without parsing prose out of the mission text.
+    jq -n \
+      --arg pr_number "${EXISTING_PR_NUMBER}" \
+      --arg head_ref "${EXISTING_PR_HEAD_REF}" \
+      --arg head_sha "${EXISTING_PR_HEAD_SHA}" \
+      --arg ci_conclusion "${EXISTING_PR_CI_CONCLUSION}" \
+      --arg ci_failures "${EXISTING_PR_CI_FAILURES}" \
+      '{existing_pr_number: ($pr_number | tonumber), head_ref: $head_ref, head_sha: $head_sha, ci_conclusion: $ci_conclusion, ci_failures: ($ci_failures | split("\n") | map(select(length > 0)))}' \
+      > /tmp/existing-pr.json 2>/dev/null || true
+  fi
+
+  # Tell the worker which branch to use.  When an existing PR exists the
+  # worker must check out its branch (already fetched into the worktree) and
+  # commit on top of it; otherwise it creates a fresh agent/issue-N-* branch.
+  if [ -n "${EXISTING_PR_HEAD_REF}" ]; then
+    BRANCH_INSTRUCTION="- Check out the existing PR branch \`${EXISTING_PR_HEAD_REF}\` (already fetched), fix the failing CI on that branch, and commit your changes locally — do NOT create a new branch. Read /tmp/existing-pr.json for the existing PR number, head branch, and failing CI checks."
+    # Pre-fetch the existing PR branch into the worker worktree so the worker
+    # can check it out directly without needing network access from inside the
+    # sandbox.  Create a local branch ref pointing at the existing PR head.
+    echo "Pre-fetching existing PR branch ${EXISTING_PR_HEAD_REF} (head ${EXISTING_PR_HEAD_SHA:-unknown})..."
+    git fetch origin "${EXISTING_PR_HEAD_REF}" --depth=50 2>&1 || true
+    if [ -n "${EXISTING_PR_HEAD_SHA}" ]; then
+      git branch -f "${EXISTING_PR_HEAD_REF}" "${EXISTING_PR_HEAD_SHA}" 2>/dev/null || true
+    fi
+  else
+    BRANCH_INSTRUCTION="- Create a branch named agent/issue-${ISSUE_NUMBER}-<short-desc> and commit your changes locally"
   fi
 
   MISSION="${SYSTEM_INSTRUCTIONS}${FEEDBACK_SECTION}
@@ -1362,7 +1409,7 @@ ${CONTEXT}${EXISTING_PR_NOTE}
 Your mission:
 - Understand the issue and explore the codebase to find the relevant files
 - Make the code changes needed to resolve the issue
-- Create a branch named agent/issue-${ISSUE_NUMBER}-<short-desc> and commit your changes locally
+${BRANCH_INSTRUCTION}
 - **Before committing, run the lint loop** (see Lint Loop Instructions below)
 - Do not run gh, git push, curl, wget, ssh, or any command that writes outside this repository
 - Do not open or update a PR. The trusted control-plane wrapper publishes a verified commit.
@@ -1578,9 +1625,30 @@ publish_worker_commit() {
     return 1
   fi
 
+  # Determine the base for the broker patch.  On a fresh dispatch the worker
+  # branches from RESOLVED_COMMIT_SHA, so the patch spans that commit.  On a
+  # re-dispatch over an existing PR the worker checks out the existing PR branch
+  # and commits on top of it, so the patch must span only the existing PR head
+  # (not the main commit) — otherwise the broker would re-create the entire PR
+  # as a single commit off main and the push to the existing branch would be a
+  # non-fast-forward (rejected).  Basing on the existing PR head keeps the push
+  # a fast-forward so the existing PR head advances and CI re-runs.
+  patch_base="${RESOLVED_COMMIT_SHA}"
+  if [ -n "${EXISTING_PR_HEAD_REF}" ] && [ "${target_branch}" = "${EXISTING_PR_HEAD_REF}" ]; then
+    if [ -n "${EXISTING_PR_HEAD_SHA}" ]; then
+      patch_base="${EXISTING_PR_HEAD_SHA}"
+    else
+      EXISTING_PR_HEAD_SHA=$(gh api "repos/${REPO}/pulls/${EXISTING_PR_NUMBER}" --jq '.head.sha' 2>/dev/null || true)
+      if [ -n "${EXISTING_PR_HEAD_SHA}" ]; then
+        patch_base="${EXISTING_PR_HEAD_SHA}"
+      fi
+    fi
+    echo "Re-dispatch: basing broker patch on existing PR head ${patch_base}"
+  fi
+
   patch_file="$(mktemp /tmp/agent-broker-patch.XXXXXX)"
   safe_worker_git -c diff.external= diff --no-ext-diff --no-textconv --binary \
-    "${RESOLVED_COMMIT_SHA}" "${worker_head}" > "${patch_file}"
+    "${patch_base}" "${worker_head}" > "${patch_file}"
   if [ ! -s "${patch_file}" ]; then
     echo "ERROR: Worker commit contains no tree changes" >&2
     return 1
@@ -1593,7 +1661,13 @@ publish_worker_commit() {
   broker_repo="${broker_root}/repo"
   gh repo clone "${REPO}" "${broker_repo}" -- --depth=50
   git -C "${broker_repo}" fetch origin "${RESOLVED_COMMIT_SHA}" --depth=50
-  git -C "${broker_repo}" checkout --detach "${RESOLVED_COMMIT_SHA}"
+  if [ "${patch_base}" != "${RESOLVED_COMMIT_SHA}" ]; then
+    # Fetch the existing PR branch/head so the broker can base the new commit
+    # on top of it (fast-forward push) instead of main.
+    git -C "${broker_repo}" fetch origin "${target_branch}" --depth=50 2>&1 || true
+    git -C "${broker_repo}" fetch origin "${patch_base}" --depth=50 2>&1 || true
+  fi
+  git -C "${broker_repo}" checkout --detach "${patch_base}"
   git -C "${broker_repo}" apply --index --binary "${patch_file}"
   git -C "${broker_repo}" config user.name "github-agent[bot]"
   git -C "${broker_repo}" config user.email "github-agent[bot]@users.noreply.github.com"
