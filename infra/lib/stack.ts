@@ -170,7 +170,13 @@ export class GitHubAgentStack extends cdk.Stack {
     const cluster = new ecs.Cluster(this, "AgentCluster", {
       vpc,
       clusterName: "github-agent",
+      enableFargateCapacityProviders: true,
     });
+
+    cluster.addDefaultCapacityProviderStrategy([
+      { capacityProvider: "FARGATE", base: 1, weight: 1 },
+      { capacityProvider: "FARGATE_SPOT", weight: 1 },
+    ]);
 
     // -------------------------------------------------------
     // Fargate Task Definition
