@@ -1027,6 +1027,63 @@ export class GitHubAgentStack extends cdk.Stack {
     collectorRule.addTarget(new targets.LambdaFunction(collectorFunction));
 
     // -------------------------------------------------------
+    // Unblocker Action Dispatcher Lambda
+    // -------------------------------------------------------
+    const dispatcherFunction = new NodejsFunction(this, "UnblockerDispatcher", {
+      entry: path.join(__dirname, "unblocker/dispatcher.ts"),
+      handler: "handler",
+      runtime: lambda.Runtime.NODEJS_20_X,
+      architecture: lambda.Architecture.ARM_64,
+      timeout: cdk.Duration.minutes(5),
+      memorySize: 512,
+      bundling: {
+        minify: true,
+        sourceMap: true,
+        target: "node20",
+        externalModules: [],
+      },
+      environment: {
+        ARTIFACTS_BUCKET: artifactsBucket.bucketName,
+        GITHUB_APP_ID_PARAM: PARAM_GITHUB_APP_ID,
+        GITHUB_APP_PRIVATE_KEY_PARAM: PARAM_GITHUB_APP_PRIVATE_KEY,
+        UNBLOCKER_HOLD_MINUTES: "10",
+      },
+    });
+
+    dispatcherFunction.addToRolePolicy(
+      new iam.PolicyStatement({
+        actions: ["ssm:GetParameter"],
+        resources: ssmParamArns,
+      })
+    );
+
+    dispatcherFunction.addToRolePolicy(
+      new iam.PolicyStatement({
+        actions: ["s3:GetObject", "s3:PutObject"],
+        resources: [
+          `${artifactsBucket.bucketArn}/unblocker/*`,
+        ],
+      })
+    );
+
+    dispatcherFunction.addToRolePolicy(
+      new iam.PolicyStatement({
+        actions: ["cloudwatch:PutMetricData"],
+        resources: ["*"],
+      })
+    );
+
+    // -------------------------------------------------------
+    // EventBridge rule to trigger unblocker dispatcher after collector
+    // -------------------------------------------------------
+    const dispatcherRule = new events.Rule(this, "UnblockerDispatcherRule", {
+      description: "Trigger unblocker action dispatcher every 15 minutes (offset from collector)",
+      schedule: events.Schedule.rate(cdk.Duration.minutes(15)),
+    });
+
+    dispatcherRule.addTarget(new targets.LambdaFunction(dispatcherFunction));
+
+    // -------------------------------------------------------
     // Outputs
     // -------------------------------------------------------
     new cdk.CfnOutput(this, "WebhookUrl", {
