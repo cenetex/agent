@@ -1332,7 +1332,6 @@ Do NOT create a new PR or a new branch. Pushing fixes to the existing PR branch 
     if [ "${EXISTING_PR_CI_CONCLUSION}" = "failure" ]; then
       EXISTING_PR_CI_FAILURES="$(get_pr_failing_checks "${EXISTING_PR_NUMBER}" "${REPO}")"
       if [ -n "${EXISTING_PR_CI_FAILURES}" ]; then
-        local existing_pr_ci_list
         existing_pr_ci_list=$(echo "${EXISTING_PR_CI_FAILURES}" | sed 's/^/- /')
         EXISTING_PR_NOTE="${EXISTING_PR_NOTE}
 
