@@ -1601,8 +1601,17 @@ publish_worker_commit() {
     return 1
   fi
   if ! safe_worker_git merge-base --is-ancestor "${RESOLVED_COMMIT_SHA}" "${worker_head}"; then
-    echo "ERROR: Worker history is not based on the assigned commit" >&2
-    return 1
+    # On re-dispatch to an existing PR, the worker commits on top of the
+    # existing PR branch head, which may be behind main (not an ancestor of
+    # the assigned main commit). Accept the existing PR head as the base in
+    # that case; the broker will fast-forward the existing branch.
+    if [ -n "${EXISTING_PR_HEAD_REF}" ] && [ -n "${EXISTING_PR_HEAD_SHA}" ] \
+        && safe_worker_git merge-base --is-ancestor "${EXISTING_PR_HEAD_SHA}" "${worker_head}"; then
+      echo "Worker history is based on existing PR head ${EXISTING_PR_HEAD_SHA}" >&2
+    else
+      echo "ERROR: Worker history is not based on the assigned commit" >&2
+      return 1
+    fi
   fi
 
   if [ "${IS_PR}" = "true" ]; then
