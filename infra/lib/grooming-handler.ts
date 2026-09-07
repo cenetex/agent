@@ -252,13 +252,19 @@ async function scanRepository(repo: string, token: string): Promise<void> {
               `Issue #${issueNumber}: agent:running for ${minutesRunning.toFixed(0)} minutes (exceeds ${STALE_THRESHOLD_MINUTES})`
             );
 
-            // Post stale marker comment
-            const staleBody = `⚠️ **Stale agent marker detected**
+            // Reap the stale agent:running label and re-queue the issue by
+            // re-adding the agent trigger label so the queue can retry.
+            // Check whether the issue already has an open PR — if it does,
+            // the re-dispatch will check out the existing PR branch.
+            const staleBody = `⚠️ **Stale \`agent:running\` reaped and re-queued**
 
-This issue has been marked \`agent:running\` for ${minutesRunning.toFixed(0)} minutes. The agent may be stuck. Consider:
-1. Removing the \`agent:running\` label to allow retry
-2. Checking the CloudWatch logs for errors
-3. If the issue is too large, consider splitting it into smaller tasks`;
+This issue has been marked \`agent:running\` for ${minutesRunning.toFixed(0)} minutes (exceeds the ${STALE_THRESHOLD_MINUTES}-minute threshold). The agent run appears to be stuck or has not reported a result.
+
+**Actions taken:**
+1. Removed the \`agent:running\` label
+2. Re-added the \`agent\` label to re-queue the task
+
+The agent will re-dispatch on the next available cycle. If an open PR already exists for this issue, the agent will check out its branch and push fixes to it.`;
 
             await githubRequest(
               `/repos/${repo}/issues/${issueNumber}/comments`,
@@ -270,7 +276,26 @@ This issue has been marked \`agent:running\` for ${minutesRunning.toFixed(0)} mi
               [201]
             );
 
-            console.log(`Posted stale marker comment on ${repo}#${issueNumber}`);
+            // Remove agent:running to unblock re-dispatch
+            await githubRequest(
+              `/repos/${repo}/issues/${issueNumber}/labels/${encodeURIComponent("agent:running")}`,
+              token,
+              { method: "DELETE" },
+              [200, 204, 404]
+            );
+
+            // Re-add the agent trigger label to re-queue
+            await githubRequest(
+              `/repos/${repo}/issues/${issueNumber}/labels`,
+              token,
+              {
+                method: "POST",
+                body: JSON.stringify({ labels: [AGENT_LABEL] }),
+              },
+              [200]
+            );
+
+            console.log(`Reaped stale agent:running and re-queued ${repo}#${issueNumber}`);
           }
         }
       }
