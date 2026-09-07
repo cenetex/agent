@@ -123,7 +123,7 @@ export const TOOL_CATALOG: Record<string, ToolDefinition> = {
     version: "1",
     input_schema: { type: "object", properties: { environment: { type: "string" } } },
     output_schema: { type: "object", properties: { deployed: { type: "boolean" } } },
-    permissions: ["repo:write"],
+    permissions: ["deploy:write"],
     mutation_level: "write",
     emits_evidence: true,
     categories: ["deployment", "write"],
@@ -331,7 +331,7 @@ export function assertReadOnlyNotViolated(
   );
   if (blocked.length > 0) {
     throw new ToolEnforcementError(
-      `Read-only role "${packet.role}" cannot use tool "${toolName}" ` +
+      `read-only role "${packet.role}" lacks permission for tool "${toolName}" ` +
         `(blocked categories: ${blocked.join(", ")})`,
       "read_only_violation"
     );
@@ -510,6 +510,19 @@ export function executeToolCall(
     ),
   });
 
+  // Read-only enforcement (checked before permission so read-only roles
+  // always get a read-only-specific denial reason regardless of permissions)
+  try {
+    assertReadOnlyNotViolated(packet, toolName);
+  } catch (err) {
+    return denied(
+      "none",
+      err instanceof ToolEnforcementError
+        ? err.message
+        : `Unexpected error: ${String(err)}`
+    );
+  }
+
   // Permission check (also validates tool exists in catalog)
   let toolDef: ToolDefinition;
   try {
@@ -524,18 +537,6 @@ export function executeToolCall(
   }
 
   const permStr = toolDef.permissions.join(",");
-
-  // Read-only enforcement
-  try {
-    assertReadOnlyNotViolated(packet, toolName);
-  } catch (err) {
-    return denied(
-      permStr,
-      err instanceof ToolEnforcementError
-        ? err.message
-        : `Unexpected error: ${String(err)}`
-    );
-  }
 
   // Input validation
   try {
