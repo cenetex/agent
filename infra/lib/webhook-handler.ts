@@ -57,6 +57,10 @@ import {
 } from "./role-contracts";
 import { publishDigestToSocialMedia } from "./digest-publisher";
 import {
+  checkDispatchTool,
+  TOOL_CATALOG,
+} from "./tool-enforcement";
+import {
   assertLabelCreateSucceeded,
   type GitHubLabelDefinition,
 } from "./github-labels";
@@ -4376,6 +4380,46 @@ The agent will automatically dispatch this task when capacity becomes available.
         error: roleError instanceof Error ? roleError.message : String(roleError),
       }),
     };
+  }
+
+  // --- Enforce tool boundary at dispatch ---
+  // Every tool in the role contract must be valid in the parent-owned tool catalog
+  // and must pass dispatch-time permission and read-only checks. A role whose
+  // requested tool is not in its contract is rejected before dispatch.
+  for (const toolName of resolvedRole.tools) {
+    const dispatchCheck = checkDispatchTool(resolvedRole, taskId, toolName);
+    if (!dispatchCheck.allowed) {
+      console.error(`Dispatch tool enforcement failed for role ${agentClass} tool ${toolName}: ${dispatchCheck.reason}`);
+      await ensureSignalLabels(repoOwner, repoName, githubToken);
+      await deleteLabelIfPresent(repoOwner, repoName, issueNumber, githubToken, SIGNAL_LABEL_RUNNING);
+      await setSignalLabel(repoOwner, repoName, issueNumber, githubToken, SIGNAL_LABEL_FAILED);
+      return {
+        statusCode: 400,
+        body: JSON.stringify({
+          message: "Task rejected: tool not allowed for role",
+          agentClass,
+          tool: toolName,
+          error: dispatchCheck.reason,
+        }),
+      };
+    }
+  }
+  // Verify all catalog tools referenced by the role are known
+  for (const toolName of resolvedRole.tools) {
+    if (!TOOL_CATALOG[toolName]) {
+      console.error(`Dispatch rejected: unknown tool "${toolName}" in role ${agentClass} contract`);
+      await ensureSignalLabels(repoOwner, repoName, githubToken);
+      await deleteLabelIfPresent(repoOwner, repoName, issueNumber, githubToken, SIGNAL_LABEL_RUNNING);
+      await setSignalLabel(repoOwner, repoName, issueNumber, githubToken, SIGNAL_LABEL_FAILED);
+      return {
+        statusCode: 400,
+        body: JSON.stringify({
+          message: "Task rejected: unknown tool in role contract",
+          agentClass,
+          tool: toolName,
+        }),
+      };
+    }
   }
 
   const taskPayload: TaskPayload = {
