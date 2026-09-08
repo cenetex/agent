@@ -22,6 +22,11 @@ import {
 
 // ---------------------------------------------------------------------------
 // Mock AWS SDK clients
+//
+// The jest.mock factories below are hoisted above these declarations, and the
+// ESM import of ../lib/unblocker/dispatcher runs earlier still, so each factory
+// must not read these consts at module-evaluation time. Each `send` therefore
+// defers to a call-time arrow rather than capturing the mock directly.
 // ---------------------------------------------------------------------------
 
 const mockS3Send = jest.fn();
@@ -29,17 +34,20 @@ const mockSsmSend = jest.fn();
 const mockCwSend = jest.fn();
 
 jest.mock("@aws-sdk/client-s3", () => ({
-  S3Client: jest.fn().mockImplementation(() => ({ send: mockS3Send })),
+  S3Client: jest.fn().mockImplementation(() => ({ send: (...args: any[]) => mockS3Send(...args) })),
   GetObjectCommand: jest.fn().mockImplementation((input: any) => input),
   PutObjectCommand: jest.fn().mockImplementation((input: any) => input),
   ListObjectsV2Command: jest.fn().mockImplementation((input: any) => input),
 }));
 jest.mock("@aws-sdk/client-ssm", () => ({
-  SSMClient: jest.fn().mockImplementation(() => ({ send: mockSsmSend })),
+  SSMClient: jest.fn().mockImplementation(() => ({ send: (...args: any[]) => mockSsmSend(...args) })),
   GetParameterCommand: jest.fn().mockImplementation((input: any) => input),
 }));
 jest.mock("@aws-sdk/client-cloudwatch", () => ({
-  CloudWatchClient: jest.fn().mockImplementation(() => ({ send: mockCwSend })),
+  CloudWatchClient: jest.fn().mockImplementation(() => ({ send: (...args: any[]) => mockCwSend(...args) })),
+  // Without this the constructor is undefined, publishMetrics throws, and its
+  // own try/catch swallows the error -- so the metric silently never publishes.
+  PutMetricDataCommand: jest.fn().mockImplementation((input: any) => input),
 }));
 
 // Mock getInstallationToken so dispatchSnapshot's tokenResolver works.
@@ -104,22 +112,43 @@ function makeBudget() {
   return { merges: 0, labelChanges: 0, issueCreations: 0, exceeded: false };
 }
 
-// S3 GetObject returns a body that can be read via transformToString.
+// Keyed S3 store. The previous helper chained mockImplementationOnce, which
+// assumed a strict call order; the real sequence interleaves reads and writes
+// (get tracker, put tracker, get tracker, ...), so a handler registered for one
+// key was consumed by another key's write and threw NoSuchKey out of recordPass.
+const s3Objects = new Map<string, string | null>();
+const s3Writes: Array<{ key: string; body: string }> = [];
+
+function noSuchKey(): Error {
+  const err = new Error("NoSuchKey");
+  (err as any).name = "NoSuchKey";
+  return err;
+}
+
+// Register the body an S3 GetObject should return for a key. null means the
+// object does not exist, which is the normal first-run case.
 function mockS3GetObjectBody(key: string, content: string | null): void {
-  mockS3Send.mockImplementationOnce(async (cmd: any) => {
-    if (cmd.Key === key) {
-      if (content === null) {
-        const err = new Error("NoSuchKey");
-        (err as any).name = "NoSuchKey";
-        throw err;
-      }
-      return {
-        Body: { transformToString: async () => content },
-      };
+  s3Objects.set(key, content);
+}
+
+function installS3Store(): void {
+  s3Objects.clear();
+  s3Writes.length = 0;
+  mockS3Send.mockImplementation(async (cmd: any) => {
+    // The mocked command constructors are identity functions, so a PutObject
+    // is distinguished from a GetObject by carrying a Body.
+    // Writes are accepted and recorded for assertions, but deliberately do not
+    // change what a later read returns: each test states the tracker state it
+    // wants up front, and letting recordPass overwrite it made loop detection
+    // observe passes the test never set up.
+    if (cmd?.Body !== undefined) {
+      s3Writes.push({ key: cmd.Key, body: String(cmd.Body) });
+      return {};
     }
-    const err = new Error("NoSuchKey");
-    (err as any).name = "NoSuchKey";
-    throw err;
+    if (!s3Objects.has(cmd?.Key)) throw noSuchKey();
+    const content = s3Objects.get(cmd.Key);
+    if (content === null) throw noSuchKey();
+    return { Body: { transformToString: async () => content } };
   });
 }
 
@@ -132,9 +161,20 @@ describe("unblocker dispatcher", () => {
 
   beforeEach(() => {
     jest.clearAllMocks();
-    fetchMock = jest.spyOn(globalThis, "fetch").mockResolvedValue(
-      mockGithubResponse({})
-    );
+    installS3Store();
+    // GitHub returns 201 Created for comment and issue creation, and the
+    // dispatcher asserts those exact statuses. A blanket 200 made every
+    // dry-run path throw before it could assert that nothing was mutated.
+    fetchMock = jest
+      .spyOn(globalThis, "fetch")
+      .mockImplementation(async (input: any, init: any = {}) => {
+        const method = String(init?.method ?? "GET").toUpperCase();
+        const href = String(input);
+        if (method === "POST" && /\/(comments|issues)$/.test(href)) {
+          return mockGithubResponse({ id: 1 }, 201);
+        }
+        return mockGithubResponse({});
+      });
   });
 
   afterEach(() => {
@@ -299,7 +339,9 @@ describe("unblocker dispatcher", () => {
       expect(create?.dry_run).toBe(true);
 
       const calls = captureFetchCalls(fetchMock);
-      expect(calls.some((c) => c.method === "POST" && c.url.includes("/repos/owner/repo/issues"))).toBe(false);
+      // The collection endpoint only — /issues/42/comments contains this path
+      // and is a legitimate dry-run comment.
+      expect(calls.some((c) => c.method === "POST" && /\/repos\/owner\/repo\/issues$/.test(c.url))).toBe(false);
     });
   });
 
@@ -313,7 +355,6 @@ describe("unblocker dispatcher", () => {
         makeItem({ number: 11, classification: "cascade_duplicate", last_updated: new Date(Date.now() - 30 * 60 * 1000).toISOString() }),
         makeItem({ number: 12, classification: "cascade_duplicate", last_updated: new Date(Date.now() - 10 * 60 * 1000).toISOString() }),
       ];
-      fetchMock.mockResolvedValue(mockGithubResponse({}));
 
       const actions = await handleCascadeDuplicate(items, "token", false, makeBudget());
       const closes = actions.filter((a) => a.action === "close");
@@ -465,7 +506,6 @@ describe("unblocker dispatcher", () => {
         makeItem({ classification: "fake_failure", is_pr: true }),
         makeItem({ classification: "genuine", number: 50 }),
       ]);
-      fetchMock.mockResolvedValue(mockGithubResponse({}));
       mockS3GetObjectBody("unblocker/loop-tracker/owner/repo/42.json", null);
       mockS3GetObjectBody("unblocker/loop-tracker/owner/repo/50.json", null);
 
