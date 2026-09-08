@@ -272,8 +272,15 @@ export class GitHubAgentStack extends cdk.Stack {
       })
     );
 
-    // Grant S3 permissions for artifacts
-    artifactsBucket.grantReadWrite(diagnosticTaskRole);
+    // Grant S3 read-only permissions for artifacts — list/get only, no put/delete.
+    // Operators inspect artifacts but must never mutate them.
+    artifactsBucket.grantRead(diagnosticTaskRole);
+    diagnosticTaskRole.addToPolicy(
+      new iam.PolicyStatement({
+        actions: ["s3:ListBucket"],
+        resources: [artifactsBucket.bucketArn],
+      })
+    );
 
     // Grant CloudWatch Logs read-only access — scoped to GitHubAgentStack Lambdas only
     diagnosticTaskRole.addToPolicy(
@@ -290,6 +297,35 @@ export class GitHubAgentStack extends cdk.Stack {
           `arn:aws:logs:${this.region}:${this.account}:log-group:/aws/ecs/*`,
           `arn:aws:logs:${this.region}:${this.account}:log-group:/aws/ecs/*:*`,
         ],
+      })
+    );
+
+    // Explicit deny for all mutation APIs — defense-in-depth so that even if a
+    // broad allow statement is accidentally added, the operator role can never
+    // run, stop, update, or delete ECS tasks, put/delete S3 objects, or write
+    // to CloudWatch Logs.
+    diagnosticTaskRole.addToPolicy(
+      new iam.PolicyStatement({
+        effect: iam.Effect.DENY,
+        actions: [
+          "ecs:RunTask",
+          "ecs:StopTask",
+          "ecs:UpdateService",
+          "ecs:UpdateTaskDefinition",
+          "ecs:RegisterTaskDefinition",
+          "ecs:DeregisterTaskDefinition",
+          "ecs:StartTask",
+          "s3:PutObject",
+          "s3:DeleteObject",
+          "s3:PutBucketPolicy",
+          "s3:DeleteBucket",
+          "logs:CreateLogGroup",
+          "logs:CreateLogStream",
+          "logs:PutLogEvents",
+          "logs:DeleteLogGroup",
+          "logs:DeleteLogStream",
+        ],
+        resources: ["*"],
       })
     );
 
