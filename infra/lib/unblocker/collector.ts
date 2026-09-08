@@ -11,6 +11,13 @@ import {
 import { CloudWatchClient, PutMetricDataCommand } from "@aws-sdk/client-cloudwatch";
 import { TaskMetadata } from "../types";
 import { getInstallationToken, type GitHubAppConfig } from "../types";
+import type {
+  CrossReference,
+  FailedIssue,
+  FailedPullRequest,
+  FailureSnapshot,
+  RepoFailureData,
+} from "./types";
 
 const s3 = new S3Client({});
 const ssm = new SSMClient({});
@@ -347,62 +354,6 @@ function parseFixesReferences(
   }
 
   return references;
-}
-
-interface FailedIssue {
-  number: number;
-  title: string;
-  labels: string[];
-  last_failure_task_id: string | null;
-  last_error_excerpt: string | null;
-  error_category: string | null;
-  github_url: string;
-  created_at: string;
-  last_updated: string;
-}
-
-interface FailedPullRequest {
-  number: number;
-  title: string;
-  labels: string[];
-  head_sha: string;
-  mergeable: boolean | null;
-  check_runs_summary: {
-    total: number;
-    failed: number;
-    pending: number;
-    passed: number;
-    failed_checks: string[];
-  };
-  last_failure_task_id: string | null;
-  last_error_excerpt: string | null;
-  error_category: string | null;
-  github_url: string;
-  created_at: string;
-  last_updated: string;
-}
-
-interface CrossReference {
-  type: "fixes" | "blocked_by";
-  from: { issue_number: number; repo: string; is_pr: boolean };
-  to: { issue_number: number; repo: string };
-}
-
-interface RepoFailureData {
-  repo_slug: string;
-  issues: FailedIssue[];
-  pull_requests: FailedPullRequest[];
-  cross_references: CrossReference[];
-  summary: {
-    total_failed: number;
-    total_waiting: number;
-  };
-}
-
-interface FailureSnapshot {
-  snapshot_id: string;
-  collected_at: string;
-  repos: Record<string, RepoFailureData>;
 }
 
 async function collectFailureData(
