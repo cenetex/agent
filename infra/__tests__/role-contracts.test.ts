@@ -114,7 +114,8 @@ describe('role contracts', () => {
     });
 
     it('rejects a criterion with an invalid type', () => {
-      const bad = makeContract({ acceptance_criteria: [{ id: 'x', description: 'x', type: 'number' as any }] });
+      // NB: 'number' is a valid type now that metric criteria exist.
+      const bad = makeContract({ acceptance_criteria: [{ id: 'x', description: 'x', type: 'object' as any }] });
       expect(() => validateRoleContract(bad)).toThrow('invalid type');
     });
 
@@ -232,6 +233,99 @@ describe('role contracts', () => {
       expect(parsed.permissions).toContain('repo:read');
       expect(parsed.verifier.name).toBe('review-verifier');
       expect(parsed.acceptance_criteria_ids).toContain('verdict');
+    });
+  });
+
+  describe('outcome (metric) acceptance criteria', () => {
+    const base = (): RoleContract => ({
+      ...ROLE_CONTRACTS.developer,
+      acceptance_criteria: [
+        { id: 'open_prs', description: 'Open PRs', type: 'number' },
+        {
+          id: 'open_issues',
+          description: 'Open issues in the target repo',
+          type: 'number',
+          kind: 'metric',
+          measure: 'github.issues.open',
+          direction: 'decrease',
+          invariants: ['open_prs'],
+        },
+      ],
+    });
+
+    it('accepts a well-formed metric criterion', () => {
+      expect(() => validateRoleContract(base())).not.toThrow();
+    });
+
+    it('carries measure and direction through to the resolved role', () => {
+      // The verifier needs more than the ids: without measure/direction it
+      // cannot evaluate a metric at all.
+      const resolved = resolveRoleContract('developer');
+      expect(resolved.acceptance_criteria).toHaveLength(
+        ROLE_CONTRACTS.developer.acceptance_criteria.length
+      );
+      expect(resolved.acceptance_criteria.map((c) => c.id)).toEqual(
+        resolved.acceptance_criteria_ids
+      );
+    });
+
+    it('rejects a decrease that holds nothing fixed', () => {
+      // A decrease with no invariant can be satisfied destructively -- an agent
+      // told only to shrink the backlog can close whatever it likes.
+      const c = base();
+      delete (c.acceptance_criteria[1] as { invariants?: string[] }).invariants;
+      expect(() => validateRoleContract(c)).toThrow(/must name at least one invariant/);
+    });
+
+    it('rejects an invariant that names no real criterion', () => {
+      const c = base();
+      c.acceptance_criteria[1].invariants = ['not_a_criterion'];
+      expect(() => validateRoleContract(c)).toThrow(/unknown invariant/);
+    });
+
+    it('rejects a criterion that is its own invariant', () => {
+      const c = base();
+      c.acceptance_criteria[1].invariants = ['open_issues'];
+      expect(() => validateRoleContract(c)).toThrow(/cannot be its own invariant/);
+    });
+
+    it('rejects a metric that is not numeric', () => {
+      const c = base();
+      c.acceptance_criteria[1].type = 'boolean';
+      expect(() => validateRoleContract(c)).toThrow(/must have type "number"/);
+    });
+
+    it('rejects a metric with no measure', () => {
+      const c = base();
+      delete (c.acceptance_criteria[1] as { measure?: string }).measure;
+      expect(() => validateRoleContract(c)).toThrow(/must name a measure/);
+    });
+
+    it('rejects a metric with an invalid direction', () => {
+      const c = base();
+      (c.acceptance_criteria[1] as { direction?: string }).direction = 'sideways';
+      expect(() => validateRoleContract(c)).toThrow(/invalid direction/);
+    });
+
+    it('rejects metric fields on an artifact criterion', () => {
+      const c = base();
+      c.acceptance_criteria[0] = {
+        id: 'open_prs',
+        description: 'Open PRs',
+        type: 'number',
+        direction: 'decrease',
+      };
+      expect(() => validateRoleContract(c)).toThrow(/not kind "metric"/);
+    });
+
+    it('leaves existing artifact criteria valid with no kind declared', () => {
+      // Back-compatibility: every shipped contract omits `kind` entirely.
+      for (const role of ROLE_NAMES) {
+        for (const c of ROLE_CONTRACTS[role].acceptance_criteria) {
+          expect(c.kind).toBeUndefined();
+        }
+        expect(() => resolveRoleContract(role)).not.toThrow();
+      }
     });
   });
 });
