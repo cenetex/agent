@@ -36,6 +36,13 @@ import {
 import { CloudWatchClient, PutMetricDataCommand } from "@aws-sdk/client-cloudwatch";
 import { getInstallationToken, type GitHubAppConfig } from "../types";
 
+import {
+  fireEscalationHook,
+  isEscalated,
+  readEscalationQueue,
+  type EscalationInput,
+} from "./escalation";
+
 const s3 = new S3Client({});
 const ssm = new SSMClient({});
 const cloudwatch = new CloudWatchClient({});
@@ -972,9 +979,46 @@ export async function dispatchItem(
   budget: ActionBudget,
   holdMinutes: number
 ): Promise<DispatcherAction[]> {
+  // Skip items already in the escalated state — the dispatcher ignores
+  // them until either (a) human action moves the underlying issue out of
+  // `agent:failed`, or (b) the human removes the escalation by editing the
+  // pinned issue body (which marks the entry as resolved).
+  const escalationQueue = await readEscalationQueue();
+  if (isEscalated(escalationQueue, item.repo_slug, item.number)) {
+    return [
+      {
+        repo_slug: item.repo_slug,
+        number: item.number,
+        classification: item.classification,
+        action: "skip_escalated",
+        dry_run: dryRun,
+        success: true,
+        message: "Item is in escalated state; skipping until human action resolves it.",
+      },
+    ];
+  }
+
   // Loop detection: record this pass and freeze if threshold exceeded.
   const { frozen } = await recordPass(item.repo_slug, item.number);
   if (frozen) {
+    // Fire the escalation hook (sub-issue 4): adds the item to the pinned
+    // "Unblocker Escalations" issue, fires the webhook if configured, and
+    // persists the queue so subsequent runs skip it.
+    const escalationInput: EscalationInput = {
+      repo_slug: item.repo_slug,
+      number: item.number,
+      is_pr: item.is_pr,
+      github_url: item.github_url,
+      root_cause_hypothesis: item.rationale ?? "Unknown — loop detected without progress.",
+      what_was_tried: `Dispatcher tried ${LOOP_THRESHOLD}+ times in 24h without progress (classification: ${item.classification}).`,
+      recommended_action: "Investigate the root cause; the dispatcher will not retry until resolved.",
+      last_attempt_count: LOOP_THRESHOLD,
+    };
+    try {
+      await fireEscalationHook(escalationInput);
+    } catch (error) {
+      console.error("Escalation hook failed:", error);
+    }
     return [
       {
         repo_slug: item.repo_slug,
