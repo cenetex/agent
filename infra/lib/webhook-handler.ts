@@ -99,6 +99,11 @@ const REVIEW_APPROVED_LABEL = "review:approved";
 const REVIEW_IN_PROGRESS_LABEL = "review:in-progress";
 const REVIEW_HUMAN_REQUIRED_LABEL = "review:human-required";
 const BLOCKED_MAIN_BROKEN_LABEL = "blocked:main-broken";
+const REVIEW_SKIPPED_NO_CREDITS_LABEL = "review:skipped-no-credits";
+// Review is a read-only analysis pass, so it does not need the implementation
+// model. Haiku costs 4 credits against glm-5.2's 12, which is three times as
+// many reviews for the same balance. Override with REVIEW_MODEL.
+const REVIEW_MODEL = process.env.REVIEW_MODEL || "anthropic/claude-haiku-4-5";
 const REVIEW_LABEL_DEFINITIONS = [
   {
     name: REVIEW_APPROVED_LABEL,
@@ -114,6 +119,11 @@ const REVIEW_LABEL_DEFINITIONS = [
     name: "review:error",
     color: "D73A4A",
     description: "Automated review could not complete",
+  },
+  {
+    name: REVIEW_SKIPPED_NO_CREDITS_LABEL,
+    color: "FBCA04",
+    description: "Automated review skipped: insufficient credits",
   },
   {
     name: REVIEW_HUMAN_REQUIRED_LABEL,
@@ -581,14 +591,17 @@ async function reviewPendingBotPRs(
     const prs = await response.json() as any[];
 
     const needsReview = prs.filter((pr: any) => {
-      const isBotPR = isCodingAgentLogin(pr.user.login);
       const hasReviewLabel = pr.labels.some((label: any) =>
         label.name.startsWith("review:")
       );
       const hasPauseLabel = pr.labels.some((label: any) =>
         label.name === "pause-agent"
       );
-      return isBotPR && !hasReviewLabel && !hasPauseLabel;
+      // Deliberately not restricted to bot authors. Human-authored PRs are the
+      // ones that currently merge unreviewed, and the review sandbox is already
+      // hardened for attacker-controlled diffs (read-only, inherit = "none", no
+      // AWS credentials). Credits are the throttle; pause-agent is the opt-out.
+      return !pr.draft && !hasReviewLabel && !hasPauseLabel;
     });
 
     if (needsReview.length === 0) {
@@ -636,6 +649,26 @@ async function triggerReviewForPR(
 
     const pr = await prResponse.json() as any;
     const repoSlug = createRepoSlug(repoOwner, repoName);
+
+    // Review is metered like any other task. When the balance cannot cover it
+    // the PR is labelled and left alone: review is an assist, not a gate, so
+    // running out of credits must never block a merge.
+    const hasCredits = await checkCreditsAvailable(repoSlug, REVIEW_MODEL);
+    if (!hasCredits) {
+      console.log(`Skipping review of PR #${prNumber}: insufficient credits for ${REVIEW_MODEL}`);
+      await ensureReviewLabels(repoOwner, repoName, token);
+      await githubRequest(
+        `/repos/${repoOwner}/${repoName}/issues/${prNumber}/labels`,
+        token,
+        {
+          method: "POST",
+          body: JSON.stringify({ labels: [REVIEW_SKIPPED_NO_CREDITS_LABEL] }),
+        },
+        [200, 201]
+      ).catch(() => undefined);
+      return null;
+    }
+
     const taskId = generateTaskId();
     const artifactPrefix = `tasks/${repoSlug}/${taskId}`;
     const reviewPayloadS3Key = `${artifactPrefix}/review-payload.json`;
@@ -686,6 +719,7 @@ async function triggerReviewForPR(
       REPO: repoSlug,
       PR_NUMBER: prNumber.toString(),
       REVIEW_CRITERIA: JSON.stringify(reviewCriteria),
+      MODEL: REVIEW_MODEL,
     };
 
     // Get environment variables for ECS task
@@ -717,6 +751,23 @@ async function triggerReviewForPR(
 
     const result = await ecs.send(new RunTaskCommand(params));
     const taskArn = result.tasks?.[0]?.taskArn;
+
+    // Reserve the credits now, the same way dispatch does (#603). A review that
+    // fails is reconciled and refunded by the task-status sweep, so a crashed
+    // review costs nothing.
+    if (taskArn) {
+      try {
+        await deductCredits(
+          repoSlug,
+          taskId,
+          REVIEW_MODEL,
+          "succeeded",
+          `PR #${prNumber} review (credit reservation)`
+        );
+      } catch (error) {
+        console.error(`Failed to reserve review credits for PR #${prNumber}:`, error);
+      }
+    }
 
     if (!taskArn || (result.failures?.length ?? 0) > 0) {
       const failureDetails =
@@ -3578,13 +3629,13 @@ export async function handler(event: {
       return { statusCode: 200, body: "PR opened" };
     }
 
-    // Immediate review trigger for bot-created PRs
+    // Review every opened PR, not only bot-created ones. Human-authored PRs
+    // were the gap: they merged with no automated review at all.
     const prAuthor = payload.pull_request.user.login;
-    const isBotPR = isCodingAgentLogin(prAuthor);
 
-    if (!isBotPR) {
-      console.log(`PR opened by ${prAuthor}, not a bot PR, skipping`);
-      return { statusCode: 200, body: "Ignored: not a bot PR" };
+    if (payload.pull_request.draft) {
+      console.log(`PR #${payload.pull_request.number} by ${prAuthor} is a draft, skipping review`);
+      return { statusCode: 200, body: "Ignored: draft PR" };
     }
 
     const repoOwner = payload.repository.owner.login;

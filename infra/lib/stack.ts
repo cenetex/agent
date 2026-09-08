@@ -384,7 +384,11 @@ export class GitHubAgentStack extends cdk.Stack {
         GITHUB_APP_PRIVATE_KEY_PARAM: PARAM_GITHUB_APP_PRIVATE_KEY,
         OPENROUTER_API_KEY_PARAM: PARAM_OPENROUTER_KEY,
         ARTIFACTS_BUCKET: artifactsBucket.bucketName,
-        FRICTIONLESS_PR_FLOW: "true",
+        // Review on. Credits gate it: when the balance cannot cover a review
+        // the PR is labelled review:skipped-no-credits and merges normally, so
+        // running out of money degrades the assist rather than blocking work.
+        // Set to "true" to disable review entirely.
+        FRICTIONLESS_PR_FLOW: "false",
       },
     });
 
@@ -581,7 +585,9 @@ export class GitHubAgentStack extends cdk.Stack {
     // -------------------------------------------------------
     const reviewRule = new events.Rule(this, "ReviewRule", {
       description: "Trigger review of coding agent PRs",
-      enabled: false,
+      // Sweeper for PRs the webhook missed. Credits gate each review, so an
+      // empty balance labels and skips rather than failing.
+      enabled: true,
       schedule: events.Schedule.cron({
         minute: "*/15", // Every 15 minutes
         hour: "*",
