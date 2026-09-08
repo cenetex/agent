@@ -11,6 +11,7 @@ import type {
   ClassificationReasoning,
   DailyHealthReport,
   EscalationEntry,
+  EscalationQueue,
   FailureSnapshot,
   FailedIssue,
   FailedPullRequest,
@@ -22,7 +23,6 @@ import {
   renderEscalationSection as renderEscalations,
   getPinnedIssueUrl,
   readEscalationQueue,
-  type EscalationQueue,
 } from "./escalation";
 
 const s3 = new S3Client({});
@@ -700,7 +700,7 @@ export function buildDailyHealthReport(
     ? getPinnedIssueUrl(escalationQueue, firstRepoSlug)
     : null;
   const escalationEntries: EscalationEntry[] | undefined = escalationQueue
-    ? escalationQueue.entries.filter((e) => e.state === "escalated")
+    ? escalationQueue.entries.filter((e: EscalationEntry) => e.state === "escalated")
     : undefined;
 
   return {

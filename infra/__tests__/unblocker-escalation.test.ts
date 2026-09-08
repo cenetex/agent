@@ -22,9 +22,13 @@ import {
   sendEscalationWebhook,
   ESCALATION_SECTION_START,
   ESCALATION_SECTION_END,
-  type EscalationQueue,
-  type EscalationEntry,
 } from "../lib/unblocker/escalation";
+// These types are declared and exported in ./types; escalation.ts imports them
+// and does not re-export, so they cannot be pulled in from there.
+import type {
+  EscalationQueue,
+  EscalationEntry,
+} from "../lib/unblocker/types";
 
 // ---------------------------------------------------------------------------
 // Mock AWS SDK + global fetch so the I/O functions don't hit the network
