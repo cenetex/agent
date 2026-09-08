@@ -1461,8 +1461,20 @@ start_virtual_display
 MODEL=$(echo "$TASK_PAYLOAD" | jq -r '.model // "z-ai/glm-5.2"')
 AGENT_EXECUTOR=$(printf "%s" "${AGENT_EXECUTOR}" | tr '[:upper:]' '[:lower:]')
 
-if [ "${AGENT_EXECUTOR}" != "codex" ]; then
-  echo "ERROR: Implementation workers require the sandboxed Codex executor." >&2
+# Implementation workers must run inside the sandboxed Codex executor. They
+# write code, and the sandbox is what contains that write path: Codex is
+# configured with `inherit = "none"`, so commands it spawns get no AWS
+# credentials, no GitHub token, and no network.
+#
+# Diagnostic workers are the deliberate exception. Their job is live inspection
+# of AWS and GitHub state, which that same sandbox forbids by construction.
+# They dispatch on the `diagnose` label onto a separate task definition whose
+# IAM role grants read-only access (ecs:Describe*, ecs:ListTasks,
+# ssm:GetParameter) and they use the custom executor for exactly this reason.
+# Forcing them onto Codex does not make them safer -- it makes them useless,
+# because they cannot reach the thing they were asked to inspect.
+if [ "${AGENT_EXECUTOR}" != "codex" ] && [ "${TRIGGER_LABEL}" != "diagnose" ]; then
+  echo "ERROR: Implementation workers require the sandboxed Codex executor (executor=${AGENT_EXECUTOR}, trigger=${TRIGGER_LABEL})." >&2
   exit 1
 fi
 configure_codex_openrouter task
