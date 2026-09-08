@@ -29,14 +29,69 @@ export interface ToolPermission {
   permissions: string[];
 }
 
-/** Acceptance criterion schema entry. */
+/**
+ * How a criterion is judged.
+ *
+ * "artifact" asks whether evidence exists — a report was written, files were
+ * changed, commands ran. "metric" asks whether a measured quantity moved in
+ * the required direction between the start and end of the task.
+ *
+ * The distinction matters because an artifact criterion cannot fail for a role
+ * that does its work and changes nothing: producing the artifact IS the pass.
+ * Roles whose purpose is to reduce something — a backlog, a queue, dead
+ * branches — need to be judged on the reduction, not on having filed a report
+ * about it.
+ */
+export type CriterionKind = "artifact" | "metric";
+
+/** Direction a metric must move for the criterion to pass. */
+export type MetricDirection = "decrease" | "increase" | "unchanged";
+
+/**
+ * Acceptance criterion schema entry.
+ *
+ * A metric criterion is measured twice — before the task runs and after it
+ * finishes — and passes only if the change matches `direction`. Example:
+ *
+ * ```ts
+ * {
+ *   id: "open_issues",
+ *   description: "Open issues in the target repo",
+ *   type: "number",
+ *   kind: "metric",
+ *   measure: "github.issues.open",
+ *   direction: "decrease",
+ *   invariants: ["open_prs", "critical_issues"],
+ * }
+ * ```
+ *
+ * `invariants` is not optional in spirit. A decrease requirement with nothing
+ * held fixed can be satisfied destructively — an agent told only to shrink the
+ * backlog can close whatever it likes. Naming the criteria that must NOT move
+ * is what separates "drove the number down" from "destroyed the thing being
+ * measured".
+ */
 export interface AcceptanceCriterion {
   /** Stable identifier for this criterion (used in task metadata). */
   id: string;
   /** Human-readable description of what is verified. */
   description: string;
   /** JSON-schema-style type for the criterion value. */
-  type: "boolean" | "string" | "array";
+  type: "boolean" | "string" | "array" | "number";
+  /** Defaults to "artifact" when omitted, which is the pre-existing behaviour. */
+  kind?: CriterionKind;
+  /**
+   * metric only: named measurement the verifier knows how to take, both before
+   * the task starts and after it finishes (e.g. "github.issues.open").
+   */
+  measure?: string;
+  /** metric only: required direction of change between those two readings. */
+  direction?: MetricDirection;
+  /**
+   * metric only: ids of criteria in the same contract that must NOT change
+   * while this one moves. Guards against satisfying a decrease by destruction.
+   */
+  invariants?: string[];
 }
 
 /** A versioned, machine-readable role contract. */
@@ -281,12 +336,59 @@ export function validateRoleContract(contract: RoleContract): void {
   if (!Array.isArray(contract.acceptance_criteria) || contract.acceptance_criteria.length === 0) {
     throw new Error(`Role ${contract.role} must declare at least one acceptance criterion`);
   }
+  const criterionIds = new Set(contract.acceptance_criteria.map((c) => c.id));
   for (const criterion of contract.acceptance_criteria) {
     if (!criterion.id || typeof criterion.id !== "string") {
       throw new Error(`Role ${contract.role} has an acceptance criterion with no id`);
     }
-    if (!["boolean", "string", "array"].includes(criterion.type)) {
+    if (!["boolean", "string", "array", "number"].includes(criterion.type)) {
       throw new Error(`Role ${contract.role} criterion ${criterion.id} has invalid type`);
+    }
+    const kind = criterion.kind ?? "artifact";
+    if (!["artifact", "metric"].includes(kind)) {
+      throw new Error(`Role ${contract.role} criterion ${criterion.id} has invalid kind: ${kind}`);
+    }
+    if (kind === "metric") {
+      if (criterion.type !== "number") {
+        throw new Error(
+          `Role ${contract.role} metric criterion ${criterion.id} must have type "number"`
+        );
+      }
+      if (!criterion.measure || typeof criterion.measure !== "string") {
+        throw new Error(
+          `Role ${contract.role} metric criterion ${criterion.id} must name a measure`
+        );
+      }
+      if (!["decrease", "increase", "unchanged"].includes(criterion.direction as string)) {
+        throw new Error(
+          `Role ${contract.role} metric criterion ${criterion.id} has invalid direction: ${criterion.direction}`
+        );
+      }
+      // A decrease with nothing held fixed can be satisfied by destroying the
+      // thing being measured, so it must name at least one invariant.
+      if (criterion.direction === "decrease") {
+        if (!Array.isArray(criterion.invariants) || criterion.invariants.length === 0) {
+          throw new Error(
+            `Role ${contract.role} metric criterion ${criterion.id} requires a decrease and must name at least one invariant`
+          );
+        }
+      }
+      for (const inv of criterion.invariants ?? []) {
+        if (!criterionIds.has(inv)) {
+          throw new Error(
+            `Role ${contract.role} metric criterion ${criterion.id} names unknown invariant: ${inv}`
+          );
+        }
+        if (inv === criterion.id) {
+          throw new Error(
+            `Role ${contract.role} metric criterion ${criterion.id} cannot be its own invariant`
+          );
+        }
+      }
+    } else if (criterion.measure || criterion.direction || criterion.invariants) {
+      throw new Error(
+        `Role ${contract.role} criterion ${criterion.id} sets metric fields but is not kind "metric"`
+      );
     }
   }
   if (!contract.verifier || !contract.verifier.name || !contract.verifier.version) {
@@ -323,6 +425,12 @@ export interface ResolvedRole {
   verifier: { name: string; version: string };
   /** Acceptance criteria IDs for this task. */
   acceptance_criteria_ids: string[];
+  /**
+   * Full acceptance criteria for this task. The verifier needs more than the
+   * ids to evaluate a metric criterion — it needs the measure to take and the
+   * direction to require.
+   */
+  acceptance_criteria: AcceptanceCriterion[];
   /** Mutation policy. */
   mutation_policy: MutationPolicy;
   /** Allowed task modes. */
@@ -346,6 +454,7 @@ export function resolveRoleContract(roleName: string): ResolvedRole {
     permissions: dedupe(contract.permissions),
     verifier: { ...contract.verifier },
     acceptance_criteria_ids: contract.acceptance_criteria.map((c) => c.id),
+    acceptance_criteria: contract.acceptance_criteria.map((c) => ({ ...c })),
     mutation_policy: contract.mutation_policy,
     allowed_modes: [...contract.allowed_modes],
   };
