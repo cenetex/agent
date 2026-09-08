@@ -5,6 +5,7 @@ const agentRoot = resolve(__dirname, '../../agent');
 const common = readFileSync(resolve(agentRoot, 'lib/common.sh'), 'utf8');
 const reviewEntrypoint = readFileSync(resolve(agentRoot, 'review-entrypoint.sh'), 'utf8');
 const taskEntrypoint = readFileSync(resolve(agentRoot, 'entrypoint.sh'), 'utf8');
+const taskDockerfile = readFileSync(resolve(agentRoot, 'Dockerfile'), 'utf8');
 const reviewDockerfile = readFileSync(resolve(agentRoot, 'Dockerfile.review'), 'utf8');
 
 describe('agent shell security contracts', () => {
@@ -25,15 +26,36 @@ describe('agent shell security contracts', () => {
     );
     const codexEnvironment = reviewEntrypoint.slice(
       reviewEntrypoint.indexOf('env -i'),
-      reviewEntrypoint.indexOf('timeout 1800 codex exec')
+      reviewEntrypoint.indexOf(
+        'timeout 1800 codex --enable use_legacy_landlock exec'
+      )
     );
     expect(codexEnvironment).not.toContain('GITHUB_TOKEN=');
     expect(codexEnvironment).not.toContain('GH_TOKEN=');
-    expect(codexEnvironment).not.toContain('AWS_');
+    expect(codexEnvironment).not.toContain('AWS_ACCESS_KEY_ID=');
+    expect(codexEnvironment).not.toContain('AWS_SECRET_ACCESS_KEY=');
+    expect(codexEnvironment).not.toContain('AWS_SESSION_TOKEN=');
+    expect(codexEnvironment).not.toContain('AWS_CONTAINER_CREDENTIALS_RELATIVE_URI=');
+    expect(codexEnvironment).not.toContain('AWS_CONTAINER_AUTHORIZATION_TOKEN=');
     expect(codexEnvironment).not.toContain('ARTIFACT');
+    expect(codexEnvironment).toContain('AWS_EC2_METADATA_DISABLED="true"');
+    expect(codexEnvironment).toContain('AWS_CONFIG_FILE="/dev/null"');
+    expect(codexEnvironment).toContain('AWS_SHARED_CREDENTIALS_FILE="/dev/null"');
+    expect(codexEnvironment).toContain('GIT_CONFIG_GLOBAL="/dev/null"');
+    expect(codexEnvironment).toContain('GIT_TERMINAL_PROMPT="0"');
     expect(common).not.toContain('set = { GITHUB_TOKEN');
     expect(common).not.toContain('set = { GH_TOKEN');
     expect(common).not.toContain('set = { OPENROUTER_API_KEY');
+    expect(common).not.toContain('AWS_ACCESS_KEY_ID');
+    expect(common).not.toContain('AWS_SECRET_ACCESS_KEY');
+    expect(common).not.toContain('AWS_SESSION_TOKEN');
+    expect(common).not.toContain('AWS_CONTAINER_CREDENTIALS_RELATIVE_URI');
+    expect(common).not.toContain('AWS_CONTAINER_AUTHORIZATION_TOKEN');
+    expect(common).toContain('AWS_EC2_METADATA_DISABLED = "true"');
+    expect(common).toContain('AWS_CONFIG_FILE = "/dev/null"');
+    expect(common).toContain('AWS_SHARED_CREDENTIALS_FILE = "/dev/null"');
+    expect(common).toContain('GIT_CONFIG_GLOBAL = "/dev/null"');
+    expect(common).toContain('GIT_TERMINAL_PROMPT = "0"');
   });
 
   it('uses a non-inheriting shell environment for implementation workers', () => {
@@ -44,6 +66,20 @@ describe('agent shell security contracts', () => {
     expect(taskEntrypoint).not.toContain('push anyway');
     expect(taskEntrypoint).not.toContain(
       "gh pr create --title '<title>'"
+    );
+  });
+
+  it('merges through GitHub only after the entrypoint observes green CI', () => {
+    expect(taskEntrypoint).toContain(': "${SELF_MERGE_ENABLED:=true}"');
+    expect(taskEntrypoint).toContain('merge_ready_pr()');
+    expect(taskEntrypoint).toContain(
+      'gh api --method PUT "repos/${repo}/pulls/${pr_number}/merge"'
+    );
+    expect(taskEntrypoint).toMatch(
+      /case "\$CI_RESULT" in[\s\S]*?0\)[\s\S]*?merge_ready_pr/
+    );
+    expect(taskEntrypoint).toContain(
+      'The code work is complete, but the agent will not merge without a green check result.'
     );
   });
 
@@ -63,6 +99,34 @@ describe('agent shell security contracts', () => {
     expect(reviewEntrypoint).toContain('--ignore-rules');
     expect(reviewDockerfile).toContain(
       'COPY review-findings.schema.json /lib/review-findings.schema.json'
+    );
+  });
+
+  it('binds bot review attestations to the exact reviewed head', () => {
+    expect(reviewEntrypoint).toContain(
+      '<!-- cenetex-review-attestation:v1 head=${HEAD_SHA} decision=${decision} task=${TASK_ID} -->'
+    );
+    expect(reviewEntrypoint).toContain(
+      'using the bot attestation'
+    );
+  });
+
+  it('uses the namespace-free Linux sandbox backend on Fargate', () => {
+    expect(reviewEntrypoint).toContain(
+      'timeout 1800 codex --enable use_legacy_landlock exec'
+    );
+    expect(reviewEntrypoint).toContain('--sandbox read-only');
+    expect(taskEntrypoint).toContain(
+      '"${CODEX_TASK_BIN}" --enable use_legacy_landlock exec'
+    );
+    expect(taskEntrypoint).toContain('--sandbox workspace-write');
+    expect(taskDockerfile).toContain('ARG CODEX_TASK_CLI_VERSION=0.116.0');
+    expect(taskDockerfile).toContain('/usr/local/bin/codex-task');
+    expect(taskEntrypoint).toContain(
+      'elif ! check_codex_task_sandbox >> "${AGENT_LOG}" 2>&1; then'
+    );
+    expect(taskEntrypoint.indexOf('check_codex_task_sandbox')).toBeLessThan(
+      taskEntrypoint.indexOf('"${CODEX_TASK_BIN}" --enable use_legacy_landlock exec')
     );
   });
 

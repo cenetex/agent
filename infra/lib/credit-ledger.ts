@@ -226,7 +226,15 @@ export async function deductCredits(
   repoSlug: string,
   taskId: string,
   model: string,
-  status: "succeeded" | "failed" | "timed_out"
+  status: "succeeded" | "failed" | "timed_out",
+  /**
+   * Overrides the ledger reason. Dispatch takes this debit as a reservation
+   * against runaway spend before the task does any work, and says so, so the
+   * ledger does not read as if the task had already completed. Added by the
+   * #603 refund fix (9d3c2d4); preserved here when these helpers moved out of
+   * webhook-handler.ts.
+   */
+  reasonOverride?: string
 ): Promise<number> {
   // Don't charge for failed/timed-out tasks
   if (status !== "succeeded") {
@@ -271,7 +279,7 @@ export async function deductCredits(
     timestamp: new Date().toISOString(),
     type: "debit",
     amount: cost,
-    reason: `Task ${taskId} completed`,
+    reason: reasonOverride ?? `Task ${taskId} completed`,
     task_id: taskId,
     model,
   };

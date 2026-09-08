@@ -143,10 +143,12 @@ post_review_comment() {
   local decision="$1"
   local findings="$2"
 
+  local attestation="<!-- cenetex-review-attestation:v1 head=${HEAD_SHA} decision=${decision} task=${TASK_ID} -->"
   local comment_body=""
   case "$decision" in
     "approved")
-      comment_body="✅ **Automated Review: APPROVED**
+      comment_body="${attestation}
+✅ **Automated Review: APPROVED**
 
 This PR has been reviewed by the agent and is approved for merging.
 
@@ -163,7 +165,8 @@ To prevent auto-merge, remove the \`review:approved\` label or close this PR.
 *Task ID: \`${TASK_ID}\`*"
       ;;
     "changes_requested")
-      comment_body="❌ **Automated Review: CHANGES REQUESTED**
+      comment_body="${attestation}
+❌ **Automated Review: CHANGES REQUESTED**
 
 The automated review has identified issues that need to be addressed before this PR can be merged.
 
@@ -177,7 +180,8 @@ Please address these issues and push new commits. The review will run again auto
 *Task ID: \`${TASK_ID}\`*"
       ;;
     "error")
-      comment_body="🔧 **Automated Review: ERROR**
+      comment_body="${attestation}
+🔧 **Automated Review: ERROR**
 
 The automated review encountered an error and could not complete.
 
@@ -241,6 +245,33 @@ apply_review_labels() {
   fi
 
   echo "Applied ${result_label} to ${REPO}#${PR_NUMBER}" | tee -a "${REVIEW_LOG}"
+}
+
+post_github_review() {
+  local decision="$1"
+
+  case "$decision" in
+    "approved")
+      if ! gh pr review "${PR_NUMBER}" -R "${REPO}" --approve \
+        --body "Automated review: approved by the coding agent." >>"${REVIEW_LOG}" 2>&1; then
+        echo "ERROR: Failed to submit approving review for ${REPO}#${PR_NUMBER}" | tee -a "${REVIEW_LOG}"
+        return 1
+      fi
+      ;;
+    "changes_requested")
+      if ! gh pr review "${PR_NUMBER}" -R "${REPO}" --request-changes \
+        --body "Automated review: changes requested." >>"${REVIEW_LOG}" 2>&1; then
+        echo "ERROR: Failed to submit changes-requested review for ${REPO}#${PR_NUMBER}" | tee -a "${REVIEW_LOG}"
+        return 1
+      fi
+      ;;
+    *)
+      echo "No GitHub review submitted for decision: ${decision}" | tee -a "${REVIEW_LOG}"
+      return 0
+      ;;
+  esac
+
+  echo "Submitted GitHub review (${decision}) for ${REPO}#${PR_NUMBER}" | tee -a "${REVIEW_LOG}"
 }
 
 extract_linked_issues() {
@@ -638,6 +669,8 @@ setup_review_dependencies
 # Add 30-minute (1800 second) hard timeout to prevent stuck reviews from burning credits
 CODEX_EXIT_CODE=0
 rm -f "${REVIEW_FINDINGS_FILE}"
+# Fargate blocks the user namespaces required by Codex's Bubblewrap backend.
+# Landlock keeps model commands read-only without requiring extra container privileges.
 env -i \
   PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" \
   HOME="/home/agent" \
@@ -649,8 +682,13 @@ env -i \
   DISPLAY="${DISPLAY:-}" \
   CODEX_HOME="${CODEX_HOME}" \
   CODEX_DISABLE_NONESSENTIAL_TRAFFIC="1" \
+  AWS_EC2_METADATA_DISABLED="true" \
+  AWS_CONFIG_FILE="/dev/null" \
+  AWS_SHARED_CREDENTIALS_FILE="/dev/null" \
+  GIT_CONFIG_GLOBAL="/dev/null" \
+  GIT_TERMINAL_PROMPT="0" \
   OPENROUTER_API_KEY="${OPENROUTER_API_KEY}" \
-  timeout 1800 codex exec --ephemeral --skip-git-repo-check \
+  timeout 1800 codex --enable use_legacy_landlock exec --ephemeral --skip-git-repo-check \
   --strict-config \
   --ignore-rules \
   --sandbox read-only \
@@ -725,5 +763,11 @@ apply_review_labels "$REVIEW_DECISION"
 # Format findings for the review comment
 FORMATTED_FINDINGS=$(format_review_findings "$FINDINGS_DATA")
 post_review_comment "$REVIEW_DECISION" "$FORMATTED_FINDINGS"
+
+# GitHub rejects a real review when the same App authored the PR. Keep this
+# best-effort for PRs authored by another identity; merge triage verifies the
+# head-bound attestation comment above when self-review is unavailable.
+post_github_review "$REVIEW_DECISION" || \
+  echo "WARNING: GitHub review submission was unavailable; using the bot attestation." | tee -a "${REVIEW_LOG}"
 
 REVIEW_STATUS="completed"

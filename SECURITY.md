@@ -59,6 +59,8 @@ The GitHub Agent executes untrusted code in isolated AWS Fargate tasks within a 
 **Explicit Egress Controls:**
 - HTTPS (port 443): GitHub API, model inference, and AWS service APIs
 - Package installation and API access must use HTTPS.
+- **npm registry (`registry.npmjs.org`) is intentionally NOT in the worker sandbox egress allow-list.** The untrusted model worker cannot run `npm install` / `npm ci` to resolve dependencies (DNS resolution fails with `EAI_AGAIN`). This is a deliberate security policy: dependency installation inside the sandbox could pull arbitrary network-fetched packages into the build.
+- **Authoritative test gate:** Because the worker sandbox cannot install dependencies, GitHub Actions CI on the pushed PR branch is the sole authoritative test signal. The agent harness treats local-install/lint failure as **Unknown** (not a verify failure) and relies on CI check-run conclusions to gate the run (see `agent/entrypoint.sh` verify-outputs stage).
 
 **VPC Endpoints:**
 - S3 Gateway Endpoint: Private access to artifact storage

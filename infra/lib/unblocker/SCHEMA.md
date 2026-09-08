@@ -363,3 +363,58 @@ Currently at **v1.0**. If schema changes are needed:
 4. Increment minor version in package.json if significant change
 
 No backward compatibility guarantee between versions.
+
+## Classification Output (Root-Cause Classifier)
+
+The root-cause classifier reads the latest snapshot and classifies each
+failure into one of five categories.  The output is written to:
+
+```
+s3://github-agent-artifacts-{account}-{region}/unblocker/classifications/{YYYY-MM-DD}-{HH-mm}.json
+```
+
+### Classification Categories
+
+| Category | Meaning |
+| --- | --- |
+| `fake_failure` | Agent exit_code = 0, PR exists with `Fixes #N`, PR is mergeable + checks green. Issue is closeable with merge. |
+| `transient_retryable` | Last error matches a known transient pattern (OpenRouter 402, GitHub 5xx, ECS SIGTERM, network timeout). |
+| `ci_real_failure` | PR exists, is mergeable, but specific checks (lint/test) failed. Needs targeted follow-up issue. |
+| `cascade_duplicate` | N failures share the same error signature; one root cause, others are symptoms. Deduplicate. |
+| `genuine` | None of the above. Real bug in the agent's output, needs human or fresh agent run. |
+
+### ClassifiedSnapshot Structure
+
+```typescript
+interface ClassifiedSnapshot {
+  snapshot_id: string;
+  classified_at: string;
+  classifications: ClassifiedItem[];
+  summary: Record<ClassificationCategory, number>;
+}
+
+interface ClassifiedItem {
+  repo_slug: string;
+  is_pr: boolean;
+  number: number;
+  github_url: string;
+  category: ClassificationCategory;
+  reasoning: {
+    summary: string;
+    signals: Record<string, string | number | boolean | null>;
+  };
+  classified_at: string;
+}
+```
+
+### Daily Health Report
+
+The classifier also produces a daily health report written to:
+
+```
+s3://github-agent-artifacts-{account}-{region}/unblocker/reports/{YYYY-MM-DD}.json
+```
+
+Each report includes a `past_report_accuracy` section that grades the
+prior day's classifications against actual outcomes, including a
+`false_positive_rate` metric.

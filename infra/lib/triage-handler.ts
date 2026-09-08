@@ -20,6 +20,7 @@ import {
 import type { GitHubAppConfig, CreditBalance } from "./types";
 import { getInstallationToken, getModelCost } from "./types";
 import { Anthropic } from "@anthropic-ai/sdk";
+import { DEFAULT_MONITORED_REPOS } from "./monitored-repos";
 
 const ssm = new SSMClient({});
 const s3 = new S3Client({});
@@ -32,16 +33,7 @@ const ARTIFACTS_BUCKET = process.env.ARTIFACTS_BUCKET!;
 const MONITORED_REPOS = (process.env.MONITORED_REPOS || "").split(",").filter(r => r.trim());
 
 // Default repos if not specified
-const DEFAULT_REPOS = [
-  "cenetex/aws-swarm",
-  "cenetex/kyro",
-  "cenetex/raticross",
-  "cenetex/ratibot",
-  "cenetex/litigation",
-  "cenetex/agent",
-  "cenetex/governance",
-  "atimics/AutoForwarder",
-];
+const DEFAULT_REPOS = DEFAULT_MONITORED_REPOS;
 
 // Labels to skip during triage
 const SKIP_LABELS = ["manual", "discussion", "architecture", "escalation:queue"];

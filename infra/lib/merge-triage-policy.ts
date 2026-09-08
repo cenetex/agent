@@ -38,7 +38,7 @@ export interface MergeTriageCandidate {
   additions: number;
   deletions: number;
   protectedFiles: string[];
-  hasCurrentHumanApproval: boolean;
+  botApproved: boolean;
   reviewApprovedAt?: string;
   requiredHoldMinutes?: number;
   createdAt?: string;
@@ -87,10 +87,6 @@ export function isCodingAgentAuthor(
     const botStem = normalizedBot.replace("[bot]", "");
     return normalizedAuthor === normalizedBot || normalizedAuthor.includes(botStem);
   });
-}
-
-function hasLabel(candidate: MergeTriageCandidate, label: string): boolean {
-  return candidate.labels.some((candidateLabel) => candidateLabel === label);
 }
 
 function parseTimestamp(value: string | undefined): number | null {
@@ -155,17 +151,17 @@ function initialStatusForCandidate(
     };
   }
 
-  if (!hasLabel(candidate, "review:approved")) {
+  if (!candidate.labels.includes("review:approved")) {
     return {
       status: "waiting",
-      reasons: ["Waiting for review:approved."],
+      reasons: ["Waiting for the current review:approved label."],
     };
   }
 
-  if (!candidate.hasCurrentHumanApproval) {
+  if (!candidate.botApproved) {
     return {
       status: "waiting",
-      reasons: ["Waiting for a current human approving review."],
+      reasons: ["Waiting for an approving bot review."],
     };
   }
 

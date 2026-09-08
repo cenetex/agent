@@ -13,6 +13,7 @@ import * as events from "aws-cdk-lib/aws-events";
 import * as targets from "aws-cdk-lib/aws-events-targets";
 import { Construct } from "constructs";
 import * as path from "path";
+import { DEFAULT_MONITORED_REPOS } from "./monitored-repos";
 
 // SSM parameter names — created out-of-band (already exist)
 const PARAM_GITHUB_APP_ID = "/github-agent/GITHUB_APP_ID";
@@ -24,16 +25,7 @@ const PARAM_TWITTER_BEARER_TOKEN = "/github-agent/TWITTER_BEARER_TOKEN";
 const PARAM_TELEGRAM_BOT_TOKEN = "/github-agent/TELEGRAM_BOT_TOKEN";
 const PARAM_TELEGRAM_CHANNEL_ID = "/github-agent/TELEGRAM_CHANNEL_ID";
 const PARAM_STRIPE_WEBHOOK_SECRET = "/github-agent/STRIPE_WEBHOOK_SECRET";
-const MONITORED_REPOS = [
-  "cenetex/aws-swarm",
-  "cenetex/kyro",
-  "cenetex/raticross",
-  "cenetex/ratibot",
-  "cenetex/litigation",
-  "cenetex/agent",
-  "cenetex/governance",
-  "atimics/AutoForwarder",
-].join(",");
+const MONITORED_REPOS = DEFAULT_MONITORED_REPOS.join(",");
 
 export class GitHubAgentStack extends cdk.Stack {
   constructor(scope: Construct, id: string, props?: cdk.StackProps) {
@@ -180,6 +172,7 @@ export class GitHubAgentStack extends cdk.Stack {
     const cluster = new ecs.Cluster(this, "AgentCluster", {
       vpc,
       clusterName: "github-agent",
+      enableFargateCapacityProviders: true,
     });
 
     // -------------------------------------------------------
@@ -215,7 +208,7 @@ export class GitHubAgentStack extends cdk.Stack {
         logRetention: logs.RetentionDays.TWO_WEEKS,
       }),
       environment: {
-        AGENT_EXECUTOR: "custom",
+        AGENT_EXECUTOR: "codex",
         AGENT_EXECUTOR_PATH: "/usr/local/bin/agent-executor",
       },
     });
@@ -269,8 +262,27 @@ export class GitHubAgentStack extends cdk.Stack {
       })
     );
 
-    // Grant S3 permissions for artifacts
-    artifactsBucket.grantReadWrite(diagnosticTaskRole);
+    // Operators may inspect task state, but cannot stop, run, or mutate tasks.
+    diagnosticTaskRole.addToPolicy(
+      new iam.PolicyStatement({
+        actions: ["ecs:DescribeTasks", "ecs:DescribeTaskDefinition", "ecs:ListTasks"],
+        resources: [
+          cluster.clusterArn,
+          `${cluster.clusterArn}/*`,
+          `arn:aws:ecs:${this.region}:${this.account}:task-definition/GitHubAgentStack*`,
+        ],
+      })
+    );
+
+    // Grant S3 read-only permissions for artifacts — list/get only, no put/delete.
+    // Operators inspect artifacts but must never mutate them.
+    artifactsBucket.grantRead(diagnosticTaskRole);
+    diagnosticTaskRole.addToPolicy(
+      new iam.PolicyStatement({
+        actions: ["s3:ListBucket"],
+        resources: [artifactsBucket.bucketArn],
+      })
+    );
 
     // Grant CloudWatch Logs read-only access — scoped to GitHubAgentStack Lambdas only
     diagnosticTaskRole.addToPolicy(
@@ -284,7 +296,38 @@ export class GitHubAgentStack extends cdk.Stack {
         resources: [
           `arn:aws:logs:${this.region}:${this.account}:log-group:/aws/lambda/GitHubAgentStack-*`,
           `arn:aws:logs:${this.region}:${this.account}:log-group:/aws/lambda/GitHubAgentStack-*:*`,
+          `arn:aws:logs:${this.region}:${this.account}:log-group:/aws/ecs/*`,
+          `arn:aws:logs:${this.region}:${this.account}:log-group:/aws/ecs/*:*`,
         ],
+      })
+    );
+
+    // Explicit deny for all mutation APIs — defense-in-depth so that even if a
+    // broad allow statement is accidentally added, the operator role can never
+    // run, stop, update, or delete ECS tasks, put/delete S3 objects, or write
+    // to CloudWatch Logs.
+    diagnosticTaskRole.addToPolicy(
+      new iam.PolicyStatement({
+        effect: iam.Effect.DENY,
+        actions: [
+          "ecs:RunTask",
+          "ecs:StopTask",
+          "ecs:UpdateService",
+          "ecs:UpdateTaskDefinition",
+          "ecs:RegisterTaskDefinition",
+          "ecs:DeregisterTaskDefinition",
+          "ecs:StartTask",
+          "s3:PutObject",
+          "s3:DeleteObject",
+          "s3:PutBucketPolicy",
+          "s3:DeleteBucket",
+          "logs:CreateLogGroup",
+          "logs:CreateLogStream",
+          "logs:PutLogEvents",
+          "logs:DeleteLogGroup",
+          "logs:DeleteLogStream",
+        ],
+        resources: ["*"],
       })
     );
 
@@ -341,6 +384,7 @@ export class GitHubAgentStack extends cdk.Stack {
         GITHUB_APP_PRIVATE_KEY_PARAM: PARAM_GITHUB_APP_PRIVATE_KEY,
         OPENROUTER_API_KEY_PARAM: PARAM_OPENROUTER_KEY,
         ARTIFACTS_BUCKET: artifactsBucket.bucketName,
+        FRICTIONLESS_PR_FLOW: "true",
       },
     });
 
@@ -537,6 +581,7 @@ export class GitHubAgentStack extends cdk.Stack {
     // -------------------------------------------------------
     const reviewRule = new events.Rule(this, "ReviewRule", {
       description: "Trigger review of coding agent PRs",
+      enabled: false,
       schedule: events.Schedule.cron({
         minute: "*/15", // Every 15 minutes
         hour: "*",
@@ -569,7 +614,7 @@ export class GitHubAgentStack extends cdk.Stack {
         GITHUB_APP_ID_PARAM: PARAM_GITHUB_APP_ID,
         GITHUB_APP_PRIVATE_KEY_PARAM: PARAM_GITHUB_APP_PRIVATE_KEY,
         MONITORED_REPOS,
-        MERGE_TRIAGE_AUTO_MERGE: "true",
+        MERGE_TRIAGE_AUTO_MERGE: "false",
         MERGE_TRIAGE_MAX_MERGES_PER_RUN: "1",
       },
     });
@@ -588,6 +633,7 @@ export class GitHubAgentStack extends cdk.Stack {
     // -------------------------------------------------------
     const mergeTriageRule = new events.Rule(this, "MergeTriageRule", {
       description: "Plan and safely advance merge-ready coding-agent PRs every 15 minutes",
+      enabled: false,
       schedule: events.Schedule.rate(cdk.Duration.minutes(15)),
     });
 
@@ -716,6 +762,55 @@ export class GitHubAgentStack extends cdk.Stack {
     });
 
     qaRule.addTarget(new targets.LambdaFunction(qaFunction));
+
+    // -------------------------------------------------------
+    // Canary Lambda (daily end-to-end dispatch chain check)
+    // -------------------------------------------------------
+    const canaryFunction = new NodejsFunction(this, "CanaryFunction", {
+      entry: path.join(__dirname, "canary-handler.ts"),
+      handler: "handler",
+      runtime: lambda.Runtime.NODEJS_20_X,
+      architecture: lambda.Architecture.ARM_64,
+      timeout: cdk.Duration.minutes(5),
+      memorySize: 256,
+      bundling: {
+        minify: true,
+        sourceMap: true,
+        target: "node20",
+        externalModules: [],
+      },
+      environment: {
+        GITHUB_APP_ID_PARAM: PARAM_GITHUB_APP_ID,
+        GITHUB_APP_PRIVATE_KEY_PARAM: PARAM_GITHUB_APP_PRIVATE_KEY,
+        ARTIFACTS_BUCKET: artifactsBucket.bucketName,
+      },
+    });
+
+    canaryFunction.addToRolePolicy(
+      new iam.PolicyStatement({
+        actions: ["ssm:GetParameter"],
+        resources: ssmParamArns,
+      })
+    );
+
+    artifactsBucket.grantReadWrite(canaryFunction);
+
+    // -------------------------------------------------------
+    // EventBridge rule to trigger the canary (4:30am UTC daily,
+    // before the 9am digest so a broken chain is flagged same-day)
+    // -------------------------------------------------------
+    const canaryRule = new events.Rule(this, "CanaryRule", {
+      description: "Daily canary: exercise the full agent dispatch chain",
+      schedule: events.Schedule.cron({
+        minute: "30",
+        hour: "4",
+        day: "*",
+        month: "*",
+        year: "*",
+      }),
+    });
+
+    canaryRule.addTarget(new targets.LambdaFunction(canaryFunction));
 
     // -------------------------------------------------------
     // Escalation Handler Lambda
@@ -1015,6 +1110,63 @@ export class GitHubAgentStack extends cdk.Stack {
     });
 
     collectorRule.addTarget(new targets.LambdaFunction(collectorFunction));
+
+    // -------------------------------------------------------
+    // Unblocker Action Dispatcher Lambda
+    // -------------------------------------------------------
+    const dispatcherFunction = new NodejsFunction(this, "UnblockerDispatcher", {
+      entry: path.join(__dirname, "unblocker/dispatcher.ts"),
+      handler: "handler",
+      runtime: lambda.Runtime.NODEJS_20_X,
+      architecture: lambda.Architecture.ARM_64,
+      timeout: cdk.Duration.minutes(5),
+      memorySize: 512,
+      bundling: {
+        minify: true,
+        sourceMap: true,
+        target: "node20",
+        externalModules: [],
+      },
+      environment: {
+        ARTIFACTS_BUCKET: artifactsBucket.bucketName,
+        GITHUB_APP_ID_PARAM: PARAM_GITHUB_APP_ID,
+        GITHUB_APP_PRIVATE_KEY_PARAM: PARAM_GITHUB_APP_PRIVATE_KEY,
+        UNBLOCKER_HOLD_MINUTES: "10",
+      },
+    });
+
+    dispatcherFunction.addToRolePolicy(
+      new iam.PolicyStatement({
+        actions: ["ssm:GetParameter"],
+        resources: ssmParamArns,
+      })
+    );
+
+    dispatcherFunction.addToRolePolicy(
+      new iam.PolicyStatement({
+        actions: ["s3:GetObject", "s3:PutObject"],
+        resources: [
+          `${artifactsBucket.bucketArn}/unblocker/*`,
+        ],
+      })
+    );
+
+    dispatcherFunction.addToRolePolicy(
+      new iam.PolicyStatement({
+        actions: ["cloudwatch:PutMetricData"],
+        resources: ["*"],
+      })
+    );
+
+    // -------------------------------------------------------
+    // EventBridge rule to trigger unblocker dispatcher after collector
+    // -------------------------------------------------------
+    const dispatcherRule = new events.Rule(this, "UnblockerDispatcherRule", {
+      description: "Trigger unblocker action dispatcher every 15 minutes (offset from collector)",
+      schedule: events.Schedule.rate(cdk.Duration.minutes(15)),
+    });
+
+    dispatcherRule.addTarget(new targets.LambdaFunction(dispatcherFunction));
 
     // -------------------------------------------------------
     // Outputs

@@ -54,7 +54,16 @@ import {
   createRunTaskInput,
   parseTaskAssignPublicIp,
 } from "./fargate-task";
+import {
+  resolveRoleContract,
+  assertModeAllowed,
+  type TaskMode,
+} from "./role-contracts";
 import { publishDigestToSocialMedia } from "./digest-publisher";
+import {
+  checkDispatchTool,
+  TOOL_CATALOG,
+} from "./tool-enforcement";
 import {
   assertLabelCreateSucceeded,
   type GitHubLabelDefinition,
@@ -76,6 +85,7 @@ const WEBHOOK_SECRET_PARAM = process.env.WEBHOOK_SECRET_PARAM!;
 const GITHUB_APP_ID_PARAM = process.env.GITHUB_APP_ID_PARAM!;
 const GITHUB_APP_PRIVATE_KEY_PARAM = process.env.GITHUB_APP_PRIVATE_KEY_PARAM!;
 const OPENROUTER_API_KEY_PARAM = process.env.OPENROUTER_API_KEY_PARAM!;
+const FRICTIONLESS_PR_FLOW = process.env.FRICTIONLESS_PR_FLOW !== "false";
 const DEFAULT_CODEX_MODEL = "z-ai/glm-5.2";
 const ARTIFACTS_BUCKET = process.env.ARTIFACTS_BUCKET!;
 const TRIGGER_LABEL = "agent";
@@ -337,7 +347,7 @@ async function getRepoModelConfig(
   return content ? parseAgentConfig(content).model : null;
 }
 
-function getDefaultModel(taskMode: "issue" | "pull_request" | "planning"): string {
+function getDefaultModel(taskMode: "issue" | "pull_request" | "planning" | "diagnostic"): string {
   return DEFAULT_CODEX_MODEL;
 }
 
@@ -3026,8 +3036,9 @@ export async function handler(event: {
   if (ghEvent === "issues" && payload.action === "labeled") {
     const labelName = payload.label?.name?.toLowerCase();
 
-    // Handle diagnostic label
-    if (labelName === DIAGNOSE_LABEL) {
+    // Handle read-only operator labels. `operator` is the class label;
+    // `diagnose` remains supported for backward compatibility.
+    if (labelName === DIAGNOSE_LABEL || labelName === "operator" || labelName === "class:operator") {
       console.log(`Handling diagnostic label on issue #${payload.issue.number}`);
 
       repoOwner = payload.repository.owner.login;
@@ -3049,12 +3060,15 @@ export async function handler(event: {
         const appConfig: GitHubAppConfig = { appId, privateKey };
         const githubToken = await getInstallationToken(repoOwner, repoName, appConfig);
 
+        const operatorRole = resolveRoleContract("operator");
         const taskPayload: TaskPayload = {
           task_id: generateTaskId(),
           repo_slug: createRepoSlug(repoOwner, repoName),
           requested_ref: requestedRef,
           resolved_commit_sha: payload.repository.default_branch_commit?.sha || "HEAD",
           task_mode: "diagnostic",
+          agent_class: "operator",
+          resolved_role: operatorRole,
           model: DEFAULT_CODEX_MODEL,
           issue_metadata: {
             number: issueNumber,
@@ -3096,6 +3110,14 @@ export async function handler(event: {
 
     // Handle agent:succeeded label to trigger automatic review
     if (labelName === SIGNAL_LABEL_SUCCEEDED) {
+      if (FRICTIONLESS_PR_FLOW) {
+        console.log("Agent completed under the direct PR flow; no separate review task is needed");
+        return {
+          statusCode: 200,
+          body: JSON.stringify({ message: "Agent completion recorded" }),
+        };
+      }
+
       console.log(`Handling agent:succeeded label on issue #${payload.issue.number}`);
 
       const repoOwner = payload.repository.owner.login;
@@ -3551,6 +3573,11 @@ export async function handler(event: {
       };
     }
   } else if (ghEvent === "pull_request" && payload.action === "opened") {
+    if (FRICTIONLESS_PR_FLOW) {
+      console.log("PR opened under the direct PR flow; CI and repository rules decide mergeability");
+      return { statusCode: 200, body: "PR opened" };
+    }
+
     // Immediate review trigger for bot-created PRs
     const prAuthor = payload.pull_request.user.login;
     const isBotPR = isCodingAgentLogin(prAuthor);
@@ -3639,6 +3666,11 @@ export async function handler(event: {
 
     // Handle review:approved label for auto-merge scheduling
     if (labelName === REVIEW_APPROVED_LABEL) {
+      if (FRICTIONLESS_PR_FLOW) {
+        console.log("Ignoring legacy review approval label under the direct PR flow");
+        return { statusCode: 200, body: "Legacy review label ignored" };
+      }
+
       const repoOwner = payload.repository.owner.login;
       const repoName = payload.repository.name;
       const prNumber = payload.pull_request.number;
@@ -3910,7 +3942,7 @@ export async function handler(event: {
   }
 
   // --- Prioritize reviews: launch pending bot PR reviews before new work ---
-  if (!isPR) {
+  if (!isPR && !FRICTIONLESS_PR_FLOW) {
     const reviewsTriggered = await reviewPendingBotPRs(repoOwner, repoName, githubToken, openrouterKey);
     if (reviewsTriggered > 0) {
       console.log(`Launched ${reviewsTriggered} priority review(s) before new task for issue #${issueNumber}`);
@@ -4104,11 +4136,26 @@ The agent will automatically dispatch this task when capacity becomes available.
     author: isPR ? prData.user.login : issueData.user.login,
   };
 
-  // --- Determine task mode ---
-  let taskMode: "issue" | "pull_request" | "planning";
+  // --- Determine institutional class and task mode ---
+  const classLabel = labels.find((label: string) => label.startsWith("class:"));
+  const agentClass = classLabel
+    ? classLabel.slice("class:".length)
+    : labels.includes("diagnose") || labels.includes("operator")
+      ? "operator"
+      : labels.includes("archivist")
+        ? "archivist"
+        : labels.includes("researcher")
+          ? "researcher"
+          : isPR
+            ? "reviewer"
+            : "developer";
+
+  let taskMode: "issue" | "pull_request" | "planning" | "diagnostic";
   if (isPR) {
     taskMode = "pull_request";
-  } else if (labels.includes("planning")) {
+  } else if (agentClass === "operator") {
+    taskMode = "diagnostic";
+  } else if (labels.includes("planning") || ["archivist", "researcher", "trainer", "miner"].includes(agentClass)) {
     taskMode = "planning";
   } else {
     taskMode = "issue";
@@ -4124,13 +4171,78 @@ The agent will automatically dispatch this task when capacity becomes available.
     console.log(`Using default model for ${taskMode}: ${selectedModel}`);
   }
 
+  // --- Resolve machine-readable role contract (validates before dispatch) ---
+  // The role contract is the single source of truth for tools, permissions,
+  // verifier, and acceptance criteria. No role behavior depends on a system prompt.
+  let resolvedRole;
+  try {
+    resolvedRole = resolveRoleContract(agentClass);
+    assertModeAllowed(agentClass, taskMode as TaskMode);
+  } catch (roleError) {
+    console.error(`Role contract validation failed for role ${agentClass}: ${roleError}`);
+    // Ensure signal labels exist before reporting failure
+    await ensureSignalLabels(repoOwner, repoName, githubToken);
+    await deleteLabelIfPresent(repoOwner, repoName, issueNumber, githubToken, SIGNAL_LABEL_RUNNING);
+    await setSignalLabel(repoOwner, repoName, issueNumber, githubToken, SIGNAL_LABEL_FAILED);
+    return {
+      statusCode: 400,
+      body: JSON.stringify({
+        message: "Task rejected: invalid role contract",
+        agentClass,
+        error: roleError instanceof Error ? roleError.message : String(roleError),
+      }),
+    };
+  }
+
+  // --- Enforce tool boundary at dispatch ---
+  // Every tool in the role contract must be valid in the parent-owned tool catalog
+  // and must pass dispatch-time permission and read-only checks. A role whose
+  // requested tool is not in its contract is rejected before dispatch.
+  for (const toolName of resolvedRole.tools) {
+    const dispatchCheck = checkDispatchTool(resolvedRole, taskId, toolName);
+    if (!dispatchCheck.allowed) {
+      console.error(`Dispatch tool enforcement failed for role ${agentClass} tool ${toolName}: ${dispatchCheck.reason}`);
+      await ensureSignalLabels(repoOwner, repoName, githubToken);
+      await deleteLabelIfPresent(repoOwner, repoName, issueNumber, githubToken, SIGNAL_LABEL_RUNNING);
+      await setSignalLabel(repoOwner, repoName, issueNumber, githubToken, SIGNAL_LABEL_FAILED);
+      return {
+        statusCode: 400,
+        body: JSON.stringify({
+          message: "Task rejected: tool not allowed for role",
+          agentClass,
+          tool: toolName,
+          error: dispatchCheck.reason,
+        }),
+      };
+    }
+  }
+  // Verify all catalog tools referenced by the role are known
+  for (const toolName of resolvedRole.tools) {
+    if (!TOOL_CATALOG[toolName]) {
+      console.error(`Dispatch rejected: unknown tool "${toolName}" in role ${agentClass} contract`);
+      await ensureSignalLabels(repoOwner, repoName, githubToken);
+      await deleteLabelIfPresent(repoOwner, repoName, issueNumber, githubToken, SIGNAL_LABEL_RUNNING);
+      await setSignalLabel(repoOwner, repoName, issueNumber, githubToken, SIGNAL_LABEL_FAILED);
+      return {
+        statusCode: 400,
+        body: JSON.stringify({
+          message: "Task rejected: unknown tool in role contract",
+          agentClass,
+          tool: toolName,
+        }),
+      };
+    }
+  }
+
   const taskPayload: TaskPayload = {
     task_id: taskId,
     repo_slug: repoSlug,
     requested_ref: requestedRef,
     resolved_commit_sha: resolvedCommitSha,
     issue_metadata: issueMetadata,
-    task_mode: isPR ? "pull_request" : "issue",
+    task_mode: taskMode,
+    agent_class: agentClass,
+    resolved_role: resolvedRole,
     created_at: new Date().toISOString(),
     model: selectedModel,
   };
@@ -4228,10 +4340,19 @@ Add the \`agent\` label again after purchasing credits. Credits can be purchased
       SIGNAL_LABEL_SUCCEEDED,
     };
 
+    // Operator (diagnostic) tasks dispatch to the read-only diagnostic runtime,
+    // not the standard developer task definition. The diagnostic runtime has an
+    // IAM role with only read-only CloudWatch Logs, ECS describe/list, and S3
+    // get/list permissions — no mutation APIs.
+    const isDiagnosticTask = agentClass === "operator";
     const params = createRunTaskInput({
       clusterArn: CLUSTER_ARN,
-      taskDefinitionArn: TASK_DEFINITION_ARN,
-      containerName: CONTAINER_NAME,
+      taskDefinitionArn: isDiagnosticTask
+        ? DIAGNOSTIC_TASK_DEFINITION_ARN
+        : TASK_DEFINITION_ARN,
+      containerName: isDiagnosticTask
+        ? DIAGNOSTIC_CONTAINER_NAME
+        : CONTAINER_NAME,
       subnets: SUBNETS,
       securityGroup: SECURITY_GROUP,
       environment: { ...taskEnvironment },
@@ -4261,9 +4382,19 @@ Add the \`agent\` label again after purchasing credits. Credits can be purchased
     taskMetadata.status = "running";
     await storeTaskMetadata(taskMetadata);
 
-    // --- Deduct credits for this task ---
+    // --- Reserve credits for this task ---
+    // The debit is a reservation against runaway spend, taken before the task
+    // does any work. If the task ends in any non-succeeded state, the
+    // task-status handler's reconciliation sweep refunds it automatically
+    // (no charge for failed or timed-out tasks).
     try {
-      await deductCredits(repoSlug, taskId, selectedModel, "succeeded");
+      await deductCredits(
+        repoSlug,
+        taskId,
+        selectedModel,
+        "succeeded",
+        `Task ${taskId} dispatched (credit reservation)`
+      );
     } catch (creditError) {
       console.error(`Failed to deduct credits for task ${taskId}: ${creditError}`);
       // Don't fail task launch if credit accounting fails

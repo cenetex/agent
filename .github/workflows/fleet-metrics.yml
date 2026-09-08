@@ -1,0 +1,48 @@
+name: Fleet metrics
+
+# The outcome numbers each specialist role must drive down. Every metric is a
+# GitHub query, so this runs here rather than on anyone's laptop. Local-disk
+# hygiene (worktrees, dirty trees) stays with control/prune.py.
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "40 9 * * *"
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/fleet-metrics.yml"
+      - "scripts/fleet-metrics.py"
+
+concurrency:
+  group: fleet-metrics
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  measure:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Measure fleet
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python3 scripts/fleet-metrics.py \
+            --out metrics/fleet.jsonl \
+            --summary "$GITHUB_STEP_SUMMARY"
+
+      - name: Append to the ledger
+        if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+        run: |
+          if git diff --quiet -- metrics/fleet.jsonl; then
+            echo "no change to record"; exit 0
+          fi
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add metrics/fleet.jsonl
+          git commit -m "chore(metrics): fleet snapshot $(date -u +%Y-%m-%d) [skip ci]"
+          git push origin HEAD:main

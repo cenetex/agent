@@ -25,14 +25,17 @@ import type {
   EscalationConfig,
   GitHubAppConfig,
   CreditBalance,
+  CreditTransaction,
 } from "./types";
 import {
   createEscalationQueuePath,
   createEscalationConfigPath,
   createCreditBalancePath,
+  createCreditLedgerPath,
   createRepoSlug,
   generateEscalationId,
   getInstallationToken,
+  getModelCost,
   parseRepoSlug,
 } from "./types";
 
@@ -382,6 +385,239 @@ export async function handleTaskFailure(
 }
 
 /**
+ * Refunds dispatch-time credit reservations for tasks that ended in a
+ * non-succeeded terminal state (failed / timed_out).
+ *
+ * Credits are debited when a task is dispatched, before any model work
+ * happens, as a reservation against runaway spend. The documented policy is
+ * that failed and timed-out tasks are not charged. This sweep makes that
+ * policy hold even when a task dies before it can report an outcome
+ * (bootstrap failures, sandbox crashes, network blackholes). It is
+ * idempotent: a task_id is refunded at most once, keyed by the ledger.
+ */
+export async function reconcileCredits(): Promise<{
+  scanned: number;
+  refunded: number;
+  errors: string[];
+}> {
+  const result = { scanned: 0, refunded: 0, errors: [] as string[] };
+
+  // Collect terminal task metadata across all repos
+  const terminalTasks = new Map<string, TaskMetadata[]>();
+  let continuation: string | undefined;
+  do {
+    const listResult = await s3.send(
+      new ListObjectsV2Command({
+        Bucket: ARTIFACTS_BUCKET,
+        Prefix: "tasks/",
+        ContinuationToken: continuation,
+        MaxKeys: 1000,
+      })
+    );
+
+    for (const obj of listResult.Contents ?? []) {
+      const key = (obj as any).Key as string | undefined;
+      if (!key || !key.endsWith("/metadata.json")) continue;
+      try {
+        const objResult = await s3.send(
+          new GetObjectCommand({ Bucket: ARTIFACTS_BUCKET, Key: key })
+        );
+        if (!objResult.Body) continue;
+        const metadata = JSON.parse(
+          await objResult.Body.transformToString()
+        ) as TaskMetadata;
+        result.scanned++;
+        if (
+          (metadata.status === "failed" || metadata.status === "timed_out") &&
+          metadata.repo_slug &&
+          metadata.task_id
+        ) {
+          const list = terminalTasks.get(metadata.repo_slug) ?? [];
+          list.push(metadata);
+          terminalTasks.set(metadata.repo_slug, list);
+        }
+      } catch (error) {
+        result.errors.push(`metadata ${key}: ${error}`);
+      }
+    }
+
+    continuation = listResult.IsTruncated
+      ? listResult.NextContinuationToken
+      : undefined;
+  } while (continuation);
+
+  // Per repo: refund debited terminal tasks that have no refund yet
+  for (const [repoSlug, tasks] of terminalTasks) {
+    try {
+      const { debited, refunded } = await loadLedgerTaskState(repoSlug);
+      for (const task of tasks) {
+        if (!debited.has(task.task_id) || refunded.has(task.task_id)) continue;
+        await refundReservation(repoSlug, task);
+        refunded.add(task.task_id);
+        result.refunded++;
+      }
+    } catch (error) {
+      result.errors.push(`ledger ${repoSlug}: ${error}`);
+    }
+  }
+
+  return result;
+}
+
+/**
+ * Pure decision core for credit reconciliation: given raw ledger lines, return
+ * the set of task_ids that were debited and the set that already received a
+ * real (non-zero) refund. Zero-amount refunds — the historical no-op recorded
+ * by the completion-time refund path — do not count as refunded.
+ */
+export function ledgerTaskStateFromLines(lines: string[]): {
+  debited: Set<string>;
+  refunded: Set<string>;
+} {
+  const debited = new Set<string>();
+  const refunded = new Set<string>();
+  for (const line of lines) {
+    if (!line.trim()) continue;
+    try {
+      const txn = JSON.parse(line) as CreditTransaction;
+      if (!txn.task_id) continue;
+      if (txn.type === "debit") debited.add(txn.task_id);
+      if (txn.type === "refund" && (txn.amount ?? 0) > 0) {
+        refunded.add(txn.task_id);
+      }
+    } catch {
+      continue; // skip malformed ledger lines
+    }
+  }
+  return { debited, refunded };
+}
+
+/**
+ * Reads every ledger object for a repo and returns the set of task_ids that
+ * have a debit and the set that already have a (non-zero) refund.
+ */
+async function loadLedgerTaskState(
+  repoSlug: string
+): Promise<{ debited: Set<string>; refunded: Set<string> }> {
+  const debited = new Set<string>();
+  const refunded = new Set<string>();
+
+  let continuation: string | undefined;
+  do {
+    const listResult = await s3.send(
+      new ListObjectsV2Command({
+        Bucket: ARTIFACTS_BUCKET,
+        Prefix: `credits/${repoSlug}/ledger/`,
+        ContinuationToken: continuation,
+      })
+    );
+
+    for (const obj of listResult.Contents ?? []) {
+      const objResult = await s3.send(
+        new GetObjectCommand({ Bucket: ARTIFACTS_BUCKET, Key: (obj as any).Key })
+      );
+      if (!objResult.Body) continue;
+      const content = await objResult.Body.transformToString();
+      const fileState = ledgerTaskStateFromLines(content.split("\n"));
+      for (const taskId of fileState.debited) debited.add(taskId);
+      for (const taskId of fileState.refunded) refunded.add(taskId);
+    }
+
+    continuation = listResult.IsTruncated
+      ? listResult.NextContinuationToken
+      : undefined;
+  } while (continuation);
+
+  return { debited, refunded };
+}
+
+/**
+ * Appends a transaction line to the repo's current-month ledger.
+ */
+async function appendLedgerTransaction(
+  repoSlug: string,
+  transaction: CreditTransaction
+): Promise<void> {
+  const ledgerPath = createCreditLedgerPath(repoSlug);
+  const line = JSON.stringify(transaction) + "\n";
+
+  let existing = "";
+  try {
+    const result = await s3.send(
+      new GetObjectCommand({ Bucket: ARTIFACTS_BUCKET, Key: ledgerPath })
+    );
+    existing = result.Body ? await result.Body.transformToString() : "";
+  } catch (error: any) {
+    if (error.name !== "NoSuchKey") throw error;
+  }
+
+  await s3.send(
+    new PutObjectCommand({
+      Bucket: ARTIFACTS_BUCKET,
+      Key: ledgerPath,
+      Body: existing + line,
+      ContentType: "application/json",
+    })
+  );
+}
+
+/**
+ * Refunds one task's dispatch-time reservation: credits the balance back and
+ * records the refund transaction in the ledger.
+ */
+async function refundReservation(
+  repoSlug: string,
+  metadata: TaskMetadata
+): Promise<void> {
+  const model = (metadata as any).model || "default";
+  const cost = getModelCost(model);
+  if (cost <= 0) return;
+
+  const balancePath = createCreditBalancePath(repoSlug);
+  let balance: CreditBalance | null = null;
+  try {
+    const objResult = await s3.send(
+      new GetObjectCommand({ Bucket: ARTIFACTS_BUCKET, Key: balancePath })
+    );
+    if (objResult.Body) {
+      balance = JSON.parse(
+        await objResult.Body.transformToString()
+      ) as CreditBalance;
+    }
+  } catch (error: any) {
+    if (error.name !== "NoSuchKey") throw error;
+  }
+
+  if (balance) {
+    balance.current_balance += cost;
+    balance.total_spent = Math.max(0, balance.total_spent - cost);
+    balance.last_updated = new Date().toISOString();
+    balance.version += 1;
+    await s3.send(
+      new PutObjectCommand({
+        Bucket: ARTIFACTS_BUCKET,
+        Key: balancePath,
+        Body: JSON.stringify(balance, null, 2),
+        ContentType: "application/json",
+      })
+    );
+  }
+
+  await appendLedgerTransaction(repoSlug, {
+    timestamp: new Date().toISOString(),
+    type: "refund",
+    amount: cost,
+    reason: `Task ${metadata.task_id} ${metadata.status} — reconciled dispatch-time reservation (no charge for failed tasks)`,
+    task_id: metadata.task_id,
+    model,
+  });
+
+  console.log(
+    `Reconciled refund of ${cost} credits to ${repoSlug} for ${metadata.status} task ${metadata.task_id}`
+  );
+}
+
+/**
  * Periodic check handler (called by EventBridge every 15 minutes)
  */
 export async function handler(event: any): Promise<any> {
@@ -403,6 +639,15 @@ export async function handler(event: any): Promise<any> {
 
     // Scan for low credit repos
     await checkLowCredits(token);
+
+    // Refund dispatch-time reservations for failed/timed-out tasks
+    const reconciliation = await reconcileCredits();
+    console.log(
+      `Credit reconciliation: scanned=${reconciliation.scanned} refunded=${reconciliation.refunded} errors=${reconciliation.errors.length}`
+    );
+    for (const err of reconciliation.errors) {
+      console.warn(`Credit reconciliation error: ${err}`);
+    }
 
     return {
       statusCode: 200,

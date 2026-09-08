@@ -49,7 +49,7 @@ set = { PATH = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin", H
     # PR contents are attacker-controlled. Give model-spawned commands a fixed,
     # non-secret environment rather than inheriting task credentials.
     shell_environment_policy='inherit = "none"
-set = { PATH = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin", HOME = "/home/agent", USER = "agent", LOGNAME = "agent", LANG = "C.UTF-8", CI = "true", TERM = "dumb" }'
+set = { PATH = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin", HOME = "/home/agent", USER = "agent", LOGNAME = "agent", LANG = "C.UTF-8", CI = "true", TERM = "dumb", AWS_EC2_METADATA_DISABLED = "true", AWS_CONFIG_FILE = "/dev/null", AWS_SHARED_CREDENTIALS_FILE = "/dev/null", GIT_CONFIG_GLOBAL = "/dev/null", GIT_TERMINAL_PROMPT = "0" }'
   elif [ "${security_profile}" != "task" ]; then
     echo "ERROR: Unknown Codex security profile: ${security_profile}" >&2
     return 1
@@ -78,6 +78,29 @@ stream_idle_timeout_ms = 300000
 [shell_environment_policy]
 ${shell_environment_policy}
 EOF
+}
+
+check_codex_task_sandbox() {
+  local codex_command codex_path node_path safe_path
+  codex_command="${CODEX_TASK_BIN:-codex-task}"
+  codex_path="$(command -v "${codex_command}")" || return 127
+  node_path="$(command -v node)" || return 127
+  safe_path="${node_path%/*}:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+
+  # Exercise the same file policy and Linux backend as the coding worker.
+  # This command is local and uses an empty credential environment.
+  env -i \
+    PATH="${safe_path}" \
+    HOME="/home/agent" \
+    USER="agent" \
+    LOGNAME="agent" \
+    LANG="C.UTF-8" \
+    CI="true" \
+    TERM="dumb" \
+    CODEX_HOME="${CODEX_HOME}" \
+    timeout 30 "${codex_path}" --enable use_legacy_landlock sandbox linux \
+    --full-auto -- /bin/sh -c \
+    'set -eu; test -r .; probe=$(mktemp .agent-sandbox-check.XXXXXX); rm -f "$probe"'
 }
 
 start_virtual_display() {
@@ -223,6 +246,77 @@ find_created_pr_url() {
       | last
       | .source.issue.html_url // empty
     '
+}
+
+# Find any open PR that references the issue (not filtered by run start).
+# Used by the verify stage on re-dispatch, where the PR was created in a
+# prior run and find_created_pr_url (which filters by since) would miss it.
+find_pr_for_issue() {
+  local issue_number="$1"
+  local repo="$2"
+
+  gh api "repos/${repo}/pulls?state=open&per_page=100" \
+    --jq '[.[] | select(.body != null) | select(.body | test("(Fixes|Closes|Resolves) #'"${issue_number}"'(\\b|$)")) | .html_url] | first // empty' \
+    2>/dev/null || true
+}
+
+# Get the head SHA pushed to a PR branch.
+get_pr_head_sha() {
+  local pr_number="$1"
+  local repo="$2"
+
+  gh api "repos/${repo}/pulls/${pr_number}" --jq '.head.sha' 2>/dev/null || true
+}
+
+# Get the CI check conclusion for a PR head as a single string:
+#   success | failure | pending | unknown
+get_pr_ci_conclusion() {
+  local pr_number="$1"
+  local repo="$2"
+
+  local head_sha
+  head_sha="$(get_pr_head_sha "${pr_number}" "${repo}")"
+  if [ -z "${head_sha}" ]; then
+    echo "unknown"
+    return 0
+  fi
+
+  local status_json
+  status_json="$(gh api "repos/${repo}/commits/${head_sha}/check-runs" 2>/dev/null)" || {
+    echo "unknown"
+    return 0
+  }
+
+  local total_count in_progress_count failure_count
+  total_count="$(echo "${status_json}" | jq '.total_count // 0')"
+  in_progress_count="$(echo "${status_json}" | jq '[.check_runs[]? | select(.status != "completed")] | length')"
+  failure_count="$(echo "${status_json}" | jq '[.check_runs[]? | select(.conclusion == "failure" or .conclusion == "cancelled" or .conclusion == "timed_out")] | length')"
+
+  if [ "${total_count}" -eq 0 ]; then
+    echo "unknown"
+  elif [ "${in_progress_count}" -gt 0 ]; then
+    echo "pending"
+  elif [ "${failure_count}" -gt 0 ]; then
+    echo "failure"
+  else
+    echo "success"
+  fi
+}
+
+# List the names of failing CI check-runs for a PR head.
+get_pr_failing_checks() {
+  local pr_number="$1"
+  local repo="$2"
+
+  local head_sha
+  head_sha="$(get_pr_head_sha "${pr_number}" "${repo}")"
+  if [ -z "${head_sha}" ]; then
+    return 0
+  fi
+
+  gh api "repos/${repo}/commits/${head_sha}/check-runs" 2>/dev/null \
+    | jq -r '[.check_runs[]? | select(.conclusion == "failure" or .conclusion == "cancelled" or .conclusion == "timed_out") | .name] | unique | .[]' \
+    2>/dev/null || true
 }
 
 # Check if there are agent questions in comments

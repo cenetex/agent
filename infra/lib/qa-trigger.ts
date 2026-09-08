@@ -47,13 +47,20 @@ async function githubRequest(
   return response;
 }
 
+const QA_ISSUE_TITLE = "QA: Nightly System Check";
+
 async function findExistingQAIssue(
   repoOwner: string,
   repoName: string,
   token: string
 ): Promise<number | null> {
+  // Deliberately not filtered by label. The dispatch lifecycle replaces the
+  // `agent` label with `agent:running` / `agent:failed` and reviewers add
+  // `review:flagged`, so an open QA issue usually no longer carries `agent`.
+  // Filtering on it made this lookup miss every night and file a duplicate --
+  // 21 open copies accumulated between 2026-08-16 and 2026-09-05.
   const response = await githubRequest(
-    `/repos/${repoOwner}/${repoName}/issues?labels=agent&state=open&per_page=100`,
+    `/repos/${repoOwner}/${repoName}/issues?state=open&per_page=100`,
     token,
     { method: "GET" },
     [200]
@@ -61,7 +68,9 @@ async function findExistingQAIssue(
 
   const issues = (await response.json()) as any[];
   for (const issue of issues) {
-    if (issue.title === "QA: Nightly System Check") {
+    // `/issues` also returns pull requests; they can never be the QA issue.
+    if (issue.pull_request) continue;
+    if (issue.title === QA_ISSUE_TITLE) {
       return issue.number;
     }
   }
@@ -80,7 +89,7 @@ async function createQAIssue(
     {
       method: "POST",
       body: JSON.stringify({
-        title: "QA: Nightly System Check",
+        title: QA_ISSUE_TITLE,
         body: qaPrompt,
         labels: ["agent"],
       }),
