@@ -418,3 +418,31 @@ s3://github-agent-artifacts-{account}-{region}/unblocker/reports/{YYYY-MM-DD}.js
 Each report includes a `past_report_accuracy` section that grades the
 prior day's classifications against actual outcomes, including a
 `false_positive_rate` metric.
+
+### Escalation Queue (sub-issue 4)
+
+When the dispatcher's loop detection fires (same item >3x in 24h, no
+progress) or a Genuine classification persists across 3 daily reports,
+the item is escalated to humans. The escalation queue is persisted to:
+
+```
+s3://github-agent-artifacts-{account}-{region}/unblocker/escalations/queue.json
+```
+
+Each entry includes: item link, root-cause hypothesis, what was tried,
+recommended human action, escalated-at timestamp, attempt count, and state
+(`escalated` or `resolved`).
+
+The daily health report gains an optional `escalations_url` field linking
+the pinned "Unblocker Escalations" GitHub issue, and an `escalation_entries`
+array listing current escalations.
+
+A pinned issue per repo titled "Unblocker Escalations" is created and
+maintained. Its body contains a machine-parseable section delimited by
+`<!-- unblocker:escalations:start -->` / `<!-- unblocker:escalations:end -->`
+containing a JSON array of active escalation entries, so the dispatcher can
+read prior escalations and skip already-escalated items.
+
+An optional webhook (`UNBLOCKER_ESCALATION_WEBHOOK` env var) sends a JSON
+payload when an escalation is created. If the env var is not set, the
+webhook is a no-op.

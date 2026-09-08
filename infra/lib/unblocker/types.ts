@@ -114,6 +114,47 @@ export interface DailyHealthReport {
   summary: Record<ClassificationCategory, number>;
   past_report_accuracy: ReportAccuracy | null;
   items: ClassifiedItem[];
+  /** URL of the pinned escalation issue (sub-issue 4). Null/absent if none. */
+  escalations_url?: string | null;
+  /** Escalation entries surfaced in the daily report (sub-issue 4). */
+  escalation_entries?: EscalationEntry[];
+}
+
+/* -- Escalation queue types (sub-issue 4) -- */
+
+/** A single escalated item entry on the pinned issue body. */
+export interface EscalationEntry {
+  repo_slug: string;
+  number: number;
+  is_pr: boolean;
+  github_url: string;
+  root_cause_hypothesis: string;
+  what_was_tried: string;
+  recommended_action: string;
+  escalated_at: string;
+  last_attempt_count: number;
+  state: "escalated" | "resolved";
+}
+
+/** The full escalation queue as persisted in S3 and on the pinned issue. */
+export interface EscalationQueue {
+  entries: EscalationEntry[];
+  pinned_issue_number: number | null;
+  updated_at: string;
+}
+
+/** Data passed to the optional escalation webhook. */
+export interface EscalationWebhookPayload {
+  repo_slug: string;
+  number: number;
+  is_pr: boolean;
+  github_url: string;
+  root_cause_hypothesis: string;
+  what_was_tried: string;
+  recommended_action: string;
+  escalated_at: string;
+  attempt_count: number;
+  escalation_issue_url: string | null;
 }
 
 export type { TaskMetadata };

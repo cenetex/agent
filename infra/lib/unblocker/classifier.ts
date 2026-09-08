@@ -10,12 +10,20 @@ import type {
   ClassifiedSnapshot,
   ClassificationReasoning,
   DailyHealthReport,
+  EscalationEntry,
   FailureSnapshot,
   FailedIssue,
   FailedPullRequest,
   ReportAccuracy,
   AccuracyEntry,
 } from "./types";
+
+import {
+  renderEscalationSection as renderEscalations,
+  getPinnedIssueUrl,
+  readEscalationQueue,
+  type EscalationQueue,
+} from "./escalation";
 
 const s3 = new S3Client({});
 
@@ -675,12 +683,25 @@ export function computeReportAccuracy(
 export function buildDailyHealthReport(
   classified: ClassifiedSnapshot,
   previous: ClassifiedSnapshot | null,
-  currentSnapshot: FailureSnapshot
+  currentSnapshot: FailureSnapshot,
+  escalationQueue?: EscalationQueue | null
 ): DailyHealthReport {
   const reportDate = classified.classified_at.split("T")[0] ?? "";
   const pastReportAccuracy = previous
     ? computeReportAccuracy(previous, currentSnapshot)
     : null;
+
+  // Determine the first repo slug for the escalation URL (single-repo
+  // reports link directly; multi-repo reports link to the first repo's
+  // pinned issue if one exists).
+  const repoSlugs = Object.keys(currentSnapshot.repos);
+  const firstRepoSlug = repoSlugs.length > 0 ? repoSlugs[0] : "";
+  const escalationsUrl = escalationQueue
+    ? getPinnedIssueUrl(escalationQueue, firstRepoSlug)
+    : null;
+  const escalationEntries: EscalationEntry[] | undefined = escalationQueue
+    ? escalationQueue.entries.filter((e) => e.state === "escalated")
+    : undefined;
 
   return {
     report_date: reportDate,
@@ -689,6 +710,8 @@ export function buildDailyHealthReport(
     summary: classified.summary,
     past_report_accuracy: pastReportAccuracy,
     items: classified.classifications,
+    escalations_url: escalationsUrl,
+    escalation_entries: escalationEntries,
   };
 }
 
@@ -738,6 +761,32 @@ export function renderHealthReportMarkdown(report: DailyHealthReport): string {
     lines.push("## Past report accuracy");
     lines.push("");
     lines.push("_No prior report available for grading._");
+    lines.push("");
+  }
+
+  // Escalations section (sub-issue 4): links the pinned issue and
+  // lists current escalations with overdue items nagged at the top.
+  if (report.escalation_entries && report.escalation_entries.length > 0) {
+    const repoSlug =
+      report.escalation_entries[0]?.repo_slug ?? "";
+    const queue: EscalationQueue = {
+      entries: report.escalation_entries,
+      pinned_issue_number: report.escalations_url
+        ? parseInt(report.escalations_url.split("/").pop() ?? "0", 10) || null
+        : null,
+      updated_at: report.generated_at,
+    };
+    const escalationMd = renderEscalations(queue, repoSlug);
+    if (escalationMd) {
+      lines.push(escalationMd);
+      lines.push("");
+    }
+  } else if (report.escalations_url) {
+    lines.push("## Escalations");
+    lines.push("");
+    lines.push(`**Pinned escalation issue:** [Unblocker Escalations](${report.escalations_url})`);
+    lines.push("");
+    lines.push("_No active escalations._");
     lines.push("");
   }
 
@@ -856,7 +905,15 @@ export async function handler(): Promise<void> {
 
   // Grade yesterday's report for the false-positive-rate metric.
   const previous = await findPreviousClassification(key);
-  const report = buildDailyHealthReport(classified, previous, snapshot);
+  // Read the escalation queue so the daily report can link the pinned
+  // issue and surface current escalations (sub-issue 4).
+  let escalationQueue: EscalationQueue | null = null;
+  try {
+    escalationQueue = await readEscalationQueue();
+  } catch {
+    console.warn("Failed to read escalation queue for daily report; continuing without it.");
+  }
+  const report = buildDailyHealthReport(classified, previous, snapshot, escalationQueue);
   const reportKey = `unblocker/reports/${report.report_date}.json`;
   await writeJsonToS3(reportKey, JSON.stringify(report, null, 2));
   console.log(`Wrote daily health report to s3://${ARTIFACTS_BUCKET}/${reportKey}`);
