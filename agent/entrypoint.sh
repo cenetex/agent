@@ -1461,6 +1461,105 @@ start_virtual_display
 MODEL=$(echo "$TASK_PAYLOAD" | jq -r '.model // "z-ai/glm-5.2"')
 AGENT_EXECUTOR=$(printf "%s" "${AGENT_EXECUTOR}" | tr '[:upper:]' '[:lower:]')
 
+# --- Compute max_tokens cap (issue #415 — prevent OpenRouter 402 mid-stream) ---
+# Per-model conservative defaults (not generous ceilings):
+#   haiku:  4k   sonnet: 8k   opus: 16k   default: 8k
+# The cap is further reduced by the affordable token ceiling from OpenRouter
+# so a thin-but-positive budget still ships PRs instead of 402'ing.
+compute_max_tokens_cap() {
+  local model="$1"
+  local task_override
+
+  # Per-task override from task payload (set by orchestrator from .github/AGENT.md)
+  task_override=$(echo "$TASK_PAYLOAD" | jq -r '.max_tokens // empty' 2>/dev/null) || task_override=""
+
+  # Determine model-based default cap
+  local default_cap=8192
+  local model_lower
+  model_lower=$(printf "%s" "$model" | tr '[:upper:]' '[:lower:]')
+  if printf "%s" "$model_lower" | grep -q "haiku"; then
+    default_cap=4096
+  elif printf "%s" "$model_lower" | grep -q "opus"; then
+    default_cap=16384
+  elif printf "%s" "$model_lower" | grep -q "sonnet"; then
+    default_cap=8192
+  fi
+
+  # Use task override if provided, otherwise model default
+  local configured_cap=$default_cap
+  if [ -n "$task_override" ] && [ "$task_override" -gt 0 ] 2>/dev/null; then
+    configured_cap=$task_override
+  fi
+
+  # Query OpenRouter for the affordable max_tokens ceiling.
+  # The auth/key endpoint returns limit_remaining (credits remaining).
+  # OpenRouter's 402 message says "requested up to N tokens, but can only
+  # afford M" — so affordable_max_tokens is the hard ceiling.
+  local affordable_max=0
+  local or_balance_known=false
+  local or_key_response
+  if or_key_response=$(curl -sf -H "Authorization: Bearer ${OPENROUTER_API_KEY}" \
+      "https://openrouter.ai/api/v1/auth/key" 2>/dev/null); then
+    local or_remaining
+    or_remaining=$(echo "$or_key_response" | jq -r '.data.limit_remaining // "unlimited"')
+    if [ "$or_remaining" = "unlimited" ] || [ "$or_remaining" = "null" ]; then
+      affordable_max=$configured_cap
+      or_balance_known=true
+    else
+      # OpenRouter limit_remaining is in USD. Convert to affordable output
+      # tokens using model-specific output pricing (tokens per dollar).
+      # These are conservative estimates — actual OpenRouter pricing may vary,
+      # and the server-side 402 check is the final authority.
+      #   haiku:  ~$1/1M output tokens  → 1,000,000 tokens/$
+      #   sonnet: ~$15/1M output tokens → 66,667 tokens/$
+      #   opus:   ~$75/1M output tokens → 13,333 tokens/$
+      #   default (glm-5.2): sonnet-tier → 66,667 tokens/$
+      local tokens_per_dollar=66667
+      if printf "%s" "$model_lower" | grep -q "haiku"; then
+        tokens_per_dollar=1000000
+      elif printf "%s" "$model_lower" | grep -q "opus"; then
+        tokens_per_dollar=13333
+      fi
+      affordable_max=$(echo "$or_remaining" | awk -v tpd="$tokens_per_dollar" '{printf "%d", $1 * tpd}')
+      or_balance_known=true
+    fi
+  fi
+  # If we could not reach OpenRouter, fall back to the configured cap.
+  if [ "$affordable_max" -le 0 ] 2>/dev/null; then
+    affordable_max=$configured_cap
+  fi
+
+  # Apply safety margin only when the affordable ceiling came from a real
+  # balance query (not a fallback to the configured cap). The margin avoids
+  # edge-case 402 from rounding when the balance is the binding constraint.
+  local applied_cap=$affordable_max
+  if [ "$or_balance_known" = "true" ] && [ "$affordable_max" != "$configured_cap" ]; then
+    local safety_margin=256
+    applied_cap=$((affordable_max - safety_margin))
+    if [ "$applied_cap" -lt 1024 ]; then
+      applied_cap=1024
+    fi
+  fi
+
+  # Final cap = min(configured_cap, affordable_max - margin)
+  if [ "$applied_cap" -lt "$configured_cap" ]; then
+    APPLIED_MAX_TOKENS=$applied_cap
+  else
+    APPLIED_MAX_TOKENS=$configured_cap
+  fi
+
+  # Telemetry log line (issue #415 task 4)
+  echo "[max_tokens] model=${model} requested_max=${configured_cap} affordable_max=${affordable_max} applied_max=${APPLIED_MAX_TOKENS}" >&2
+
+  echo "$APPLIED_MAX_TOKENS"
+}
+
+MODEL_MAX_OUTPUT_TOKENS=$(compute_max_tokens_cap "$MODEL")
+export MODEL_MAX_OUTPUT_TOKENS
+echo "[max_tokens] Computed cap for model=${MODEL}: max_tokens=${MODEL_MAX_OUTPUT_TOKENS}"
+
+# --- End max_tokens cap computation ---
+
 # Implementation workers must run inside the sandboxed Codex executor. They
 # write code, and the sandbox is what contains that write path: Codex is
 # configured with `inherit = "none"`, so commands it spawns get no AWS
@@ -1779,6 +1878,7 @@ while [ -z "${RUN_STATUS}" ] && [ "${ATTEMPT}" -lt "${MAX_ATTEMPTS}" ]; do
       CODEX_HOME="${CODEX_HOME}" \
       CODEX_DISABLE_NONESSENTIAL_TRAFFIC="1" \
       OPENROUTER_API_KEY="${OPENROUTER_API_KEY}" \
+      MODEL_MAX_OUTPUT_TOKENS="${MODEL_MAX_OUTPUT_TOKENS}" \
       timeout ${TIMEOUT_SECONDS} "${CODEX_TASK_BIN}" --enable use_legacy_landlock exec --ephemeral --skip-git-repo-check \
       --sandbox workspace-write \
       --model "${MODEL}" \

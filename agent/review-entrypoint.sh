@@ -658,6 +658,10 @@ Begin your review now."
 
 # --- Run Codex with OpenRouter API ---
 echo "Running review analysis with Codex on GLM 5.2..."
+# Cap max_tokens for review to prevent OpenRouter 402 (issue #415)
+# GLM 5.2 uses sonnet-tier pricing; apply conservative 8k default.
+MODEL_MAX_OUTPUT_TOKENS="${MODEL_MAX_OUTPUT_TOKENS:-8192}"
+export MODEL_MAX_OUTPUT_TOKENS
 configure_codex_openrouter review
 start_virtual_display
 
@@ -688,6 +692,7 @@ env -i \
   GIT_CONFIG_GLOBAL="/dev/null" \
   GIT_TERMINAL_PROMPT="0" \
   OPENROUTER_API_KEY="${OPENROUTER_API_KEY}" \
+  MODEL_MAX_OUTPUT_TOKENS="${MODEL_MAX_OUTPUT_TOKENS}" \
   timeout 1800 codex --enable use_legacy_landlock exec --ephemeral --skip-git-repo-check \
   --strict-config \
   --ignore-rules \

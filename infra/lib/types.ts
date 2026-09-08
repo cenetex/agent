@@ -139,6 +139,8 @@ export interface TaskPayload {
   created_at: string;
   /** Model to use for this task, defaults based on task type if not specified */
   model?: string;
+  /** Per-task max_tokens override (null = use model default cap) */
+  max_tokens?: number | null;
 }
 
 export interface IssueMetadata {

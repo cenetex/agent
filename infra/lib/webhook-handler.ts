@@ -347,6 +347,15 @@ async function getRepoModelConfig(
   return content ? parseAgentConfig(content).model : null;
 }
 
+async function getRepoMaxTokensConfig(
+  repoOwner: string,
+  repoName: string,
+  token: string
+): Promise<number | null> {
+  const content = await getRepoAgentConfigContent(repoOwner, repoName, token);
+  return content ? parseAgentConfig(content).max_tokens : null;
+}
+
 function getDefaultModel(taskMode: "issue" | "pull_request" | "planning" | "diagnostic"): string {
   return DEFAULT_CODEX_MODEL;
 }
@@ -4171,6 +4180,12 @@ The agent will automatically dispatch this task when capacity becomes available.
     console.log(`Using default model for ${taskMode}: ${selectedModel}`);
   }
 
+  // Check for per-repo max_tokens override (issue #415 — cap to prevent 402)
+  const repoMaxTokens = await getRepoMaxTokensConfig(repoOwner, repoName, githubToken);
+  if (repoMaxTokens) {
+    console.log(`Using repo-specific max_tokens from .github/AGENT.md: ${repoMaxTokens}`);
+  }
+
   // --- Resolve machine-readable role contract (validates before dispatch) ---
   // The role contract is the single source of truth for tools, permissions,
   // verifier, and acceptance criteria. No role behavior depends on a system prompt.
@@ -4245,6 +4260,7 @@ The agent will automatically dispatch this task when capacity becomes available.
     resolved_role: resolvedRole,
     created_at: new Date().toISOString(),
     model: selectedModel,
+    max_tokens: repoMaxTokens,
   };
 
   console.log(`Created task ${taskId} with resolved SHA ${resolvedCommitSha}`);

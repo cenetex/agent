@@ -499,7 +499,8 @@ impl Executor {
             "model": self.model,
             "messages": messages,
             "temperature": 0.2,
-            "max_tokens": env_u64("EXECUTOR_MAX_RESPONSE_TOKENS", 4096),
+            "max_tokens": env_u64("MODEL_MAX_OUTPUT_TOKENS",
+                env_u64("EXECUTOR_MAX_RESPONSE_TOKENS", 4096)),
         });
 
         if env_bool("OPENROUTER_REASONING_EXCLUDE", true) {
