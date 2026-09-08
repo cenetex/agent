@@ -319,7 +319,19 @@ get_pr_failing_checks() {
     2>/dev/null || true
 }
 
-# Check if there are agent questions in comments
+# Check for a question comment posted since the run started.
+#
+# This previously matched any comment body containing "?", which meant the
+# runtime's own status comments qualified: they carry artifact URLs of the form
+# ".../?prefix=tasks/...". The call site at entrypoint.sh sets RUN_STATUS to
+# "waiting" on a match, so a bot status comment could freeze an issue in
+# agent:waiting with no question for anyone to answer. #422 and #415 have been
+# stuck that way since June and July respectively.
+#
+# Agents no longer post comments -- they write /tmp/agent-question.json -- so in
+# practice this now detects a human asking something mid-run. Bot authors are
+# excluded outright and URLs are stripped before the "?" test. The explicit
+# marker branch is kept for any caller that does signal via a comment.
 has_agent_question_comment() {
   local issue_number="$1"
   local repo="$2"
@@ -332,7 +344,17 @@ has_agent_question_comment() {
     map(
       select(
         .created_at >= $since
-        and (.body | test("\\?"))
+        and (
+          # Explicit marker, for any caller that signals a question in a comment.
+          (.body | test("<!-- *agent-question *-->"; "i"))
+          # Otherwise: a human asking something. Bots are excluded outright, and
+          # URLs are stripped before looking for "?" so a query string cannot
+          # read as a question.
+          or (
+            (.user.type // "") != "Bot"
+            and ((.body | gsub("https?://[^\\s)\"]+"; "")) | test("\\?"))
+          )
+        )
       )
     )
     | length > 0
