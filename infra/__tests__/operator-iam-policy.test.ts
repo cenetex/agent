@@ -10,7 +10,9 @@ interface IamPolicyFixture {
 }
 
 function loadFixture(): IamPolicyFixture {
-  const fixturePath = path.join(__dirname, "__fixtures__", "diagnostic-iam-policy.json");
+  // Fixtures live in infra/__fixtures__, a sibling of __tests__ — same as the
+  // stack.ts lookup in operator-role.test.ts.
+  const fixturePath = path.join(__dirname, "..", "__fixtures__", "diagnostic-iam-policy.json");
   const content = fs.readFileSync(fixturePath, "utf-8");
   return JSON.parse(content) as IamPolicyFixture;
 }
