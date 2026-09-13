@@ -18,6 +18,7 @@ merge_hold_minutes_infra: 240
 
     expect(config).toEqual({
       model: 'anthropic/claude-opus-4-6',
+      max_tokens: null,
       dispatch: {
         auto_dispatch: false,
         auto_dispatch_labels: ['ready', 'safe-to-run'],
@@ -48,5 +49,32 @@ merge_hold_minutes: never
     const config = parseAgentConfig('auto_dispatch_labels:');
 
     expect(config.dispatch.auto_dispatch_labels).toEqual(DEFAULT_DISPATCH_CONFIG.auto_dispatch_labels);
+  });
+
+  it('parses max_tokens override', () => {
+    const config = parseAgentConfig(`
+model: anthropic/claude-sonnet-4
+max_tokens: 16384
+`);
+
+    expect(config.max_tokens).toBe(16384);
+  });
+
+  it('rejects non-positive max_tokens', () => {
+    const config = parseAgentConfig(`
+model: anthropic/claude-sonnet-4
+max_tokens: 0
+`);
+
+    expect(config.max_tokens).toBeNull();
+  });
+
+  it('rejects non-integer max_tokens', () => {
+    const config = parseAgentConfig(`
+model: anthropic/claude-sonnet-4
+max_tokens: abc
+`);
+
+    expect(config.max_tokens).toBeNull();
   });
 });

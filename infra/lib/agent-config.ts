@@ -12,6 +12,8 @@ export interface MergeHoldConfig {
 
 export interface AgentConfig {
   model: string | null;
+  /** Per-task override for the max_tokens cap (null = use model default) */
+  max_tokens: number | null;
   dispatch: DispatchConfig;
   mergeHold: MergeHoldConfig;
 }
@@ -48,6 +50,12 @@ function parseNonNegativeInteger(value: string | null, fallback: number): number
   return Number.isInteger(parsed) && parsed >= 0 ? parsed : fallback;
 }
 
+function parsePositiveInteger(value: string | null, fallback: number | null): number | null {
+  if (value === null) return fallback;
+  const parsed = Number.parseInt(value, 10);
+  return Number.isInteger(parsed) && parsed > 0 ? parsed : fallback;
+}
+
 function parseLabelList(value: string | null, fallback: string[]): string[] {
   if (value === null) return fallback;
   return value
@@ -58,9 +66,14 @@ function parseLabelList(value: string | null, fallback: string[]): string[] {
 
 export function parseAgentConfig(content: string): AgentConfig {
   const model = getConfigValue(content, "model");
+  const maxTokens = parsePositiveInteger(
+    getConfigValue(content, "max_tokens"),
+    null
+  );
 
   return {
     model,
+    max_tokens: maxTokens,
     dispatch: {
       auto_dispatch: parseBoolean(
         getConfigValue(content, "auto_dispatch"),

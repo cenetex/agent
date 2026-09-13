@@ -58,6 +58,11 @@ set = { PATH = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin", H
   export CODEX_HOME="${CODEX_HOME:-/home/agent/.codex}"
   mkdir -p "${CODEX_HOME}"
 
+  local max_tokens_line=""
+  if [ -n "${MODEL_MAX_OUTPUT_TOKENS:-}" ]; then
+    max_tokens_line="model_max_output_tokens = ${MODEL_MAX_OUTPUT_TOKENS}"
+  fi
+
   cat > "${CODEX_HOME}/config.toml" <<EOF
 model_provider = "openrouter"
 approval_policy = "never"
@@ -65,6 +70,7 @@ sandbox_mode = "${sandbox_mode}"
 model_context_window = 1048576
 model_reasoning_effort = "none"
 model_reasoning_summary = "none"
+${max_tokens_line}
 
 [model_providers.openrouter]
 name = "OpenRouter"
