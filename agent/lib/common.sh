@@ -190,6 +190,8 @@ categorize_failure() {
     echo "pre_flight_failure|false|Check infrastructure requirements: gh CLI, aws CLI, codex CLI"
   elif echo "$stage" | grep -q "run agent"; then
     echo "execution_failure|false|Check the agent logs and issue requirements"
+  elif echo "$stage" | grep -q "verify outputs"; then
+    echo "verify_outputs_failure|false|The code does not typecheck or lint — fix the error and re-label with ${TRIGGER_LABEL:-agent} to retry"
   else
     echo "unknown|false|Review the error details and GitHub App permissions"
   fi
