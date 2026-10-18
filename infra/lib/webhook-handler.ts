@@ -86,7 +86,7 @@ const GITHUB_APP_ID_PARAM = process.env.GITHUB_APP_ID_PARAM!;
 const GITHUB_APP_PRIVATE_KEY_PARAM = process.env.GITHUB_APP_PRIVATE_KEY_PARAM!;
 const OPENROUTER_API_KEY_PARAM = process.env.OPENROUTER_API_KEY_PARAM!;
 const FRICTIONLESS_PR_FLOW = process.env.FRICTIONLESS_PR_FLOW !== "false";
-const DEFAULT_CODEX_MODEL = "z-ai/glm-5.2";
+const DEFAULT_CODEX_MODEL = "anthropic/claude-haiku-4-5";
 const ARTIFACTS_BUCKET = process.env.ARTIFACTS_BUCKET!;
 const TRIGGER_LABEL = "agent";
 const DIAGNOSE_LABEL = "diagnose";
@@ -358,6 +358,7 @@ async function getRepoModelConfig(
 }
 
 function getDefaultModel(taskMode: "issue" | "pull_request" | "planning" | "diagnostic"): string {
+  if (taskMode === "pull_request") return "anthropic/claude-sonnet-4-6";
   return DEFAULT_CODEX_MODEL;
 }
 

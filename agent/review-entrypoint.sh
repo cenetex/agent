@@ -328,8 +328,8 @@ on_exit() {
     local review_error_details="Error during ${CURRENT_STAGE}. Exit code: ${exit_code}"
 
     if detect_provider_credit_exhaustion "${REVIEW_LOG}"; then
-      error_message="OpenRouter has insufficient provider credits for model z-ai/glm-5.2"
-      review_error_details="OpenRouter provider credits are exhausted for model \`z-ai/glm-5.2\`. Top up OpenRouter credits, then remove \`review:error\` to let the review scheduler retry."
+      error_message="OpenRouter has insufficient provider credits for model ${MODEL:-anthropic/claude-haiku-4-5}"
+      review_error_details="OpenRouter provider credits are exhausted for model \`${MODEL:-anthropic/claude-haiku-4-5}\`. Top up OpenRouter credits, then remove \`review:error\` to let the review scheduler retry."
     fi
 
     update_review_status "failed" "error" "" "$error_message"
@@ -694,7 +694,7 @@ env -i \
   --sandbox read-only \
   --output-schema "${REVIEW_FINDINGS_SCHEMA}" \
   --output-last-message "${REVIEW_FINDINGS_FILE}" \
-  --model "z-ai/glm-5.2" \
+  --model "${MODEL:-anthropic/claude-haiku-4-5}" \
   "${REVIEW_MISSION}" 2>&1 | tee "${REVIEW_LOG}" || CODEX_EXIT_CODE=$?
 
 if [ "${CODEX_EXIT_CODE}" -ne 0 ]; then

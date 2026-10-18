@@ -1458,7 +1458,7 @@ fi
 
 start_virtual_display
 
-MODEL=$(echo "$TASK_PAYLOAD" | jq -r '.model // "z-ai/glm-5.2"')
+MODEL=$(echo "$TASK_PAYLOAD" | jq -r '.model // "anthropic/claude-haiku-4-5"')
 AGENT_EXECUTOR=$(printf "%s" "${AGENT_EXECUTOR}" | tr '[:upper:]' '[:lower:]')
 
 # Implementation workers must run inside the sandboxed Codex executor. They
