@@ -722,6 +722,17 @@ fi
 echo "Parsing review findings from ${REVIEW_FINDINGS_FILE}..."
 FINDINGS_DATA=$(cat "${REVIEW_FINDINGS_FILE}")
 
+# --output-schema is not enforced for every OpenRouter model, and some wrap the
+# JSON in a Markdown fence. Strip a leading/trailing fence before parsing.
+if ! echo "$FINDINGS_DATA" | jq -e . >/dev/null 2>&1; then
+  FINDINGS_DATA=$(echo "$FINDINGS_DATA" | sed -e '1{/^[[:space:]]*```/d;}' -e '${/^[[:space:]]*```/d;}')
+fi
+if ! echo "$FINDINGS_DATA" | jq -e . >/dev/null 2>&1; then
+  echo "ERROR: Review findings in ${REVIEW_FINDINGS_FILE} are not valid JSON (model ${REVIEW_MODEL_ID})" | tee -a "${REVIEW_LOG}"
+  REVIEW_STATUS="error"
+  exit 1
+fi
+
 # Extract decision and key data from the findings
 REVIEW_DECISION=$(echo "$FINDINGS_DATA" | jq -r '.decision // "error"')
 FINDINGS_SUMMARY=$(echo "$FINDINGS_DATA" | jq -r '.summary // "No summary provided"')

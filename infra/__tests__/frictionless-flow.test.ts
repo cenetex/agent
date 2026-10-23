@@ -40,6 +40,14 @@ describe('automated review flow', () => {
     expect(review).toContain('--model "${REVIEW_MODEL_ID}"');
   });
 
+  it('parses review findings a model wrapped in a Markdown fence', () => {
+    // glm-5.2 ignores --output-schema and fences its JSON; jq then aborted the
+    // review under set -e on every run from 2026-09-10 (exit 4).
+    const review = readFileSync(resolve(repoRoot, 'agent/review-entrypoint.sh'), 'utf8');
+    expect(review).toContain("sed -e '1{/^[[:space:]]*```/d;}' -e '${/^[[:space:]]*```/d;}'");
+    expect(review).toContain('are not valid JSON');
+  });
+
   it('builds the review image on every deploy', () => {
     expect(deploy).toContain('-f Dockerfile.review');
     expect(deploy).toContain('${{ env.ECR_REVIEW_REPO }}:latest');
