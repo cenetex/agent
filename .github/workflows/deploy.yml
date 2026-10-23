@@ -12,6 +12,7 @@ concurrency:
 env:
   AWS_REGION: us-east-1
   ECR_REPO: github-agent
+  ECR_REVIEW_REPO: github-agent-review
 
 permissions:
   id-token: write
@@ -85,3 +86,12 @@ jobs:
           docker tag ${{ env.ECR_REPO }}:latest ${{ steps.ecr-login.outputs.registry }}/${{ env.ECR_REPO }}:${{ github.sha }}
           docker push ${{ steps.ecr-login.outputs.registry }}/${{ env.ECR_REPO }}:latest
           docker push ${{ steps.ecr-login.outputs.registry }}/${{ env.ECR_REPO }}:${{ github.sha }}
+
+      - name: Build and push review image
+        run: |
+          cd agent
+          docker build --platform linux/amd64 -f Dockerfile.review -t ${{ env.ECR_REVIEW_REPO }} .
+          docker tag ${{ env.ECR_REVIEW_REPO }}:latest ${{ steps.ecr-login.outputs.registry }}/${{ env.ECR_REVIEW_REPO }}:latest
+          docker tag ${{ env.ECR_REVIEW_REPO }}:latest ${{ steps.ecr-login.outputs.registry }}/${{ env.ECR_REVIEW_REPO }}:${{ github.sha }}
+          docker push ${{ steps.ecr-login.outputs.registry }}/${{ env.ECR_REVIEW_REPO }}:latest
+          docker push ${{ steps.ecr-login.outputs.registry }}/${{ env.ECR_REVIEW_REPO }}:${{ github.sha }}

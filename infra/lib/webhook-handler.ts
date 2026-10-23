@@ -103,7 +103,7 @@ const REVIEW_SKIPPED_NO_CREDITS_LABEL = "review:skipped-no-credits";
 // Review is a read-only analysis pass, so it does not need the implementation
 // model. Haiku costs 4 credits against glm-5.2's 12, which is three times as
 // many reviews for the same balance. Override with REVIEW_MODEL.
-const REVIEW_MODEL = process.env.REVIEW_MODEL || "anthropic/claude-haiku-4-5";
+const REVIEW_MODEL = process.env.REVIEW_MODEL || "anthropic/claude-haiku-5.5";
 const REVIEW_LABEL_DEFINITIONS = [
   {
     name: REVIEW_APPROVED_LABEL,

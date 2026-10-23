@@ -13,6 +13,8 @@ set -Eeuo pipefail
 : "${PR_NUMBER:?Missing PR_NUMBER}"
 : "${REVIEW_CRITERIA:?Missing REVIEW_CRITERIA}"
 : "${AWS_REGION:=us-east-1}"
+# The Lambda picks the review model (REVIEW_MODEL) and meters credits for it.
+REVIEW_MODEL_ID="${MODEL:-z-ai/glm-5.2}"
 
 # --- Fetch and parse review payload ---
 if [ -n "${REVIEW_PAYLOAD_S3_KEY:-}" ]; then
@@ -328,8 +330,8 @@ on_exit() {
     local review_error_details="Error during ${CURRENT_STAGE}. Exit code: ${exit_code}"
 
     if detect_provider_credit_exhaustion "${REVIEW_LOG}"; then
-      error_message="OpenRouter has insufficient provider credits for model z-ai/glm-5.2"
-      review_error_details="OpenRouter provider credits are exhausted for model \`z-ai/glm-5.2\`. Top up OpenRouter credits, then remove \`review:error\` to let the review scheduler retry."
+      error_message="OpenRouter has insufficient provider credits for model ${REVIEW_MODEL_ID}"
+      review_error_details="OpenRouter provider credits are exhausted for model \`${REVIEW_MODEL_ID}\`. Top up OpenRouter credits, then remove \`review:error\` to let the review scheduler retry."
     fi
 
     update_review_status "failed" "error" "" "$error_message"
@@ -657,7 +659,7 @@ You are in the PR head worktree (${HEAD_SHA}). The base version is available at 
 Begin your review now."
 
 # --- Run Codex with OpenRouter API ---
-echo "Running review analysis with Codex on GLM 5.2..."
+echo "Running review analysis with Codex on ${REVIEW_MODEL_ID}..."
 configure_codex_openrouter review
 start_virtual_display
 
@@ -694,7 +696,7 @@ env -i \
   --sandbox read-only \
   --output-schema "${REVIEW_FINDINGS_SCHEMA}" \
   --output-last-message "${REVIEW_FINDINGS_FILE}" \
-  --model "z-ai/glm-5.2" \
+  --model "${REVIEW_MODEL_ID}" \
   "${REVIEW_MISSION}" 2>&1 | tee "${REVIEW_LOG}" || CODEX_EXIT_CODE=$?
 
 if [ "${CODEX_EXIT_CODE}" -ne 0 ]; then

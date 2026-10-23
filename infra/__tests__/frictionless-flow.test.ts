@@ -31,7 +31,18 @@ describe('automated review flow', () => {
   });
 
   it('uses a cheaper model for review than for implementation', () => {
-    expect(webhook).toContain('const REVIEW_MODEL = process.env.REVIEW_MODEL || "anthropic/claude-haiku-4-5"');
+    expect(webhook).toContain('const REVIEW_MODEL = process.env.REVIEW_MODEL || "anthropic/claude-haiku-5.5"');
+  });
+
+  it('runs the review on the model the Lambda metered', () => {
+    const review = readFileSync(resolve(repoRoot, 'agent/review-entrypoint.sh'), 'utf8');
+    expect(review).toContain('REVIEW_MODEL_ID="${MODEL:-z-ai/glm-5.2}"');
+    expect(review).toContain('--model "${REVIEW_MODEL_ID}"');
+  });
+
+  it('builds the review image on every deploy', () => {
+    expect(deploy).toContain('-f Dockerfile.review');
+    expect(deploy).toContain('${{ env.ECR_REVIEW_REPO }}:latest');
   });
 
   it('reviews human-authored PRs, not only bot PRs', () => {
