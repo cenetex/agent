@@ -49,12 +49,11 @@ The GitHub Agent executes untrusted code in isolated AWS Fargate tasks within a 
 
 ### Network Isolation
 
-**Private Subnet Execution:**
-- Agent tasks run in private subnets by default with no public IP assigned.
-- Outbound internet access goes through a NAT gateway.
-- All inbound access is disabled.
+**Subnet Execution:**
+- Agent tasks run in public subnets by default (`usePublicSubnets` in `infra/cdk.json`) with a public IP for outbound traffic. This avoids an always-on NAT gateway and interface endpoints (about $93 a month).
+- All inbound access is disabled: the task security group has no ingress rules.
 - Outbound access is controlled through explicit security group rules.
-- Public subnet execution remains available only as an explicit cost-saving CDK context override: `-c usePublicSubnets=true`.
+- Private subnet execution behind a NAT gateway is available with `-c usePublicSubnets=false`.
 
 **Explicit Egress Controls:**
 - HTTPS (port 443): GitHub API, model inference, and AWS service APIs
