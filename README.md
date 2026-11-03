@@ -82,8 +82,10 @@ workflow runs on every push to `main` and can also be started manually. It
 validates the project, deploys the CDK stack, and publishes the latest agent
 image.
 
-The CDK stack uses private subnets by default. For the lower-cost public-subnet
-mode, pass `-c usePublicSubnets=true` to CDK.
+The CDK stack runs agent tasks in public subnets (`usePublicSubnets` in
+`infra/cdk.json`). This avoids a NAT gateway and four interface endpoints,
+which cost about $93 a month even when no task runs. Tasks still have no
+inbound access. To use private subnets, pass `-c usePublicSubnets=false`.
 
 ## Per-repository configuration
 
