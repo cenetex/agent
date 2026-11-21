@@ -51,7 +51,8 @@ WORKDIR /work
 COPY lib/common.sh /lib/common.sh
 COPY lib/orchestrate-lint.sh /lib/orchestrate-lint.sh
 COPY lib/lint-loop.sh /lib/lint-loop.sh
-RUN chmod +x /lib/common.sh /lib/orchestrate-lint.sh /lib/lint-loop.sh
+COPY lib/verify-outputs.sh /lib/verify-outputs.sh
+RUN chmod +x /lib/common.sh /lib/orchestrate-lint.sh /lib/lint-loop.sh /lib/verify-outputs.sh
 
 COPY entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh

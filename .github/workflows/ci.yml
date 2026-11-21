@@ -48,6 +48,7 @@ jobs:
           bash -n lib/common.sh
           bash -n lib/orchestrate-lint.sh
           bash -n lib/lint-loop.sh
+          bash -n lib/verify-outputs.sh
 
       - name: Check pinned Codex sandbox on Linux
         run: |

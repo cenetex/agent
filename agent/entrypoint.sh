@@ -3,6 +3,8 @@ set -Eeuo pipefail
 
 # Source common functions
 . /lib/common.sh
+# Source verify-outputs shippability gate
+. /lib/verify-outputs.sh
 
 # --- Required env vars (passed by Lambda via Fargate overrides) ---
 : "${GITHUB_TOKEN:?Missing GITHUB_TOKEN}"
@@ -24,6 +26,7 @@ set -Eeuo pipefail
 : "${EXECUTOR_HTTP_TIMEOUT_SECONDS:=300}"
 : "${EXECUTOR_MAX_TOOL_OUTPUT_CHARS:=12000}"
 : "${SELF_MERGE_ENABLED:=true}"
+: "${VERIFY_OUTPUTS_RUN_TESTS:=0}"  # Optional: also run test scripts pre-push (expensive)
 
 export EXECUTOR_MAX_RESPONSE_TOKENS
 export EXECUTOR_HTTP_TIMEOUT_SECONDS
@@ -78,6 +81,7 @@ AGENT_LOG="/tmp/agent-output.log"
 PUSHED_HEAD_SHA=""
 CI_CONCLUSION=""
 VERIFY_PR_URL=""
+VERIFY_OUTPUTS_FAILURE=""
 SIGNAL_LABELS=(
   "${SIGNAL_LABEL_RUNNING}"
   "${SIGNAL_LABEL_WAITING}"
@@ -453,6 +457,16 @@ ${CRITERIA_STATUS_COMMENT}"
     "clone repository"|"fetch issue context")
       error_message="Repository access failed"
       ;;
+    "verify outputs"*|"verify outputs (pre-push)")
+      # The pre-push shippability gate caught a compiler/lint failure before the
+      # branch was pushed.  Surface the offending line/error from the type-checker
+      # so triage is not a guessing game (issue #422).
+      if [ -n "${VERIFY_OUTPUTS_FAILURE}" ]; then
+        error_message="${VERIFY_OUTPUTS_FAILURE}"
+      else
+        error_message="Pre-push shippability gate failed: code does not typecheck or lint."
+      fi
+      ;;
   esac
 
   if detect_provider_credit_exhaustion "${AGENT_LOG}"; then
@@ -537,6 +551,7 @@ ${summary}
 **Retryable:** $([ "$is_retryable" = "true" ] && echo "Yes ✅" || echo "No ❌")
 
 **Suggested Action:** ${suggested_action}
+$([ -n "${VERIFY_OUTPUTS_FAILURE}" ] && printf '\n\n### Verify-Outputs (pre-push shippability gate)\n\nThe agent did NOT push the branch or open a PR because the code does not typecheck or lint:\n\n%s' "${VERIFY_OUTPUTS_FAILURE}")
 
 ### Artifacts & Logs
 - **Task ID:** \`${TASK_ID}\`
@@ -1836,6 +1851,24 @@ while [ -z "${RUN_STATUS}" ] && [ "${ATTEMPT}" -lt "${MAX_ATTEMPTS}" ]; do
       echo "ERROR: Planning result artifact is invalid" >&2
       RUN_STATUS="failed"
     fi
+    break
+  fi
+
+  # --- Pre-push shippability gate ---
+  # Run tsc --noEmit / npm run lint / cargo check / py_compile *before* the
+  # branch is pushed and the PR is opened.  On failure do NOT push — set
+  # RUN_STATUS="failed" and break so the on_exit handler labels the issue
+  # `agent:failed` with the offending compiler/lint output.  This catches the
+  # class of errors that should never reach a public PR (syntax errors, wrong-
+  # package imports, missing symbols).  See issue #422.
+  CURRENT_STAGE="verify outputs (pre-push)"
+  if ! verify_outputs_gate; then
+    if [ -z "${VERIFY_OUTPUTS_FAILURE}" ]; then
+      VERIFY_OUTPUTS_FAILURE="verify-outputs gate reported a non-zero exit but produced no message."
+    fi
+    echo "ERROR: Pre-push shippability gate failed — NOT pushing the branch or opening a PR." >&2
+    echo "${VERIFY_OUTPUTS_FAILURE}" >&2
+    RUN_STATUS="failed"
     break
   fi
 
